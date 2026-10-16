@@ -1,1 +1,1 @@
-"""OS observations, intentionally separate from detection rules."""
+"""Collectors: standardized host facts (processes, sockets, filesystem), separate from rules."""

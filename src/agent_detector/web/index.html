@@ -8,37 +8,54 @@ button,select{font:inherit;border:1px solid #cad5e2;background:white;padding:9px
 button.primary{background:#1e529f;color:white;border-color:#1e529f}button:disabled{opacity:.6;cursor:wait}
 .toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px}.stats{display:flex;gap:24px;margin-top:12px;color:#617085}
 table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;border-bottom:1px solid #edf0f4;padding:10px}
-th{color:#617085;font-weight:600}details{max-width:360px}pre{white-space:pre-wrap;word-break:break-all;font-size:12px}
-#message{min-height:20px;color:#1e529f}.tag{background:#edf4ff;border-radius:5px;padding:3px 7px}
+th{color:#617085;font-weight:600}details{max-width:420px}pre{white-space:pre-wrap;word-break:break-all;font-size:12px}
+#message{min-height:20px;color:#1e529f}.tag{background:#edf4ff;border-radius:5px;padding:3px 7px;display:inline-block;margin:1px 2px 1px 0}
+.state-INSTALLED{background:#e8f4e8;color:#256029}.state-CONFIGURED{background:#fff3d6;color:#7a5c00}
+.state-RUNNING{background:#e5efff;color:#1e529f}.state-EXECUTION_CONFIRMED{background:#e5f9ec;color:#0f6b3c}
+ul.evidence{margin:4px 0;padding-left:18px;font-size:13px}
 </style></head><body>
 <h1>Agent Detector <small style="font-size:14px;color:#617085">V0.1</small></h1>
-<p class="muted">Linux 本地 AI Agent / MCP / Model Runtime 资产发现 · SQLite 证据留存</p>
+<p class="muted">本机 AI Agent / MCP / Model Runtime 资产发现 · SQLite 证据留存</p>
 <section><div class="toolbar">
 <button class="primary" id="passive">运行被动扫描</button>
 <button id="active">运行主动 + 被动扫描</button>
 <span class="muted">主动模式仅探测本机监听的 HTTP 端口</span></div>
 <p id="message" role="status"></p><div class="stats"><span id="summary">尚未加载扫描结果</span></div></section>
-<section><div class="toolbar"><h2 style="flex:1">发现的资产</h2><label for="scan">扫描批次：</label><select id="scan"></select></div>
-<div style="overflow-x:auto"><table><thead><tr><th>组件</th><th>类别</th><th>状态</th><th>版本</th><th>PID / 端口</th><th>置信度</th><th>证据</th></tr></thead>
+<section><div class="toolbar"><h2 style="flex:1">资产</h2><label for="scan">扫描批次：</label><select id="scan"></select></div>
+<div style="overflow-x:auto"><table><thead><tr><th>资产</th><th>类型</th><th>状态</th><th>版本</th><th>置信度</th><th>PID / 端口</th><th>证据</th></tr></thead>
 <tbody id="items"><tr><td colspan="7">暂无结果</td></tr></tbody></table></div></section>
 <script>
 const el=id=>document.getElementById(id);
 async function request(path,opts){const r=await fetch(path,opts);if(!r.ok)throw new Error(await r.text());return r.json()}
 function cell(t){const e=document.createElement('td');e.textContent=t??'—';return e}
+function statesCell(states){const td=document.createElement('td');for(const s of states){const b=document.createElement('span');b.className='tag state-'+s;b.textContent=s;td.append(b)}if(!states.length)td.textContent='—';return td}
+function versionCell(x){const td=cell(x.version==='UNKNOWN'?'未知':x.version);if(x.version!=='UNKNOWN'&&x.version_source){const s=document.createElement('div');s.className='muted';s.style.fontSize='12px';s.textContent='来源：'+x.version_source;td.append(s)}return td}
+function evidenceCell(x,scanId){const td=document.createElement('td'),d=document.createElement('details'),sum=document.createElement('summary');
+sum.textContent='查看证据';d.append(sum);d.ontoggle=()=>{if(d.open)loadEvidence(x.asset_id,scanId,d)};td.append(d);return td}
+async function loadEvidence(assetId,scanId,container){
+ if(container.dataset.loaded)return;container.dataset.loaded='1';
+ const q=scanId?('?scan_id='+scanId):'';
+ let rows;try{rows=await request('/api/assets/'+encodeURIComponent(assetId)+'/evidence'+q)}
+ catch(e){const p=document.createElement('p');p.className='muted';p.textContent='暂无证据记录';container.append(p);return}
+ const ul=document.createElement('ul');ul.className='evidence';
+ for(const ev of rows){const li=document.createElement('li');li.textContent='['+ev.kind+'] '+ev.summary;ul.append(li)}
+ const pre=document.createElement('pre');pre.textContent=JSON.stringify(rows,null,2);container.append(ul,pre)}
 async function load(){
  const scans=await request('/api/scans');const prev=el('scan').value;
- el('scan').replaceChildren(...scans.map(s=>{const o=document.createElement('option');o.value=s.id;o.textContent='#'+s.id+' · '+s.mode+' · '+s.started_at.slice(0,19);return o}));
+ el('scan').replaceChildren(...scans.map(s=>{const o=document.createElement('option');o.value=s.id;o.textContent='#'+s.id+' · '+s.mode+' · '+s.status+' · '+s.started_at.slice(0,19);return o}));
  if(scans.some(s=>String(s.id)===prev))el('scan').value=prev;
  const selected=scans.find(s=>String(s.id)===el('scan').value);
- el('summary').textContent=selected?'扫描 '+selected.id+'：'+selected.observation_count+' 条观测 / '+selected.finding_count+' 个发现':'暂无扫描';
- const rows=await request('/api/findings'+(selected?'?scan_id='+selected.id:'?scan_id=-1'));el('items').replaceChildren();
- if(!rows.length){const tr=document.createElement('tr');const td=cell('本批次暂无发现');td.colSpan=7;tr.append(td);el('items').append(tr)}
- for(const x of rows){const tr=document.createElement('tr');for(const value of [x.component,x.category,x.state,x.version,(x.pid??'—')+' / '+(x.port??'—'),Math.round(x.confidence*100)+'%'])tr.append(cell(value));
- const td=document.createElement('td'),details=document.createElement('details'),sum=document.createElement('summary'),pre=document.createElement('pre');
- sum.textContent='查看证据';pre.textContent=JSON.stringify(x.evidence,null,2);details.append(sum,pre);td.append(details);tr.append(td);el('items').append(tr)}
-}
+ el('summary').textContent=selected?('扫描 '+selected.id+'：'+((selected.stats.observations&&selected.stats.observations.processes)??'?')+' 进程 / '+((selected.stats.assets)??'?')+' 资产'):'暂无扫描';
+ const rows=selected?await request('/api/assets?scan_id='+selected.id):[];el('items').replaceChildren();
+ if(!rows.length){const tr=document.createElement('tr');const td=cell('本批次暂无资产');td.colSpan=7;tr.append(td);el('items').append(tr)}
+ for(const x of rows){const tr=document.createElement('tr');
+ tr.append(cell(x.name),cell(x.asset_type),statesCell(x.states),versionCell(x),
+  cell(Math.round(x.confidence*100)+'%'),
+  cell((x.running_pids.length?x.running_pids.join(','):'—')+' / '+(x.listening_ports.length?x.listening_ports.join(','):'—')),
+  evidenceCell(x,selected?selected.id:null));
+  el('items').append(tr)}}
 async function scan(active){el('passive').disabled=el('active').disabled=true;el('message').textContent='正在扫描…';
- try{const r=await request('/api/scans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active})});el('scan').value='';await load();el('message').textContent='扫描 #'+r.scan_id+' 完成'}
+ try{const r=await request('/api/scans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active})});el('scan').value='';await load();el('message').textContent='扫描 #'+r.scan_id+' 完成，发现 '+r.assets+' 个资产'}
  catch(e){el('message').textContent='扫描失败：'+e.message}
  finally{el('passive').disabled=el('active').disabled=false}}
 el('passive').onclick=()=>scan(false);el('active').onclick=()=>scan(true);

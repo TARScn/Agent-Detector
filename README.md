@@ -1,19 +1,22 @@
 # Agent Detector V0.1
 
-面向 Linux 的本机 AI Agent 资产发现原型。Python + FastAPI + SQLite + 原生 Web UI。
+本机 AI Agent 资产发现工具。Python + FastAPI + SQLAlchemy/SQLite + 原生 Web UI。
+产品定位面向 Linux 部署，采集与检测层跨平台（Windows 可用于开发验证）。
 
 ## 功能
-- **被动扫描**：通过 psutil 采集进程、命令行与本机 TCP LISTEN 端口；按可扩展规则识别 Agent 框架、开发工具、模型服务和 MCP 组件。
-- **运行态证据**：进程正在运行、服务正在监听；不等同于已验证的模型 API 调用行为。
+- **被动扫描**：通过 psutil 采集进程、命令行与本机 TCP LISTEN 端口；由注册式检测器识别 Agent 客户端、框架、模型服务和 MCP 组件。
+- **专属检测适配器**：Claude Code 有独立检测器，区分安装（npm / 原生安装器 / `~/.claude`）、配置（`~/.claude.json` 键名、`settings.json`）与运行（进程）三类证据，并排除同名但不同产品的 Claude Desktop 进程。
+- **资产模型**：稳定资产 ID（与 PID 无关，重扫不重复建资产）、多状态共存（INSTALLED / CONFIGURED / RUNNING）、独立置信度。
+- **版本带来源**：优先包元数据（npm `package.json`），其次安装器元数据；无可靠来源输出 `UNKNOWN`，不做猜测。
 - **主动探测**：仅在手动启用时，对本机已观测的监听端口发送少量 HTTP GET 请求；不执行漏洞利用、不访问远程地址。
-- **可追溯结果**：SQLite 保存扫描批次、组件、证据、置信度与版本来源；无法确认版本时显示未知。
-- **Web 页面**：启动扫描、查看资产、扫描批次及证据。
+- **可追溯结果**：SQLite 保存扫描任务、资产、快照与证据；文件内容与凭证原文不入库，命令行中的密钥自动脱敏。
+- **CLI 与 Web 共用同一引擎**：`agent-detector scan` / `agent-detector assets list`。
 
-## Linux 快速启动
+## 快速启动
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[test]"
 uvicorn agent_detector.web.app:app --host 127.0.0.1 --port 8000
 ```
@@ -21,19 +24,43 @@ uvicorn agent_detector.web.app:app --host 127.0.0.1 --port 8000
 访问 http://127.0.0.1:8000 。不要将无鉴权服务直接暴露到公网。
 
 ```bash
+# CLI 扫描（与 Web 共用后端引擎）
+agent-detector scan
+agent-detector scan --active --json
+agent-detector assets list
+
+# REST API
 curl -X POST http://127.0.0.1:8000/api/scans -H 'Content-Type: application/json' -d '{"active": false}'
-curl -X POST http://127.0.0.1:8000/api/scans -H 'Content-Type: application/json' -d '{"active": true}'
-curl http://127.0.0.1:8000/api/findings
+curl http://127.0.0.1:8000/api/assets
+curl "http://127.0.0.1:8000/api/assets/<asset_id>/evidence"
+
 pytest -q
 ```
 
 可用环境变量：`AGENT_DETECTOR_DB` (默认 `./data/agent_detector.sqlite3`)、`AGENT_DETECTOR_MAX_PROBES` (默认 20)。
 
+## 架构（src/agent_detector/）
+
+```
+domain/        资产/证据/版本领域模型与枚举
+collectors/    进程、端口、文件系统采集（跨平台）
+detectors/     检测器注册与实现（signatures 通用规则 + agent_clients 专属适配器）
+recognition/   稳定资产 ID 生成
+application/   扫描编排（采集 → 检测 → 合并 → 持久化，检测器异常隔离）
+persistence/   SQLAlchemy 实体 + Repository（scan_tasks / assets / asset_snapshots / evidence）
+probes/        本机 HTTP 主动指纹
+cli/           命令行入口
+web/           FastAPI 路由 + 单页 UI
+common/        配置与脱敏工具
+```
+
+新增检测目标：在 `detectors/` 下实现 `detect(facts) -> list[DetectedAsset]` 并注册到 `detectors/__init__.py::build_detectors()`，无需修改扫描服务。
+
 ## 范围与安全限制
-- 仅支持 Linux；其他用户进程可能需要更高系统权限，建议遵循最小权限。
+- 其他用户进程可能需要更高系统权限，建议遵循最小权限。
 - V0.1 不提供网络抓包、外部流量嗅探、POC 验证和全网扫描。
-- 版本信息如存在，可能是未经验证的命令行声明；`version_source` 指明来源。
-- 规则匹配会有误报，尤其是包含可疑词汇的命令行参数；需要结合证据复核。
+- 版本信息如存在，均标注来源（`version_source`）；`process-claim` 类来源为未经验证的命令行声明。
+- 不执行被发现的 Agent、MCP stdio 启动命令或 Skill。
 - 默认仅建议本地使用；正式部署需要认证、授权、审计和访问保护。
 
-详见 [docs/architecture.md](docs/architecture.md)。
+详见 [docs/architecture.md](docs/architecture.md) 与 `J:\myNotes\plans\agent探测实现.md`（产品实现计划）。
