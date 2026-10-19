@@ -1,0 +1,107 @@
+# =============================================================================
+# Claude Code（Anthropic 官方 CLI Agent 客户端）检测规则
+# =============================================================================
+# 本文件是纯声明式数据：引擎按这里的描述去探测，不在代码里写死任何产品特征。
+# 修改本文件后无需改代码，下一次扫描即生效。
+#
+# 证据与隐私约定：
+#   * 所有探测均为只读 —— 不执行被发现的程序，不读取文件内容；
+#   * JSON 文件只记录"顶层键名"，永不记录值（凭证、项目列表不入库）；
+#   * 进程命令行会经脱敏（token 类字符串打码）后截断存证。
+#
+# '~' 表示被扫描用户的 home 目录；confidence 为该证据的可信度（0~1）。
+#
+# revision：本规则文件的修订号。调整特征时递增，便于追溯证据由哪版规则产生。
+# =============================================================================
+kind: client_rule
+id: claude-code            # 资产 ID 的一部分；同 id 规则可被外部规则目录覆盖
+name: Claude Code
+asset_type: AGENT_CLIENT   # 文档 §2.1 资产分类
+revision: 2
+
+# -----------------------------------------------------------------------------
+# 安装证据（INSTALLED）—— 存在以下任意一项即认为安装过
+# -----------------------------------------------------------------------------
+install:
+  # npm 全局包：包名会拼到各已知 npm 全局根目录下找 package.json。
+  # package.json 的 version 字段是最可靠的版本来源。
+  npm_packages:
+    - package: '@anthropic-ai/claude-code'
+      confidence: 0.9
+
+  # 原生安装器的二进制文件（Linux: claude；Windows: claude.exe）
+  paths:
+    - path: '~/.local/bin/claude'
+      confidence: 0.85
+    - path: '~/.local/bin/claude.exe'
+      confidence: 0.85
+
+  # 安装器创建的数据目录
+  dirs:
+    - path: '~/.claude'
+      confidence: 0.8
+
+# -----------------------------------------------------------------------------
+# 版本来源 —— 按优先级自上而下尝试，命中即停；全部失败输出 UNKNOWN（禁止猜测）
+# -----------------------------------------------------------------------------
+version:
+  # 1) npm 包的 package.json（已安装包的实际版本）
+  - from: npm_package_json
+    source: package-metadata
+    confidence: 0.9
+
+  # 2) 原生安装器的版本目录：目录下以语义化版本命名的条目取最新者。
+  #    Windows/Linux 安装器装完后会清空 downloads，正式版本在 .local/share 下。
+  - from: semver_dir_entries
+    dirs:
+      - '~/.claude'
+      - '~/.claude/versions'
+      - '~/.claude/downloads'
+      - '~/.local/share/claude/versions'
+    source: installer-metadata
+    confidence: 0.8
+
+# -----------------------------------------------------------------------------
+# 配置证据（CONFIGURED）—— 只看键名/存在性，不读值
+# -----------------------------------------------------------------------------
+config:
+  # ~/.claude.json 出现这些顶层键说明用户真正配置/使用过；
+  # 仅 userID 等安装引导键不算（见下：只有列出的键才计为 CONFIGURED 证据）。
+  json_files:
+    - path: '~/.claude.json'
+      keys_any: [projects, mcpServers]
+      confidence: 0.9
+
+  existing_files:
+    - path: '~/.claude/settings.json'
+      confidence: 0.8
+
+# -----------------------------------------------------------------------------
+# 运行证据（RUNNING）—— 进程匹配。刻意收窄：裸 "claude" 单词不作数（grep claude 不命中）
+# -----------------------------------------------------------------------------
+process:
+  # 可执行文件名（含路径末段）精确匹配
+  executable_names: [claude, claude.exe, claude.cmd, claude.ps1]
+
+  # 命令行中出现的包路径片段
+  cmdline_tokens: ['@anthropic-ai/claude-code']
+
+  # 排除指纹：命中任意一条则直接跳过（在正向匹配之前执行）。
+  # Claude Desktop 桌面版（Electron 应用）与 Claude Code 是不同产品，
+  # 但进程同名 claude.exe —— 按其安装路径 / 用户数据目录 / Electron 进程特征排除。
+  exclude_patterns:
+    - '(?i)windowsapps[/\\]claude_'                                # Windows 商店版 Desktop
+    - '(?i)appdata[/\\]roaming[/\\]claude(?![\w.\-])'             # Desktop 用户数据目录
+    - '--type=(?:renderer|gpu-process|utility|crashpad-handler|zygote)'  # Electron 子进程
+
+  confidence: 0.85
+
+# -----------------------------------------------------------------------------
+# 置信度合成：base + 各状态权重之和，封顶 cap。状态可并存（文档 §2.3）
+# -----------------------------------------------------------------------------
+confidence:
+  base: 0.5
+  installed: 0.2
+  configured: 0.2
+  running: 0.25
+  cap: 0.95

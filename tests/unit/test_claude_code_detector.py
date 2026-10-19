@@ -1,10 +1,15 @@
-"""Claude Code detector tests against a fabricated home directory."""
+"""Claude Code detection tests: rule loaded from the packaged YAML, run against
+a fabricated home directory. Proves the YAML rule drives the engine."""
 import json
-from pathlib import Path
 
-from agent_detector.detectors.agent_clients.claude_code import ClaudeCodeDetector
+from agent_detector.fingerprints.engine import ClientRuleDetector
+from agent_detector.fingerprints.loader import load_rules
 from agent_detector.domain.enums import AssetState, AssetType, VersionSource
 from agent_detector.domain.models import HostFacts, ProcessInfo
+
+
+def claude_rule():
+    return next(r for r in load_rules().client_rules if r.id == "claude-code")
 
 
 def make_facts(processes=(), hostname="host-a"):
@@ -42,7 +47,8 @@ def build_home(tmp_path, npm=None, native=False, claude_dir=False,
 
 def detector_for(home):
     # Explicit npm root + no lookup keeps tests away from the real machine state.
-    return ClaudeCodeDetector(home=home, npm_global_root=home / "npm-root" / "node_modules",
+    return ClientRuleDetector(claude_rule(), home=home,
+                              npm_global_root=home / "npm-root" / "node_modules",
                               run_npm_lookup=False)
 
 
@@ -170,3 +176,23 @@ def test_config_file_contents_never_stored(tmp_path):
     keys_evidence = [e for e in asset.evidence if e.kind.value == "file_content_keys"]
     assert keys_evidence and set(keys_evidence[0].detail["keys"]) == {"projects",
                                                                       "mcpServers"}
+
+
+def test_rule_data_drives_matching(tmp_path):
+    """Editing the rule (not code) must change behavior — the point of YAML rules."""
+    home = build_home(tmp_path, native=True)
+    modified = claude_rule().model_copy(deep=True)
+    modified.name = "Renamed Product"
+    modified.install.paths = []           # binary no longer counts as install
+    modified.install.dirs = []
+    modified.process.executable_names = ["totally-not-claude"]
+    detector = ClientRuleDetector(modified, home=home, run_npm_lookup=False)
+    # The real claude.exe no longer matches under the edited rule…
+    assert detector.detect(
+        make_facts([ProcessInfo(20, "claude.exe", ("claude", "--help"))])) == []
+    # …while the name the rule now declares does.
+    (asset,) = detector.detect(
+        make_facts([ProcessInfo(21, "totally-not-claude", ("totally-not-claude",))]))
+    assert AssetState.INSTALLED not in asset.states   # install probes removed by rule
+    assert asset.running_pids == [21]                 # match follows the new exe name
+    assert asset.name == "Renamed Product"

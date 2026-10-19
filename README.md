@@ -4,8 +4,9 @@
 产品定位面向 Linux 部署，采集与检测层跨平台（Windows 可用于开发验证）。
 
 ## 功能
-- **被动扫描**：通过 psutil 采集进程、命令行与本机 TCP LISTEN 端口；由注册式检测器识别 Agent 客户端、框架、模型服务和 MCP 组件。
-- **专属检测适配器**：Claude Code 有独立检测器，区分安装（npm / 原生安装器 / `~/.claude`）、配置（`~/.claude.json` 键名、`settings.json`）与运行（进程）三类证据，并排除同名但不同产品的 Claude Desktop 进程。
+- **被动扫描**：通过 psutil 采集进程、命令行与本机 TCP LISTEN 端口；由规则引擎识别 Agent 客户端、框架、模型服务和 MCP 组件。
+- **声明式规则**：检测特征全部在 YAML（`fingerprints/rules/`），新增检测目标只写规则不改代码；支持 `AGENT_DETECTOR_RULES_DIR` 外部规则目录按 id 覆盖内置规则。规范见 [docs/rules.md](docs/rules.md)。
+- **Claude Code 专属规则**：区分安装（npm / 原生安装器 / `~/.claude`）、配置（`~/.claude.json` 键名、`settings.json`）与运行（进程）三类证据，并排除同名但不同产品的 Claude Desktop 进程。
 - **资产模型**：稳定资产 ID（与 PID 无关，重扫不重复建资产）、多状态共存（INSTALLED / CONFIGURED / RUNNING）、独立置信度。
 - **版本带来源**：优先包元数据（npm `package.json`），其次安装器元数据；无可靠来源输出 `UNKNOWN`，不做猜测。
 - **主动探测**：仅在手动启用时，对本机已观测的监听端口发送少量 HTTP GET 请求；不执行漏洞利用、不访问远程地址。
@@ -37,14 +38,15 @@ curl "http://127.0.0.1:8000/api/assets/<asset_id>/evidence"
 pytest -q
 ```
 
-可用环境变量：`AGENT_DETECTOR_DB` (默认 `./data/agent_detector.sqlite3`)、`AGENT_DETECTOR_MAX_PROBES` (默认 20)。
+可用环境变量：`AGENT_DETECTOR_DB` (默认 `./data/agent_detector.sqlite3`)、`AGENT_DETECTOR_MAX_PROBES` (默认 20)、`AGENT_DETECTOR_RULES_DIR` (外部规则目录，按 id 覆盖内置规则)。
 
 ## 架构（src/agent_detector/）
 
 ```
 domain/        资产/证据/版本领域模型与枚举
 collectors/    进程、端口、文件系统采集（跨平台）
-detectors/     检测器注册与实现（signatures 通用规则 + agent_clients 专属适配器）
+fingerprints/  声明式检测规则（rules/*.yaml）+ 加载器 + 规则解释引擎
+detectors/     Detector 协议；build_detectors() 从 YAML 规则装配检测器
 recognition/   稳定资产 ID 生成
 application/   扫描编排（采集 → 检测 → 合并 → 持久化，检测器异常隔离）
 persistence/   SQLAlchemy 实体 + Repository（scan_tasks / assets / asset_snapshots / evidence）
@@ -54,7 +56,9 @@ web/           FastAPI 路由 + 单页 UI
 common/        配置与脱敏工具
 ```
 
-新增检测目标：在 `detectors/` 下实现 `detect(facts) -> list[DetectedAsset]` 并注册到 `detectors/__init__.py::build_detectors()`，无需修改扫描服务。
+新增检测目标：在 `fingerprints/rules/` 添加一条 client_rule YAML（或往 signatures.yaml 加正则），
+下次扫描即生效，无需改代码；也可用 `AGENT_DETECTOR_RULES_DIR` 指向外部规则目录覆盖内置规则。
+规范与字段说明见 [docs/rules.md](docs/rules.md)。
 
 ## 范围与安全限制
 - 其他用户进程可能需要更高系统权限，建议遵循最小权限。

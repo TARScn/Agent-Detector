@@ -1,30 +1,49 @@
 # V0.1 Architecture / 验收范围
 
 ## 数据链路
-Linux psutil process+listen snapshot -> observations -> signature detector -> (opt-in bounded localhost HTTP probe) -> findings -> SQLite -> FastAPI -> Web.
 
-## 数据定义
-- `observations`：一次采集中的进程或监听地址；网络监听不表示该进程已经发生模型 API 交互。
-- `findings`：匹配规则的组件、运行状态、证据 JSON、confidence、pid、port、可选 version。
-- `scans`：每一次扫描的时间、模式、观测条数、发现数量。
-- 版本来源 `version_source` 为 process-claim 时仅表示从进程命令行提取；不要声称经过包管理器验证。
+```
+collectors（进程/端口/文件系统，跨平台只读采集）
+  → HostFacts
+  → detectors（从 fingerprints/rules/*.yaml 装配的规则解释器）
+  → DetectedAsset（状态集 + 置信度 + 带来源版本 + 证据）
+  → merge（按稳定 asset_id 合并）
+  → SQLite（scan_tasks / assets / asset_snapshots / evidence，WAL）
+  → FastAPI（/api/scans /api/assets /api/assets/{id}/evidence）+ CLI
+```
+
+检测规则与检测代码分离：产品特征全部在 YAML（见 [rules.md](rules.md)），
+引擎只实现探测原语（文件元数据、JSON 键名窥视、npm 根发现、进程匹配）。
+单个检测器异常被扫描服务隔离记录，不影响其他检测器与扫描任务。
+
+## 核心定义
+
+- **Asset**：稳定资产身份 = sha256(hostname | 规则 id | 规范化范围路径)，与 PID 无关；重扫只更新 last_seen。
+- **States**：INSTALLED / CONFIGURED / RUNNING 可并存（文档 §2.3），由独立证据源分别点亮。
+- **Version**：必须带 `version_source`（package-metadata > installer-metadata > process-claim）；无可靠来源输出 UNKNOWN，禁止猜测。
+- **Evidence**：只存路径、键名、大小、mtime、脱敏后的命令行；不存文件内容与凭证原文。
+- **Snapshot**：每次扫描对每个资产落一条快照，支持历史对比与变更观察。
 
 ## 可扩展接口
-- collectors：未来增加 /proc、docker、systemd、auditd、eBPF、netflow。
-- detectors：签名匹配、上下文关联、行为序列识别、风险评分。
-- probes：HTTP、协议握手（受 allowlist 和速率约束）。
-- storage：后续可拆 PostgreSQL / 队列与扫描 Worker。
-- web：增加身份认证、RBAC、异步任务、版本规则管理、资产趋势。
+
+- collectors：未来增加 /proc 深取、docker、systemd、auditd、eBPF。
+- detectors：新增检测目标 = 新增一条 client_rule YAML 或 signature 规则；
+  全新产品探测原语时才扩展引擎。
+- probes：HTTP（已实现，loopback 限定）、协议握手（受 allowlist 和速率约束）。
+- persistence：Repository 接口隔离，后续可换 PostgreSQL。
+- web：身份认证、RBAC、异步扫描、SSE 进度。
 
 ## V0.1 验收
-1. Linux 上可以启动 API 与 Web UI；GET /api/health 正常返回。
-2. 被动扫描可持久化扫描批次；带特征的进程匹配成发现并保留 PID 与证据。
-3. 主动模式不会扫描远程地址、不跟随 HTTP 重定向；允许手动选择。
-4. SQLite 的 findings 与 scans 跨进程重启保留。
-5. 无可靠版本信息时版本为空；不凭进程名称臆测版本。
-6. pytest 单元测试验证签名、边界与持久化。
+
+1. API 与 Web UI 可启动；GET /api/health 正常返回。
+2. 被动扫描发现资产并保留状态、版本来源与证据；Claude Code 区分安装/配置/运行。
+3. 主动模式不访问远程地址、不跟随重定向；手动开启。
+4. SQLite 数据跨进程重启保留；资产不因重扫重复。
+5. 无可靠版本信息时输出 UNKNOWN；process-claim 来源明确标注。
+6. pytest 覆盖规则加载、检测行为、身份稳定性、持久化与故障隔离。
 
 ## 后续迭代建议
-V0.2：规则 YAML、进程二进制与安装版本取证、进程-网络关联、容器支持；
-V0.3：授权网络流量被动检测（镜像/eBPF）、协议解析、Agent 行为序列；
-V0.4：统一资产模型、权限与 API key、异步扫描、规则更新、审计。
+
+V0.2：进程二进制取证、进程-网络关联、容器支持、行为监测（时间窗口）；
+V0.3：授权网络流量被动检测（镜像/eBPF）、MCP/A2A 协议解析、Agent 行为序列；
+V0.4：统一资产模型、权限与 API key、异步扫描、规则集中分发与热更新、审计。

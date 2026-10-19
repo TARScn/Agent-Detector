@@ -1,6 +1,12 @@
 """Stable asset identity, independent of recyclable PIDs (plan section 5.3)."""
 import hashlib
+import re
 from pathlib import Path
+
+
+def slugify(text: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower()
+    return cleaned or "unknown"
 
 
 def normalize_path(path) -> str:
