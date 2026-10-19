@@ -7,19 +7,26 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from agent_detector.application.scan_service import run_scan
+from agent_detector.behavior.monitor_service import MonitorError, MonitorManager
 from agent_detector.common.config import DB_PATH, MAX_PROBES
 from agent_detector.fingerprints.loader import load_rules
 from agent_detector.persistence.database import make_engine
-from agent_detector.persistence.repositories import (AssetRepository, EvidenceRepository,
-                                                     ScanRepository)
+from agent_detector.persistence.repositories import (AssetRepository, BehaviorEventRepository,
+                                                     EvidenceRepository, ScanRepository)
 
 app = FastAPI(title="Agent Detector", version="0.1.0")
 engine = make_engine(DB_PATH)
 scan_lock = threading.Lock()
+monitor_manager = MonitorManager(engine)
 
 
 class ScanRequest(BaseModel):
     active: bool = False
+
+
+class MonitorRequest(BaseModel):
+    interval: float | None = None
+    suppress_seconds: int | None = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -92,3 +99,36 @@ def asset_evidence(asset_id: str, scan_id: int | None = None):
     if not evidence:
         raise HTTPException(status_code=404, detail="No evidence recorded for this asset")
     return evidence
+
+
+@app.get("/api/monitor/status")
+def monitor_status():
+    return monitor_manager.status()
+
+
+@app.post("/api/monitor/start")
+def monitor_start(body: MonitorRequest | None = None):
+    try:
+        return monitor_manager.start(
+            interval=body.interval if body else None,
+            suppress_seconds=body.suppress_seconds if body else None)
+    except MonitorError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/monitor/stop")
+def monitor_stop():
+    return monitor_manager.stop()
+
+
+@app.get("/api/monitor/events")
+def monitor_events(limit: int = 100):
+    with Session(engine) as session:
+        return {"items": BehaviorEventRepository(session).list_events(limit=limit,
+                                                                      source="netmon")}
+
+
+@app.get("/api/monitor/stats")
+def monitor_stats():
+    with Session(engine) as session:
+        return BehaviorEventRepository(session).stats(source="netmon")

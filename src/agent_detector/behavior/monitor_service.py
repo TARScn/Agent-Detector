@@ -60,6 +60,7 @@ class MonitorManager:
                 self.suppress_seconds = suppress_seconds
             self._stop.clear()
             self.started_at = utc_now_iso()
+            self._dns.start()
             self._thread = threading.Thread(target=self._run, daemon=True,
                                             name="agent-detector-monitor")
             self._thread.start()
@@ -72,7 +73,12 @@ class MonitorManager:
                 self._thread.join(timeout=max(5.0, self.interval * 3))
             self._thread = None
             self.started_at = None
-            return self.status()
+        self._dns.close()
+        return self.status()
+
+    def close(self) -> None:
+        """Release the DNS reader (CLI one-shot runs call this in finally)."""
+        self._dns.close()
 
     def status(self) -> dict:
         running = self._thread is not None and self._thread.is_alive()
@@ -85,19 +91,23 @@ class MonitorManager:
             "hits": self.hits,
             "rules_errors": self._rules.errors,
             "known_llm_hosts": len(self._rules.rules.known_llm_hosts),
-            "dns_cache_entries": len(self._dns.snapshot()) if self.iterations else 0,
+            "dns_cache_entries": self._dns.entry_count,
         }
 
     def run_once(self) -> list[NetObservation]:
         """One observation window: collect, match, suppress, persist. Returns new events."""
+        if not self._dns.running:
+            self._dns.start()  # CLI one-shot path; web start() already did this
         conns = collect_outbound()
         names = resolve_process_names({c.pid for c in conns})
         conns = [replace(c, process_name=names.get(c.pid, "")) for c in conns]
-        dns = self._dns.snapshot()
+        dns_hosts = self._dns.snapshot()
+        pid_assets, model_ports = self._asset_lookup()
         now = time.monotonic()
         observations: list[NetObservation] = []
         for conn in conns:
-            observation = match_llm_call(conn, self._rules.rules, dns)
+            observation = match_llm_call(conn, self._rules.rules, dns_hosts,
+                                         model_ports=model_ports)
             if observation is None:
                 continue
             key = (observation.pid, observation.host)
@@ -105,6 +115,8 @@ class MonitorManager:
             if last is not None and now - last < self.suppress_seconds:
                 continue
             self._last_seen[key] = now
+            if observation.asset_id is None and observation.pid in pid_assets:
+                observation = replace(observation, asset_id=pid_assets[observation.pid])
             observations.append(observation)
         if len(self._last_seen) > 2000:  # bound the suppression table
             cutoff = now - self.suppress_seconds
@@ -128,8 +140,7 @@ class MonitorManager:
             self._stop.wait(max(0.2, self.interval - elapsed))
 
     def _write(self, observations: list[NetObservation]) -> None:
-        attribution = self._asset_pids()
-        rows = [self._to_row(observation, attribution.get(observation.pid))
+        rows = [self._to_row(observation, observation.asset_id)
                 for observation in observations]
         with Session(self.engine) as session:
             session.add_all(rows)
@@ -151,17 +162,30 @@ class MonitorManager:
             endpoint=f"{observation.remote_ip}:{observation.remote_port}",
             evidence_json=json.dumps(observation.evidence, ensure_ascii=False))
 
-    def _asset_pids(self) -> dict[int, str]:
-        """pid -> asset_id from the latest asset snapshots (empty on any failure)."""
-        mapping: dict[int, str] = {}
+    def _asset_lookup(self) -> tuple[dict[int, str], dict[int, str | None]]:
+        """Latest-snapshot attribution: (pid -> asset_id, LLM_SERVICE port -> asset_id).
+
+        The port map is what corroborates loopback model-service connections:
+        a port only counts when the scanner identified an LLM_SERVICE asset
+        listening on it. Empty maps on any failure — events still record.
+        """
+        pid_map: dict[int, str] = {}
+        port_map: dict[int, str | None] = {}
         try:
             with Session(self.engine) as session:
                 for snapshot in AssetRepository(session).latest_snapshots():
+                    asset_id = snapshot["asset_id"]
                     for pid in snapshot.get("running_pids") or []:
                         try:
-                            mapping.setdefault(int(pid), snapshot["asset_id"])
+                            pid_map.setdefault(int(pid), asset_id)
                         except (TypeError, ValueError):
                             continue
+                    if snapshot.get("asset_type") == "LLM_SERVICE":
+                        for port in snapshot.get("listening_ports") or []:
+                            try:
+                                port_map.setdefault(int(port), asset_id)
+                            except (TypeError, ValueError):
+                                continue
         except Exception:  # attribution is best-effort; events still record
             logger.exception("asset attribution lookup failed")
-        return mapping
+        return pid_map, port_map

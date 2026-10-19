@@ -35,7 +35,10 @@ class BehaviorEventRepository:
             select(BehaviorEventRow.protocol, func.count()).group_by(BehaviorEventRow.protocol)))}
         by_agent = {label: n for label, n in self._session.execute(filtered(
             select(BehaviorEventRow.agent_label, func.count()).group_by(BehaviorEventRow.agent_label)))}
-        return {"event_count": count, "by_protocol": by_protocol, "by_agent": by_agent}
+        by_operation = {operation: n for operation, n in self._session.execute(filtered(
+            select(BehaviorEventRow.operation, func.count()).group_by(BehaviorEventRow.operation)))}
+        return {"event_count": count, "by_protocol": by_protocol, "by_agent": by_agent,
+                "by_operation": by_operation}
 
     @staticmethod
     def _to_dict(row: BehaviorEventRow) -> dict:

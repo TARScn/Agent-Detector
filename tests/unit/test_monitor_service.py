@@ -23,11 +23,22 @@ def make_asset(**overrides):
 
 class FakeDns:
     def __init__(self, mapping):
-        self.mapping = mapping
+        self.mapping = {ip: (host,) for ip, host in mapping.items()}
         self.failed = False
+        self.running = True
 
     def snapshot(self):
         return self.mapping
+
+    def start(self):
+        self.running = True
+
+    def close(self):
+        self.running = False
+
+    @property
+    def entry_count(self):
+        return sum(len(hosts) for hosts in self.mapping.values())
 
 
 def seed_events(monkeypatch, tmp_path, conns, dns_mapping):
@@ -80,6 +91,35 @@ def test_pid_attribution_to_asset(monkeypatch, tmp_path):
     with Session(engine) as session:
         row = BehaviorEventRepository(session).list_events(source="netmon")[0]
     assert row["asset_id"] == "claude-code--abc123def456"
+
+
+def test_local_model_event_uses_scan_asset_and_corroborated_port(monkeypatch, tmp_path):
+    conns = [ConnInfo(pid=777, process_name="my-agent.exe",
+                      remote_ip="127.0.0.1", remote_port=11434)]
+    manager, engine = seed_events(monkeypatch, tmp_path, conns, {})
+    with Session(engine) as session:
+        scan_id = ScanRepository(session).create("agent")
+        AssetRepository(session).upsert(
+            make_asset(asset_id="ollama--xyz", name="Ollama",
+                       asset_type=AssetType.LLM_SERVICE, listening_ports=[11434]),
+            scan_id)
+        session.commit()
+    manager.run_once()
+    with Session(engine) as session:
+        row = BehaviorEventRepository(session).list_events(source="netmon")[0]
+    assert (row["operation"], row["upstream_host"]) == ("local_model", "Ollama:11434")
+    assert row["asset_id"] == "ollama--xyz"
+    assert row["evidence"] == ["local_model_port", "scan_asset"]
+
+
+def test_bare_port_without_scan_asset_is_not_flagged(monkeypatch, tmp_path):
+    """Regression: a dev server on 8000 must not look like vLLM."""
+    conns = [ConnInfo(pid=888, process_name="curl.exe",
+                      remote_ip="127.0.0.1", remote_port=8000)]
+    manager, engine = seed_events(monkeypatch, tmp_path, conns, {})
+    assert manager.run_once() == []
+    with Session(engine) as session:
+        assert BehaviorEventRepository(session).list_events(source="netmon") == []
 
 
 def test_start_stop_lifecycle(monkeypatch, tmp_path):

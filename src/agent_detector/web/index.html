@@ -125,10 +125,35 @@ ul.plain{margin:0;padding-left:18px;line-height:2;color:var(--muted);font-size:1
     </div>
   </section>
 
-  <!-- ============ 监控页（网络行为监控 · 阶段重建占位） ============ -->
+  <!-- ============ 监控页（网络行为监控） ============ -->
   <section id="page-monitor" class="page">
-    <div class="card"><h3>网络行为监控</h3>
-    <p class="muted">建设中——零合作检测本机 Agent 的 LLM API 调用并记录目标地址（连接级证据）。</p></div>
+    <div class="hero card" id="mon-hero">
+      <div><h2 id="mon-headline">网络行为监控</h2>
+      <p>轮询本机出站连接，结合系统 DNS 缓存与 LLM API 情报名单，零配置识别"哪个进程在调用哪个 LLM API"并记录目标地址。仅记录连接级证据，不读取任何通信内容。</p></div>
+      <div style="display:flex;gap:10px;flex:none">
+        <button class="btn primary lg" id="btn-mon-start">启动监控</button>
+        <button class="btn lg" id="btn-mon-stop" disabled>停止监控</button>
+      </div>
+    </div>
+    <div class="stat-grid g4" id="mon-stats"></div>
+    <div class="grid-2">
+      <div class="card"><h3>监控状态</h3><dl class="dl" id="mon-status"><div><dt>状态</dt><dd>加载中…</dd></div></dl></div>
+      <div class="card"><h3>能力边界</h3><ul class="plain">
+        <li>连接级证据：记录调用发生与目标 API 地址；模型名、提示词等通信内容不可见（TLS 加密）</li>
+        <li>远程 API 归因依赖系统 DNS 缓存；DoH 流量与缓存过期条目暂不可归因</li>
+        <li>本机模型服务（Ollama / vLLM / LM Studio）按端口识别，跨平台生效</li>
+        <li>事件代表"观测窗口内存在该调用"，非精确调用次数（抑制窗口内去重）</li>
+        <li>情报名单可用 AGENT_DETECTOR_BEHAVIOR_RULES_DIR 外部覆盖</li>
+      </ul></div>
+    </div>
+    <div class="card">
+      <div class="toolbar" style="margin-bottom:0">
+        <h3 style="margin:0;flex:1">行为事件</h3>
+        <span class="muted" id="mon-count"></span>
+      </div>
+      <table><thead><tr><th>时间</th><th>类型</th><th>进程</th><th>关联资产</th><th>目标 API / 服务</th><th>证据</th></tr></thead>
+      <tbody id="mon-events"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody></table>
+    </div>
   </section>
 
   <!-- ============ 结果页 ============ -->
@@ -156,8 +181,8 @@ ul.plain{margin:0;padding-left:18px;line-height:2;color:var(--muted);font-size:1
       <div class="card"><h3>安全边界</h3><ul class="plain">
         <li>仅监听 127.0.0.1，不对局域网开放</li>
         <li>被动采集全部只读；不执行被发现的 Agent / Skill / MCP 启动命令</li>
-        <li>主动探测仅回环地址，不跟随重定向、有端口上限；网关只启动模板化 mitmdump，不接受任意命令</li>
-        <li>网关只记录协议元数据；提示词、工具参数、Authorization 与 Cookie 不落库</li>
+        <li>主动探测仅回环地址，不跟随重定向、有端口上限</li>
+        <li>网络行为监控零合作只读（socket 表 + DNS 缓存），只记连接级证据，不读取通信内容</li>
         <li>配置文件只记录键名；凭证原文不入库，命令行密钥自动脱敏</li>
         <li>版本无可靠来源时输出 UNKNOWN，不做猜测</li>
       </ul></div>
@@ -281,6 +306,80 @@ LOADERS.scan=()=>{
   if(!a.length)ra.replaceChildren(emptyRow(4,'暂无资产'));
 };
 
+/* ---------- 监控页（网络行为监控） ---------- */
+LOADERS.monitor=()=>{loadMonitorStatus(true);loadMonitorStats(true);loadMonitorEvents(true)};
+
+async function loadMonitorStatus(silent){
+  try{
+    const st=await api('/api/monitor/status');
+    $('btn-mon-start').disabled=st.running;
+    $('btn-mon-stop').disabled=!st.running;
+    $('mon-hero').classList.toggle('warn',!st.running);
+    $('mon-headline').textContent=st.running?'网络行为监控 · 运行中':'网络行为监控';
+    const rows=[
+      ['运行状态',st.running?'运行中':'已停止'],
+      ['轮询间隔',st.interval+' 秒'],
+      ['启动时间',st.running?fmtTime(st.started_at):'—'],
+      ['已观测轮次',st.iterations],
+      ['累计命中',st.hits],
+      ['情报名单',st.known_llm_hosts+' 个 LLM API 域名'],
+      ['DNS 缓存条目',st.dns_cache_entries],
+      ['规则异常',st.rules_errors.length?st.rules_errors.length+' 条（已跳过）':'无']];
+    $('mon-status').replaceChildren(...rows.map(([k,v])=>
+      el('div','',el('dt','',k),el('dd','',String(v)))));
+  }catch(e){if(!silent)toast('监控状态获取失败：'+e.message,true)}
+}
+
+async function loadMonitorStats(silent){
+  try{
+    const s=await api('/api/monitor/stats');
+    const op=s.by_operation||{};
+    const stats=[[s.event_count,'事件总数','hi'],
+      [op.llm_api||0,'LLM API 调用',''],
+      [op.local_model||0,'本机模型调用',''],
+      [Object.keys(s.by_agent||{}).length,'覆盖进程','']];
+    $('mon-stats').replaceChildren(...stats.map(([n,l,c])=>
+      el('div','stat'+(c?' '+c:''),el('div','num',n),el('div','lbl',l))));
+  }catch(e){if(!silent)toast('统计获取失败：'+e.message,true)}
+}
+
+async function loadMonitorEvents(silent){
+  try{
+    const r=await api('/api/monitor/events?limit=150');
+    const items=r.items;
+    $('mon-count').textContent=items.length+' 条';
+    const tb=$('mon-events');tb.replaceChildren();
+    if(!items.length){
+      tb.append(emptyRow(6,'暂无事件——启动监控后，本机进程对 LLM API 的调用会出现在这里'));
+      return}
+    items.forEach(x=>{
+      const isApi=x.operation==='llm_api';
+      const ev=el('td');(x.evidence||[]).forEach(e=>ev.append(tag(e,'ty')));
+      if(!(x.evidence||[]).length)ev.textContent='—';
+      tb.append(el('tr','',
+        el('td','muted',fmtTime(x.observed_at)),
+        el('td','',tag(isApi?'LLM API':'本机模型',isApi?'pt-LLM':'pt-MCP')),
+        el('td','',el('b','',x.agent_label)),
+        el('td','',x.asset_id?el('code','',x.asset_id):el('span','muted','—')),
+        el('td','',el('code','',x.upstream_host),el('div','sub',x.endpoint)),
+        ev));
+    });
+  }catch(e){if(!silent)toast('事件加载失败：'+e.message,true)}
+}
+
+$('btn-mon-start').onclick=async()=>{
+  const b=$('btn-mon-start'),old=b.textContent;b.disabled=true;b.textContent='启动中…';
+  try{await api('/api/monitor/start',{method:'POST'});toast('网络行为监控已启动')}
+  catch(e){toast('启动失败：'+e.message,true)}
+  finally{b.textContent=old;await loadMonitorStatus()}
+};
+$('btn-mon-stop').onclick=async()=>{
+  const b=$('btn-mon-stop'),old=b.textContent;b.disabled=true;b.textContent='停止中…';
+  try{await api('/api/monitor/stop',{method:'POST'});toast('网络行为监控已停止')}
+  catch(e){toast('停止失败：'+e.message,true)}
+  finally{b.textContent=old;await loadMonitorStatus();loadMonitorEvents()}
+};
+
 /* ---------- 结果页 ---------- */
 function fillFilter(sel,values,labels){const cur=sel.value;
   const all=el('option','','全部');all.value='';
@@ -355,7 +454,7 @@ LOADERS.settings=async()=>{
     ['服务版本','v'+(s.version||'—')],['数据库',s.db_path||'—'],
     ['监听地址',s.listen||'127.0.0.1'],['端口探测上限',s.max_probes??'—'],
     ['扫描口径','Agent 扫描（被动只读）/ 深度扫描（含本机端口指纹）'],
-    ['流量监控','本地网关（显式代理，观察 LLM / MCP / A2A 调用）'],
+    ['行为监控','零合作出站连接观察（DNS 缓存 × LLM API 情报名单）'],
     ['规则加载','包内置 + AGENT_DETECTOR_RULES_DIR 外部目录']]
     .map(([k,v])=>el('div','',el('dt','',k),el('dd','',v))));
   try{

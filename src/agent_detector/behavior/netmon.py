@@ -35,6 +35,7 @@ class NetObservation:
     match_kind: str      # "llm_api" | "local_model"
     confidence: str
     evidence: tuple[str, ...]
+    asset_id: str | None = None   # resolved at match time when provable (local_model)
 
 
 def collect_outbound() -> list[ConnInfo]:
@@ -70,25 +71,30 @@ def is_loopback_ip(ip: str) -> bool:
         return False
 
 
-def match_llm_call(conn: ConnInfo, rules, dns_cache: dict[str, str]) -> NetObservation | None:
+def match_llm_call(conn: ConnInfo, rules, dns_hosts: dict[str, tuple[str, ...]],
+                   model_ports: dict[int, str | None] | None = None) -> NetObservation | None:
     """Match one connection against behavior rules; None means not LLM-related.
 
-    Order matters: loopback destinations are matched by known model ports even
-    if a DNS name exists; remote destinations are matched by resolving the IP
-    through the DNS cache against the known-LLM-host list (exact match).
+    Loopback destinations require BOTH a known model port in the rules and
+    scan corroboration (`model_ports` maps port -> asset_id of an asset the
+    scanner identified as LLM_SERVICE) — a bare port match would flag any dev
+    server that happens to sit on 8000. Remote destinations resolve the IP
+    through retained DNS-cache names and require an exact known-LLM-host hit;
+    the host itself is shared CDN space, so the name is the discriminator.
     """
     if is_loopback_ip(conn.remote_ip):
         name = rules.model_port_name(conn.remote_port)
-        if not name:
+        if not name or model_ports is None or conn.remote_port not in model_ports:
             return None
         return NetObservation(pid=conn.pid, process_name=conn.process_name,
                               remote_ip=conn.remote_ip, remote_port=conn.remote_port,
                               host=f"{name}:{conn.remote_port}", match_kind="local_model",
-                              confidence="medium", evidence=("local_model_port",))
-    host = dns_cache.get(conn.remote_ip, "")
-    if host and host in rules.known_llm_hosts:
-        return NetObservation(pid=conn.pid, process_name=conn.process_name,
-                              remote_ip=conn.remote_ip, remote_port=conn.remote_port,
-                              host=host, match_kind="llm_api", confidence="medium",
-                              evidence=("dns_cache", "known_llm_host"))
+                              confidence="medium", evidence=("local_model_port", "scan_asset"),
+                              asset_id=model_ports[conn.remote_port])
+    for host in dns_hosts.get(conn.remote_ip, ()):
+        if host in rules.known_llm_hosts:
+            return NetObservation(pid=conn.pid, process_name=conn.process_name,
+                                  remote_ip=conn.remote_ip, remote_port=conn.remote_port,
+                                  host=host, match_kind="llm_api", confidence="medium",
+                                  evidence=("dns_cache", "known_llm_host"))
     return None
