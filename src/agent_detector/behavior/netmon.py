@@ -8,6 +8,7 @@ happened", never what was said.
 from __future__ import annotations
 
 import ipaddress
+import socket
 from dataclasses import dataclass
 
 import psutil
@@ -71,7 +72,35 @@ def is_loopback_ip(ip: str) -> bool:
         return False
 
 
-def match_llm_call(conn: ConnInfo, rules, dns_hosts: dict[str, tuple[str, ...]],
+def _system_resolve(host: str) -> list[str]:
+    try:
+        return sorted({info[4][0] for info in socket.getaddrinfo(host, 443)})
+    except (socket.gaierror, OSError):
+        return []
+
+
+def resolve_known_hosts(hosts, resolver=None) -> dict[str, str]:
+    """Resolve each known LLM host via the system resolver -> {ip: host}.
+
+    Closes the Chromium/DoH blind spot: apps with built-in resolvers never
+    populate the OS DNS cache, so the monitor establishes the ip -> host
+    mapping for the known-host list itself. Shared-CDN addresses may make
+    this an over-approximation; the evidence tag records the provenance.
+    """
+    resolver = resolver or _system_resolve
+    mapping: dict[str, str] = {}
+    for host in hosts:
+        try:
+            ips = resolver(host)
+        except Exception:  # one bad lookup must not abort the sweep
+            continue
+        for ip in ips:
+            mapping.setdefault(ip, host)
+    return mapping
+
+
+def match_llm_call(conn: ConnInfo, rules,
+                   dns_hosts: dict[str, tuple[tuple[str, str], ...]],
                    model_ports: dict[int, str | None] | None = None) -> NetObservation | None:
     """Match one connection against behavior rules; None means not LLM-related.
 
@@ -79,8 +108,10 @@ def match_llm_call(conn: ConnInfo, rules, dns_hosts: dict[str, tuple[str, ...]],
     scan corroboration (`model_ports` maps port -> asset_id of an asset the
     scanner identified as LLM_SERVICE) — a bare port match would flag any dev
     server that happens to sit on 8000. Remote destinations resolve the IP
-    through retained DNS-cache names and require an exact known-LLM-host hit;
-    the host itself is shared CDN space, so the name is the discriminator.
+    through retained name mappings ((host, origin) pairs) and require an
+    exact known-LLM-host hit; the host name is the discriminator, and the
+    evidence tag records whether the mapping was observed ("dns_cache") or
+    proactively resolved ("proactive_resolve").
     """
     if is_loopback_ip(conn.remote_ip):
         name = rules.model_port_name(conn.remote_port)
@@ -91,10 +122,11 @@ def match_llm_call(conn: ConnInfo, rules, dns_hosts: dict[str, tuple[str, ...]],
                               host=f"{name}:{conn.remote_port}", match_kind="local_model",
                               confidence="medium", evidence=("local_model_port", "scan_asset"),
                               asset_id=model_ports[conn.remote_port])
-    for host in dns_hosts.get(conn.remote_ip, ()):
+    for host, origin in dns_hosts.get(conn.remote_ip, ()):
         if host in rules.known_llm_hosts:
+            source = "dns_cache" if origin == "cache" else "proactive_resolve"
             return NetObservation(pid=conn.pid, process_name=conn.process_name,
                                   remote_ip=conn.remote_ip, remote_port=conn.remote_port,
                                   host=host, match_kind="llm_api", confidence="medium",
-                                  evidence=("dns_cache", "known_llm_host"))
+                                  evidence=(source, "known_llm_host"))
     return None

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from agent_detector.behavior.dnscache import DnsCache
 from agent_detector.behavior.netmon import (NetObservation, collect_outbound, match_llm_call,
-                                            resolve_process_names)
+                                            resolve_known_hosts, resolve_process_names)
 from agent_detector.behavior.rules import load_rules
 from agent_detector.persistence.models import BehaviorEventRow, utc_now_iso
 from agent_detector.persistence.repositories import AssetRepository
@@ -45,6 +45,8 @@ class MonitorManager:
         self._rules = load_rules()
         self._dns = DnsCache()
         self._last_seen: dict[tuple[int, str], float] = {}
+        self._sweep_interval = 300.0
+        self._last_sweep = 0.0
         self.iterations = 0
         self.hits = 0
         self.started_at: str | None = None
@@ -98,6 +100,7 @@ class MonitorManager:
         """One observation window: collect, match, suppress, persist. Returns new events."""
         if not self._dns.running:
             self._dns.start()  # CLI one-shot path; web start() already did this
+        self._maybe_sweep(time.monotonic())
         conns = collect_outbound()
         names = resolve_process_names({c.pid for c in conns})
         conns = [replace(c, process_name=names.get(c.pid, "")) for c in conns]
@@ -128,6 +131,19 @@ class MonitorManager:
         return observations
 
     # -- internal ----------------------------------------------------------
+
+    def _maybe_sweep(self, now: float) -> None:
+        """Periodically resolve the known-LLM-host list into the retained map.
+
+        Apps with built-in resolvers (Chromium/Electron, DoH) never populate
+        the OS DNS cache, so observing only the cache would miss them.
+        """
+        if now - self._last_sweep < self._sweep_interval:
+            return
+        self._last_sweep = now
+        mapping = resolve_known_hosts(self._rules.rules.known_llm_hosts)
+        if mapping:
+            self._dns.merge_proactive(mapping)
 
     def _run(self) -> None:
         while not self._stop.is_set():

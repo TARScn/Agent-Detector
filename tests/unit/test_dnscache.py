@@ -35,9 +35,18 @@ def test_ingest_merges_and_keeps_multiple_hosts_per_ip():
     cache._ingest(json.dumps([{"Entry": "api.openai.com", "Data": "1.2.3.4"},
                               {"Entry": "open.bigmodel.cn.", "Data": "5.6.7.8"}]))
     snapshot = cache.snapshot()
-    assert set(snapshot["1.2.3.4"]) == {"api.anthropic.com", "api.openai.com"}
-    assert snapshot["5.6.7.8"] == ("open.bigmodel.cn",)
+    assert {h for h, _o in snapshot["1.2.3.4"]} == {"api.anthropic.com", "api.openai.com"}
+    assert snapshot["5.6.7.8"] == (("open.bigmodel.cn", "cache"),)
     assert cache.entry_count == 3
+
+
+def test_merge_proactive_records_probe_origin():
+    cache = DnsCache()
+    cache._ingest(dump("api.anthropic.com", "1.2.3.4"))
+    cache.merge_proactive({"5.6.7.8": "token-plan.cn-beijing.maas.aliyuncs.com"})
+    snapshot = cache.snapshot()
+    assert snapshot["1.2.3.4"] == (("api.anthropic.com", "cache"),)
+    assert snapshot["5.6.7.8"] == (("token-plan.cn-beijing.maas.aliyuncs.com", "probe"),)
 
 
 def test_ingest_ignores_garbage_lines():

@@ -23,12 +23,18 @@ def make_asset(**overrides):
 
 class FakeDns:
     def __init__(self, mapping):
-        self.mapping = {ip: (host,) for ip, host in mapping.items()}
+        self.mapping = {ip: ((host, "cache"),) for ip, host in mapping.items()}
         self.failed = False
         self.running = True
+        self.proactive = {}
 
     def snapshot(self):
         return self.mapping
+
+    def merge_proactive(self, mapping):
+        self.proactive.update(mapping)
+        for ip, host in mapping.items():
+            self.mapping[ip] = ((host, "probe"),)
 
     def start(self):
         self.running = True
@@ -47,6 +53,7 @@ def seed_events(monkeypatch, tmp_path, conns, dns_mapping):
     monkeypatch.setattr(ms, "collect_outbound", lambda: conns)
     monkeypatch.setattr(ms, "resolve_process_names",
                         lambda pids: {c.pid: "claude.exe" for c in conns})
+    monkeypatch.setattr(ms, "resolve_known_hosts", lambda hosts: {})
     manager = MonitorManager(engine)
     manager._dns = FakeDns(dns_mapping)
     return manager, engine
@@ -110,6 +117,28 @@ def test_local_model_event_uses_scan_asset_and_corroborated_port(monkeypatch, tm
     assert (row["operation"], row["upstream_host"]) == ("local_model", "Ollama:11434")
     assert row["asset_id"] == "ollama--xyz"
     assert row["evidence"] == ["local_model_port", "scan_asset"]
+
+
+def test_proactive_sweep_merges_known_hosts_and_is_throttled(monkeypatch, tmp_path):
+    """Chromium/Electron apps bypass the OS DNS cache; the sweep supplies the map."""
+    conns = [ConnInfo(pid=4242, process_name="", remote_ip="39.106.104.16", remote_port=443)]
+    engine = make_engine(tmp_path / "db.sqlite3")
+    monkeypatch.setattr(ms, "collect_outbound", lambda: conns)
+    monkeypatch.setattr(ms, "resolve_process_names", lambda pids: {4242: "ZCode.exe"})
+    monkeypatch.setattr(ms, "resolve_known_hosts",
+                        lambda hosts: {"39.106.104.16": "token-plan.cn-beijing.maas.aliyuncs.com"})
+    manager = MonitorManager(engine)
+    manager._dns = FakeDns({})
+    events = manager.run_once()  # first run: sweep due -> merge -> match
+    assert len(events) == 1
+    assert events[0].host == "token-plan.cn-beijing.maas.aliyuncs.com"
+    assert events[0].evidence == ("proactive_resolve", "known_llm_host")
+    assert manager._dns.proactive == {"39.106.104.16": "token-plan.cn-beijing.maas.aliyuncs.com"}
+    # sweep is throttled: a second run must not resolve again
+    monkeypatch.setattr(ms, "resolve_known_hosts",
+                        lambda hosts: (_ for _ in ()).throw(AssertionError("reswept")))
+    manager.suppress_seconds = 0
+    assert len(manager.run_once()) == 1
 
 
 def test_bare_port_without_scan_asset_is_not_flagged(monkeypatch, tmp_path):

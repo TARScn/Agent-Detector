@@ -56,15 +56,21 @@ def parse_dns_cache_json(raw: str | None) -> dict[str, str]:
 
 
 class DnsCache:
-    """Persistent reader with merge retention; degrades to an empty map."""
+    """Persistent reader with merge retention; degrades to an empty map.
+
+    Entries carry their provenance: "cache" (observed in the OS resolver
+    cache, i.e. someone actually resolved it) or "probe" (the monitor
+    proactively resolved a known-LLM host — needed because Chromium-based
+    apps use a built-in resolver that never touches the Windows DNS cache).
+    """
 
     def __init__(self, read_interval_ms: int = _READ_INTERVAL_MS,
                  retention_seconds: float = _RETENTION_SECONDS):
         self.read_interval_ms = read_interval_ms
         self.retention_seconds = retention_seconds
-        # ip -> {host: last_seen_monotonic}; several names per IP are kept
-        # because CDN addresses are shared.
-        self._entries: dict[str, dict[str, float]] = {}
+        # ip -> {host: (last_seen_monotonic, origin)}; several names per IP
+        # are kept because CDN addresses are shared.
+        self._entries: dict[str, dict[str, tuple[float, str]]] = {}
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
@@ -78,6 +84,10 @@ class DnsCache:
     def entry_count(self) -> int:
         with self._lock:
             return sum(len(hosts) for hosts in self._entries.values())
+
+    def merge_proactive(self, mapping: dict[str, str]) -> None:
+        """Public merge for monitor-initiated resolution of known LLM hosts."""
+        self._merge(mapping, origin="probe")
 
     def start(self) -> None:
         if self.running:
@@ -113,13 +123,14 @@ class DnsCache:
         if thread is not None:
             thread.join(timeout=5)
 
-    def snapshot(self) -> dict[str, tuple[str, ...]]:
-        """{ip: (host, ...)} from retained mappings; no side effects."""
+    def snapshot(self) -> dict[str, tuple[tuple[str, str], ...]]:
+        """{ip: ((host, origin), ...)} from retained mappings; no side effects."""
         cutoff = time.monotonic() - self.retention_seconds
         with self._lock:
-            result: dict[str, tuple[str, ...]] = {}
+            result: dict[str, tuple[tuple[str, str], ...]] = {}
             for ip in list(self._entries):
-                alive = tuple(h for h, ts in self._entries[ip].items() if ts >= cutoff)
+                alive = tuple((host, origin) for host, (ts, origin)
+                              in self._entries[ip].items() if ts >= cutoff)
                 if alive:
                     result[ip] = alive
                 else:
@@ -132,14 +143,18 @@ class DnsCache:
         proc = self._proc
         assert proc is not None and proc.stdout is not None
         for line in proc.stdout:
-            self._ingest(line)
+            fresh = parse_dns_cache_json(line)
+            if fresh:
+                self._merge(fresh, origin="cache")
         self.failed = True  # reader ended (process died)
 
     def _ingest(self, line: str) -> None:
         fresh = parse_dns_cache_json(line)
-        if not fresh:
-            return
+        if fresh:
+            self._merge(fresh, origin="cache")
+
+    def _merge(self, mapping: dict[str, str], origin: str) -> None:
         now = time.monotonic()
         with self._lock:
-            for ip, host in fresh.items():
-                self._entries.setdefault(ip, {})[host] = now
+            for ip, host in mapping.items():
+                self._entries.setdefault(ip, {})[host] = (now, origin)
