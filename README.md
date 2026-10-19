@@ -9,9 +9,10 @@
 - **Claude Code 专属规则**：区分安装（npm / 原生安装器 / `~/.claude`）、配置（`~/.claude.json` 键名、`settings.json`）与运行（进程）三类证据，并排除同名但不同产品的 Claude Desktop 进程。
 - **资产模型**：稳定资产 ID（与 PID 无关，重扫不重复建资产）、多状态共存（INSTALLED / CONFIGURED / RUNNING）、独立置信度。
 - **版本带来源**：优先包元数据（npm `package.json`），其次安装器元数据；无可靠来源输出 `UNKNOWN`，不做猜测。
-- **主动探测**：仅在手动启用时，对本机已观测的监听端口发送少量 HTTP GET 请求；不执行漏洞利用、不访问远程地址。
-- **可追溯结果**：SQLite 保存扫描任务、资产、快照与证据；文件内容与凭证原文不入库，命令行中的密钥自动脱敏。
-- **Web 管理控制台**：左侧导航四页 —— 扫描主页（Agent 扫描 + 概览统计）、监控页（流量监控：本机端口 HTTP 指纹）、结果页（按批次/类型/状态筛选 + 证据明细 + 扫描历史）、设置页（系统信息 + 只读规则列表）。
+- **主动探测**：仅在手动启用时（扫描页"深度扫描"），对本机已观测的监听端口发送少量 HTTP GET 请求；不执行漏洞利用、不访问远程地址。
+- **本地网关（流量监控）**：可选 mitmproxy 显式代理（127.0.0.1:8899），观察 Agent 对 LLM / MCP / A2A 服务的调用，只落协议元数据（方法、模型名、工具名、状态码）到 `behavior_events` 表；提示词、工具参数与凭证永不入库。见 [docs/gateway.md](docs/gateway.md)。
+- **可追溯结果**：SQLite 保存扫描任务、资产、快照、证据与网关协议事件；文件内容与凭证原文不入库，命令行中的密钥自动脱敏。
+- **Web 管理控制台**：左侧导航四页 —— 扫描主页（Agent 扫描 / 深度扫描 + 概览统计）、监控页（本地网关启停 + 协议事件流）、结果页（按批次/类型/状态筛选 + 证据明细 + 扫描历史）、设置页（系统信息 + 只读规则列表）。
 - **CLI 与 Web 共用同一引擎**：`agent-detector scan` / `agent-detector assets list`。
 
 ## 快速启动
@@ -31,15 +32,20 @@ agent-detector scan
 agent-detector scan --active --json
 agent-detector assets list
 
+# 本地网关（流量监控，需先 pip install -e ".[gateway]"）
+agent-detector gateway start | stop | status
+agent-detector gateway demo   # 模拟 LLM/MCP/A2A 流量自测，无需真实 API Key
+
 # REST API
 curl -X POST http://127.0.0.1:8000/api/scans -H 'Content-Type: application/json' -d '{"active": false}'
 curl http://127.0.0.1:8000/api/assets
 curl "http://127.0.0.1:8000/api/assets/<asset_id>/evidence"
+curl http://127.0.0.1:8000/api/gateway/stats
 
 pytest -q
 ```
 
-可用环境变量：`AGENT_DETECTOR_DB` (默认 `./data/agent_detector.sqlite3`)、`AGENT_DETECTOR_MAX_PROBES` (默认 20)、`AGENT_DETECTOR_RULES_DIR` (外部规则目录，按 id 覆盖内置规则)。
+可用环境变量：`AGENT_DETECTOR_DB` (默认 `./data/agent_detector.sqlite3`)、`AGENT_DETECTOR_MAX_PROBES` (默认 20)、`AGENT_DETECTOR_RULES_DIR` (外部规则目录，按 id 覆盖内置规则)、`AGENT_DETECTOR_GATEWAY_PORT/_LABEL/_HOSTS/_PARSE_MAX_BYTES` (网关配置，见 [docs/gateway.md](docs/gateway.md))。
 
 ## 架构（src/agent_detector/）
 
@@ -50,8 +56,9 @@ fingerprints/  声明式检测规则（rules/*.yaml）+ 加载器 + 规则解释
 detectors/     Detector 协议；build_detectors() 从 YAML 规则装配检测器
 recognition/   稳定资产 ID 生成
 application/   扫描编排（采集 → 检测 → 合并 → 持久化，检测器异常隔离）
-persistence/   SQLAlchemy 实体 + Repository（scan_tasks / assets / asset_snapshots / evidence）
+persistence/   SQLAlchemy 实体 + Repository（scan_tasks / assets / asset_snapshots / evidence / behavior_events）
 probes/        本机 HTTP 主动指纹
+gateway/       本地网关：mitmproxy addon、协议识别、事件存储、生命周期管理（可选依赖）
 cli/           命令行入口
 web/           FastAPI 路由 + 单页 UI
 common/        配置与脱敏工具
@@ -63,7 +70,7 @@ common/        配置与脱敏工具
 
 ## 范围与安全限制
 - 其他用户进程可能需要更高系统权限，建议遵循最小权限。
-- V0.1 不提供网络抓包、外部流量嗅探、POC 验证和全网扫描。
+- V0.1 不提供外部流量嗅探、POC 验证和全网扫描；本地网关只观察被显式指向它的进程。
 - 版本信息如存在，均标注来源（`version_source`）；`process-claim` 类来源为未经验证的命令行声明。
 - 不执行被发现的 Agent、MCP stdio 启动命令或 Skill。
 - 默认仅建议本地使用；正式部署需要认证、授权、审计和访问保护。
