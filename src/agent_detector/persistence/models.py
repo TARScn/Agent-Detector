@@ -66,3 +66,34 @@ class EvidenceRow(Base):
     detail_json: Mapped[str] = mapped_column(Text, default="{}")
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
     created_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+
+
+class BehaviorEventRow(Base):
+    """Behavior/protocol events (plan section 5.2 behavior_events).
+
+    The local gateway is currently the only writer; ``source`` distinguishes
+    future event feeds (process monitor, trace adapter). ``asset_id`` stays
+    empty until traffic-to-asset correlation lands. Event rows carry the
+    observer's declared confidence grade (high/medium/low), never raw content.
+    """
+
+    __tablename__ = "behavior_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    observed_at: Mapped[str] = mapped_column(String(48), index=True)
+    source: Mapped[str] = mapped_column(String(32), default="gateway")
+    agent_label: Mapped[str] = mapped_column(String(80), index=True)
+    asset_id: Mapped[str | None] = mapped_column(String(96))
+    flow_id: Mapped[str] = mapped_column(String(64))
+    upstream_host: Mapped[str] = mapped_column(String(255))
+    protocol: Mapped[str] = mapped_column(String(16), index=True)
+    event_type: Mapped[str] = mapped_column(String(48))
+    operation: Mapped[str] = mapped_column(String(100))
+    confidence: Mapped[str] = mapped_column(String(16))
+    endpoint: Mapped[str] = mapped_column(String(150))
+    protocol_version: Mapped[str | None] = mapped_column(String(30))
+    component_version: Mapped[str | None] = mapped_column(String(30))
+    model: Mapped[str | None] = mapped_column(String(90))
+    tool: Mapped[str | None] = mapped_column(String(90))
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")

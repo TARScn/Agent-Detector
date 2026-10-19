@@ -36,7 +36,8 @@
 .hero>div{flex:1}.hero h2{margin:0 0 6px;font-size:17px}.hero p{margin:0;color:var(--muted);line-height:1.7;font-size:13px}
 /* ---------- 统计卡 ---------- */
 .stat-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:14px;margin-bottom:18px}
-@media(max-width:1100px){.stat-grid{grid-template-columns:repeat(3,1fr)}}
+.stat-grid.g4{grid-template-columns:repeat(4,1fr)}
+@media(max-width:1100px){.stat-grid{grid-template-columns:repeat(3,1fr)}.stat-grid.g4{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:640px){.stat-grid{grid-template-columns:repeat(2,1fr)}}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
 .stat .num{font-size:24px;font-weight:700;line-height:1.2}
@@ -56,6 +57,7 @@ pre{white-space:pre-wrap;word-break:break-all;font-size:12px;background:#0f172a;
 .st-RUNNING{background:#dbeafe;color:#1e40af}.st-BEHAVIOR_SUSPECTED{background:#ede9fe;color:#5b21b6}
 .st-EXECUTION_CONFIRMED{background:#ccfbf1;color:#115e59}.st-UNKNOWN{background:#e2e8f0;color:#475569}
 .ty{background:#f1f5f9;color:#475569;border:1px solid var(--border)}
+.pt-LLM{background:#dbeafe;color:#1e40af}.pt-MCP{background:#fef3c7;color:#92400e}.pt-A2A{background:#ccfbf1;color:#115e59}
 .conf-ok{color:#16a34a;font-weight:600}
 /* ---------- 控件 ---------- */
 button,select,input{font:inherit;font-size:13px;border:1px solid #cbd5e1;background:#fff;color:var(--text);padding:8px 13px;border-radius:7px}
@@ -110,8 +112,11 @@ ul.plain{margin:0;padding-left:18px;line-height:2;color:var(--muted);font-size:1
   <section id="page-scan" class="page">
     <div class="hero card">
       <div><h2>Agent 扫描</h2>
-      <p>只读采集本机进程、监听端口与安装 / 配置特征，依据声明式规则识别 Agent 客户端、框架、模型服务与 MCP 组件。不执行任何被发现的程序，不读取文件内容。</p></div>
-      <button class="btn primary lg" id="btn-agent-scan">开始 Agent 扫描</button>
+      <p>只读采集本机进程、监听端口与安装 / 配置特征，依据声明式规则识别 Agent 客户端、框架、模型服务与 MCP 组件。深度扫描额外对本机已监听端口发送少量 HTTP 指纹请求（仅回环地址、不跟随重定向、端口数有上限）。不执行任何被发现的程序，不读取文件内容。</p></div>
+      <div style="display:flex;gap:10px;flex:none">
+        <button class="btn primary lg" id="btn-agent-scan">开始 Agent 扫描</button>
+        <button class="btn lg" id="btn-deep-scan">深度扫描</button>
+      </div>
     </div>
     <div class="stat-grid" id="stat-cards"></div>
     <div class="grid-2">
@@ -120,20 +125,35 @@ ul.plain{margin:0;padding-left:18px;line-height:2;color:var(--muted);font-size:1
     </div>
   </section>
 
-  <!-- ============ 监控页 ============ -->
+  <!-- ============ 监控页（本地网关 · 流量监控） ============ -->
   <section id="page-monitor" class="page">
-    <div class="hero card warn">
-      <div><h2>流量监控</h2>
-      <p>对本机<b>已监听端口</b>发送少量 HTTP 指纹请求，识别 Ollama、vLLM、FastMCP、Dify 等本机服务。仅回环地址、不跟随重定向、不访问远程、端口数有上限（设置页可查看）。此为主动探测，按需手动启动。</p></div>
-      <button class="btn warn lg" id="btn-traffic">启动流量监控</button>
+    <div class="hero card" id="gw-hero">
+      <div><h2 id="gw-headline">流量监控 · 本地网关</h2>
+      <p>本地显式代理网关观察 Agent 对 LLM / MCP / A2A 服务的调用，只记录协议元数据（方法、模型名、工具名、状态码），不保存提示词、工具参数与凭证。协议事件仅证明调用发生，不等于确认 Agent 自主执行。</p></div>
+      <div style="display:flex;gap:10px;flex:none">
+        <button class="btn primary lg" id="btn-gw-start">启动网关</button>
+        <button class="btn lg" id="btn-gw-stop" disabled>停止网关</button>
+      </div>
     </div>
+    <div class="stat-grid g4" id="gw-stats"></div>
     <div class="grid-2">
-      <div class="card"><h3>本机监听概况</h3><dl class="dl" id="listen-stats"></dl></div>
-      <div class="card"><h3>探测能力（服务指纹）</h3><div id="probe-tokens"></div></div>
+      <div class="card"><h3>网关状态</h3><dl class="dl" id="gw-status"><div><dt>状态</dt><dd>加载中…</dd></div></dl></div>
+      <div class="card"><h3>接入指引</h3><ul class="plain">
+        <li>将目标 Agent 进程的 HTTP(S)_PROXY 指向网关地址（仅该进程生效，不改系统代理）</li>
+        <li>HTTPS 流量需目标进程信任网关 CA；请勿将 CA 装入系统信任根</li>
+        <li>自测：<code>agent-detector gateway demo</code> 生成模拟 LLM / MCP / A2A 流量</li>
+        <li>CLI 管理：<code>agent-detector gateway start|stop|status</code></li>
+      </ul></div>
     </div>
-    <div class="card"><h3>流量监控发现</h3>
-      <table><thead><tr><th>服务</th><th>类型</th><th>端口</th><th>版本 / 说明</th><th>状态</th></tr></thead>
-      <tbody id="traffic-findings"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody></table></div>
+    <div class="card">
+      <div class="toolbar" style="margin-bottom:0">
+        <h3 style="margin:0;flex:1">协议事件</h3>
+        <label>协议 <select id="gw-protocol"><option value="">全部</option><option value="LLM">LLM</option><option value="MCP">MCP</option><option value="A2A">A2A</option></select></label>
+        <span class="muted" id="gw-count"></span>
+      </div>
+      <table><thead><tr><th>时间</th><th>协议</th><th>事件 / 操作</th><th>目标</th><th>模型 / 工具 / 版本</th><th>HTTP</th><th>证据</th></tr></thead>
+      <tbody id="gw-events"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody></table>
+    </div>
   </section>
 
   <!-- ============ 结果页 ============ -->
@@ -161,7 +181,8 @@ ul.plain{margin:0;padding-left:18px;line-height:2;color:var(--muted);font-size:1
       <div class="card"><h3>安全边界</h3><ul class="plain">
         <li>仅监听 127.0.0.1，不对局域网开放</li>
         <li>被动采集全部只读；不执行被发现的 Agent / Skill / MCP 启动命令</li>
-        <li>流量监控仅探测回环地址，不跟随重定向、有端口上限</li>
+        <li>主动探测仅回环地址，不跟随重定向、有端口上限；网关只启动模板化 mitmdump，不接受任意命令</li>
+        <li>网关只记录协议元数据；提示词、工具参数、Authorization 与 Cookie 不落库</li>
         <li>配置文件只记录键名；凭证原文不入库，命令行密钥自动脱敏</li>
         <li>版本无可靠来源时输出 UNKNOWN，不做猜测</li>
       </ul></div>
@@ -182,15 +203,16 @@ ul.plain{margin:0;padding-left:18px;line-height:2;color:var(--muted);font-size:1
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
-const MODE_LABEL = {agent:'Agent 扫描', passive:'Agent 扫描', 'agent+traffic':'Agent + 流量监控', 'active+passive':'Agent + 流量监控'};
+const MODE_LABEL = {agent:'Agent 扫描', passive:'Agent 扫描', 'agent+traffic':'深度扫描（含主动探测）', 'active+passive':'深度扫描（含主动探测）'};
 const TYPE_LABEL = {AGENT_CLIENT:'Agent 客户端', AGENT_RUNTIME:'Agent 框架', AGENT_SERVICE:'Agent 服务',
   AGENT_PLATFORM:'Agent 平台', MCP_SERVER:'MCP 服务', LLM_SERVICE:'模型服务', AI_APPLICATION:'AI 应用', UNKNOWN:'未知'};
-const PROBE_TOKENS = ['Ollama','vLLM','Open WebUI','FastMCP','Dify'];
 const state = {scans:[], assets:[], settings:null};
 
 /* ---------- 基础 ---------- */
 async function api(path, opts){const r=await fetch(path,opts);const t=await r.text();
-  if(!r.ok)throw new Error(t||r.statusText);return t?JSON.parse(t):null}
+  if(!r.ok){let msg=t||r.statusText;try{msg=JSON.parse(t).detail||msg}catch(_){/*plain text*/}
+    throw new Error(msg)}
+  return t?JSON.parse(t):null}
 function el(tag,cls,...children){const e=document.createElement(tag);
   if(cls)e.className=cls;
   for(const c of children.flat()){if(c==null)continue;e.append(c.nodeType?c:document.createTextNode(String(c)))}
@@ -239,10 +261,10 @@ async function refreshShared(silent){
 }
 
 /* ---------- 扫描动作 ---------- */
-async function runScan(active){
-  const btn=active?$('btn-traffic'):$('btn-agent-scan');
-  const old=btn.textContent;btn.disabled=true;btn.textContent=active?'监控进行中…':'扫描进行中…';
-  $('top-status').textContent=active?'流量监控运行中…':'Agent 扫描运行中…';
+async function runScan(active,btn){
+  btn=btn||$(active?'btn-deep-scan':'btn-agent-scan');
+  const old=btn.textContent;btn.disabled=true;btn.textContent='扫描进行中…';
+  $('top-status').textContent='扫描运行中…';
   try{
     const r=await api('/api/scans',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({active})});
@@ -253,7 +275,7 @@ async function runScan(active){
   finally{btn.disabled=false;btn.textContent=old;$('top-status').textContent=''}
 }
 $('btn-agent-scan').onclick=()=>runScan(false);
-$('btn-traffic').onclick=()=>runScan(true);
+$('btn-deep-scan').onclick=()=>runScan(true);
 $('btn-refresh').onclick=async()=>{await refreshShared();route()};
 
 /* ---------- 扫描主页 ---------- */
@@ -284,26 +306,79 @@ LOADERS.scan=()=>{
   if(!a.length)ra.replaceChildren(emptyRow(4,'暂无资产'));
 };
 
-/* ---------- 监控页 ---------- */
-LOADERS.monitor=()=>{
-  const last=state.scans[0];
-  const obs=last&&last.stats.observations||{};
-  $('listen-stats').replaceChildren(...[
-    ['进程数',obs.processes??'—'],['监听端口数',obs.listening_sockets??'—'],
-    ['端口探测上限',state.settings?state.settings.max_probes:'—'],
-    ['探测范围','仅 127.0.0.1 / ::1'],['最近采集',last?fmtTime(last.started_at):'—']]
-    .map(([k,v])=>el('div','',el('dt','',k),el('dd','',String(v)))));
-  const box=$('probe-tokens');
-  box.replaceChildren(...PROBE_TOKENS.map(t=>tag(t,'ty')));
-  box.append(el('p','muted','逐端口请求 /health → /openapi.json → /，响应中命中指纹即记录证据；单端口握手成功即停止。'));
-  const findings=state.assets.filter(x=>x.detector==='http-probe');
-  const tb=$('traffic-findings');tb.replaceChildren();
-  if(!findings.length){tb.append(emptyRow(5,'暂无流量监控发现（尚未运行，或未命中服务指纹）'))}
-  findings.forEach(x=>tb.append(el('tr','',
-    el('td','',x.name),typeCell(x.asset_type),
-    el('td','',x.listening_ports.join(', ')||'—'),
-    el('td','',x.version==='UNKNOWN'?'指纹命中':x.version),stateTags(x.states))));
+/* ---------- 监控页（本地网关 · 流量监控） ---------- */
+LOADERS.monitor=()=>{loadGatewayStatus(true);loadGatewayStats(true);loadGatewayEvents(true)};
+
+async function loadGatewayStatus(silent){
+  try{
+    const st=await api('/api/gateway/status');
+    $('btn-gw-start').disabled=st.running;
+    $('btn-gw-stop').disabled=!st.running;
+    $('gw-hero').classList.toggle('warn',!st.running);
+    $('gw-headline').textContent=st.running?'流量监控 · 网关运行中':'流量监控 · 本地网关';
+    const rows=[
+      ['运行状态',st.running?'运行中 · PID '+st.pid:'已停止'],
+      ['监听地址',st.listen],
+      ['Agent 标签',st.agent_label],
+      ['观测白名单',st.observed_hosts.join(', ')],
+      ['mitmdump',st.available?'已安装':'未安装（pip install "agent-detector[gateway]"）'],
+      ['启动时间',st.running?fmtTime(st.started_at):'—'],
+      ['已运行',(st.running&&st.uptime_s!=null)?Math.floor(st.uptime_s/60)+' 分 '+(st.uptime_s%60)+' 秒':'—']];
+    $('gw-status').replaceChildren(...rows.map(([k,v])=>
+      el('div','',el('dt','',k),el('dd','',String(v)))));
+  }catch(e){if(!silent)toast('网关状态获取失败：'+e.message,true)}
+}
+
+async function loadGatewayStats(silent){
+  try{
+    const s=await api('/api/gateway/stats');
+    const stats=[[s.event_count,'事件总数','hi'],
+      [s.by_protocol.LLM||0,'LLM 调用',''],[s.by_protocol.MCP||0,'MCP 调用',''],
+      [s.by_protocol.A2A||0,'A2A 调用','']];
+    $('gw-stats').replaceChildren(...stats.map(([n,l,c])=>
+      el('div','stat'+(c?' '+c:''),el('div','num',n),el('div','lbl',l))));
+  }catch(e){if(!silent)toast('统计获取失败：'+e.message,true)}
+}
+
+async function loadGatewayEvents(silent){
+  const p=$('gw-protocol').value;
+  try{
+    const r=await api('/api/gateway/events?limit=150'+(p?'&protocol='+p:''));
+    const items=r.items;
+    $('gw-count').textContent=items.length+' 条';
+    const tb=$('gw-events');tb.replaceChildren();
+    if(!items.length){
+      tb.append(emptyRow(7,'暂无事件——启动网关并让 Agent 流量经过代理后，这里会出现协议事件记录'));
+      return}
+    items.forEach(x=>{
+      const meta=[x.model,x.tool,x.component_version,x.protocol_version].find(v=>v)||'—';
+      const ev=el('td');(x.evidence||[]).forEach(e=>ev.append(tag(e,'ty')));
+      if(!(x.evidence||[]).length)ev.textContent='—';
+      tb.append(el('tr','',
+        el('td','muted',fmtTime(x.observed_at)),
+        el('td','',tag(x.protocol,'pt-'+x.protocol)),
+        el('td','',el('b','',x.event_type),el('div','sub',x.operation)),
+        el('td','',el('code','',x.upstream_host+x.endpoint)),
+        el('td','',meta),
+        el('td','',x.http_status?String(x.http_status):'—'),
+        ev));
+    });
+  }catch(e){if(!silent)toast('事件加载失败：'+e.message,true)}
+}
+
+$('btn-gw-start').onclick=async()=>{
+  const b=$('btn-gw-start'),old=b.textContent;b.disabled=true;b.textContent='启动中…';
+  try{await api('/api/gateway/start',{method:'POST'});toast('网关已启动')}
+  catch(e){toast('启动失败：'+e.message,true)}
+  finally{b.textContent=old;await loadGatewayStatus()}
 };
+$('btn-gw-stop').onclick=async()=>{
+  const b=$('btn-gw-stop'),old=b.textContent;b.disabled=true;b.textContent='停止中…';
+  try{await api('/api/gateway/stop',{method:'POST'});toast('网关已停止')}
+  catch(e){toast('停止失败：'+e.message,true)}
+  finally{b.textContent=old;await loadGatewayStatus()}
+};
+$('gw-protocol').addEventListener('change',()=>loadGatewayEvents());
 
 /* ---------- 结果页 ---------- */
 function fillFilter(sel,values,labels){const cur=sel.value;
@@ -378,7 +453,8 @@ LOADERS.settings=async()=>{
   $('sys-info').replaceChildren(...[
     ['服务版本','v'+(s.version||'—')],['数据库',s.db_path||'—'],
     ['监听地址',s.listen||'127.0.0.1'],['端口探测上限',s.max_probes??'—'],
-    ['扫描口径','Agent 扫描（只读被动采集）/ 流量监控（本机端口指纹）'],
+    ['扫描口径','Agent 扫描（被动只读）/ 深度扫描（含本机端口指纹）'],
+    ['流量监控','本地网关（显式代理，观察 LLM / MCP / A2A 调用）'],
     ['规则加载','包内置 + AGENT_DETECTOR_RULES_DIR 外部目录']]
     .map(([k,v])=>el('div','',el('dt','',k),el('dd','',v))));
   try{

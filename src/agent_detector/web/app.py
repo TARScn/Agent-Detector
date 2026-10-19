@@ -9,13 +9,15 @@ from sqlalchemy.orm import Session
 from agent_detector.application.scan_service import run_scan
 from agent_detector.common.config import DB_PATH, MAX_PROBES
 from agent_detector.fingerprints.loader import load_rules
+from agent_detector.gateway.manager import GatewayError, GatewayManager
 from agent_detector.persistence.database import make_engine
-from agent_detector.persistence.repositories import (AssetRepository, EvidenceRepository,
-                                                     ScanRepository)
+from agent_detector.persistence.repositories import (AssetRepository, BehaviorEventRepository,
+                                                     EvidenceRepository, ScanRepository)
 
 app = FastAPI(title="Agent Detector", version="0.1.0")
 engine = make_engine(DB_PATH)
 scan_lock = threading.Lock()
+gateway_manager = GatewayManager(db_path=DB_PATH)
 
 
 class ScanRequest(BaseModel):
@@ -92,3 +94,41 @@ def asset_evidence(asset_id: str, scan_id: int | None = None):
     if not evidence:
         raise HTTPException(status_code=404, detail="No evidence recorded for this asset")
     return evidence
+
+
+@app.get("/api/gateway/status")
+def gateway_status():
+    return gateway_manager.status()
+
+
+@app.post("/api/gateway/start")
+def gateway_start():
+    try:
+        return gateway_manager.start()
+    except GatewayError as exc:
+        message = str(exc)
+        code = 409 if "already running" in message else 400
+        raise HTTPException(status_code=code, detail=message) from exc
+
+
+@app.post("/api/gateway/stop")
+def gateway_stop():
+    try:
+        return gateway_manager.stop()
+    except GatewayError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/gateway/events")
+def gateway_events(limit: int = 100, protocol: str | None = None):
+    if protocol and protocol not in {"LLM", "MCP", "A2A"}:
+        return {"items": []}
+    with Session(engine) as session:
+        return {"items": BehaviorEventRepository(session).list_events(limit=limit,
+                                                                      protocol=protocol)}
+
+
+@app.get("/api/gateway/stats")
+def gateway_stats():
+    with Session(engine) as session:
+        return BehaviorEventRepository(session).stats()
