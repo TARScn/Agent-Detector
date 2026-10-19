@@ -28,7 +28,6 @@ where = ["src"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]
-gateway = ["mitmproxy>=11,<14"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -125,35 +125,10 @@ ul.plain{margin:0;padding-left:18px;line-height:2;color:var(--muted);font-size:1
     </div>
   </section>
 
-  <!-- ============ 监控页（本地网关 · 流量监控） ============ -->
+  <!-- ============ 监控页（网络行为监控 · 阶段重建占位） ============ -->
   <section id="page-monitor" class="page">
-    <div class="hero card" id="gw-hero">
-      <div><h2 id="gw-headline">流量监控 · 本地网关</h2>
-      <p>本地显式代理网关观察 Agent 对 LLM / MCP / A2A 服务的调用，只记录协议元数据（方法、模型名、工具名、状态码），不保存提示词、工具参数与凭证。协议事件仅证明调用发生，不等于确认 Agent 自主执行。</p></div>
-      <div style="display:flex;gap:10px;flex:none">
-        <button class="btn primary lg" id="btn-gw-start">启动网关</button>
-        <button class="btn lg" id="btn-gw-stop" disabled>停止网关</button>
-      </div>
-    </div>
-    <div class="stat-grid g4" id="gw-stats"></div>
-    <div class="grid-2">
-      <div class="card"><h3>网关状态</h3><dl class="dl" id="gw-status"><div><dt>状态</dt><dd>加载中…</dd></div></dl></div>
-      <div class="card"><h3>接入指引</h3><ul class="plain">
-        <li>将目标 Agent 进程的 HTTP(S)_PROXY 指向网关地址（仅该进程生效，不改系统代理）</li>
-        <li>HTTPS 流量需目标进程信任网关 CA；请勿将 CA 装入系统信任根</li>
-        <li>自测：<code>agent-detector gateway demo</code> 生成模拟 LLM / MCP / A2A 流量</li>
-        <li>CLI 管理：<code>agent-detector gateway start|stop|status</code></li>
-      </ul></div>
-    </div>
-    <div class="card">
-      <div class="toolbar" style="margin-bottom:0">
-        <h3 style="margin:0;flex:1">协议事件</h3>
-        <label>协议 <select id="gw-protocol"><option value="">全部</option><option value="LLM">LLM</option><option value="MCP">MCP</option><option value="A2A">A2A</option></select></label>
-        <span class="muted" id="gw-count"></span>
-      </div>
-      <table><thead><tr><th>时间</th><th>协议</th><th>事件 / 操作</th><th>目标</th><th>模型 / 工具 / 版本</th><th>HTTP</th><th>证据</th></tr></thead>
-      <tbody id="gw-events"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody></table>
-    </div>
+    <div class="card"><h3>网络行为监控</h3>
+    <p class="muted">建设中——零合作检测本机 Agent 的 LLM API 调用并记录目标地址（连接级证据）。</p></div>
   </section>
 
   <!-- ============ 结果页 ============ -->
@@ -305,80 +280,6 @@ LOADERS.scan=()=>{
     el('td','',x.version==='UNKNOWN'?'未知':x.version)))));
   if(!a.length)ra.replaceChildren(emptyRow(4,'暂无资产'));
 };
-
-/* ---------- 监控页（本地网关 · 流量监控） ---------- */
-LOADERS.monitor=()=>{loadGatewayStatus(true);loadGatewayStats(true);loadGatewayEvents(true)};
-
-async function loadGatewayStatus(silent){
-  try{
-    const st=await api('/api/gateway/status');
-    $('btn-gw-start').disabled=st.running;
-    $('btn-gw-stop').disabled=!st.running;
-    $('gw-hero').classList.toggle('warn',!st.running);
-    $('gw-headline').textContent=st.running?'流量监控 · 网关运行中':'流量监控 · 本地网关';
-    const rows=[
-      ['运行状态',st.running?'运行中 · PID '+st.pid:'已停止'],
-      ['监听地址',st.listen],
-      ['Agent 标签',st.agent_label],
-      ['观测白名单',st.observed_hosts.join(', ')],
-      ['mitmdump',st.available?'已安装':'未安装（pip install "agent-detector[gateway]"）'],
-      ['启动时间',st.running?fmtTime(st.started_at):'—'],
-      ['已运行',(st.running&&st.uptime_s!=null)?Math.floor(st.uptime_s/60)+' 分 '+(st.uptime_s%60)+' 秒':'—']];
-    $('gw-status').replaceChildren(...rows.map(([k,v])=>
-      el('div','',el('dt','',k),el('dd','',String(v)))));
-  }catch(e){if(!silent)toast('网关状态获取失败：'+e.message,true)}
-}
-
-async function loadGatewayStats(silent){
-  try{
-    const s=await api('/api/gateway/stats');
-    const stats=[[s.event_count,'事件总数','hi'],
-      [s.by_protocol.LLM||0,'LLM 调用',''],[s.by_protocol.MCP||0,'MCP 调用',''],
-      [s.by_protocol.A2A||0,'A2A 调用','']];
-    $('gw-stats').replaceChildren(...stats.map(([n,l,c])=>
-      el('div','stat'+(c?' '+c:''),el('div','num',n),el('div','lbl',l))));
-  }catch(e){if(!silent)toast('统计获取失败：'+e.message,true)}
-}
-
-async function loadGatewayEvents(silent){
-  const p=$('gw-protocol').value;
-  try{
-    const r=await api('/api/gateway/events?limit=150'+(p?'&protocol='+p:''));
-    const items=r.items;
-    $('gw-count').textContent=items.length+' 条';
-    const tb=$('gw-events');tb.replaceChildren();
-    if(!items.length){
-      tb.append(emptyRow(7,'暂无事件——启动网关并让 Agent 流量经过代理后，这里会出现协议事件记录'));
-      return}
-    items.forEach(x=>{
-      const meta=[x.model,x.tool,x.component_version,x.protocol_version].find(v=>v)||'—';
-      const ev=el('td');(x.evidence||[]).forEach(e=>ev.append(tag(e,'ty')));
-      if(!(x.evidence||[]).length)ev.textContent='—';
-      tb.append(el('tr','',
-        el('td','muted',fmtTime(x.observed_at)),
-        el('td','',tag(x.protocol,'pt-'+x.protocol)),
-        el('td','',el('b','',x.event_type),el('div','sub',x.operation)),
-        el('td','',el('code','',x.upstream_host+x.endpoint)),
-        el('td','',meta),
-        el('td','',x.http_status?String(x.http_status):'—'),
-        ev));
-    });
-  }catch(e){if(!silent)toast('事件加载失败：'+e.message,true)}
-}
-
-$('btn-gw-start').onclick=async()=>{
-  const b=$('btn-gw-start'),old=b.textContent;b.disabled=true;b.textContent='启动中…';
-  try{await api('/api/gateway/start',{method:'POST'});toast('网关已启动')}
-  catch(e){toast('启动失败：'+e.message,true)}
-  finally{b.textContent=old;await loadGatewayStatus()}
-};
-$('btn-gw-stop').onclick=async()=>{
-  const b=$('btn-gw-stop'),old=b.textContent;b.disabled=true;b.textContent='停止中…';
-  try{await api('/api/gateway/stop',{method:'POST'});toast('网关已停止')}
-  catch(e){toast('停止失败：'+e.message,true)}
-  finally{b.textContent=old;await loadGatewayStatus()}
-};
-$('gw-protocol').addEventListener('change',()=>loadGatewayEvents());
 
 /* ---------- 结果页 ---------- */
 function fillFilter(sel,values,labels){const cur=sel.value;
