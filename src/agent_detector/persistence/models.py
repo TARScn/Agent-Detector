@@ -71,10 +71,11 @@ class EvidenceRow(Base):
 class BehaviorEventRow(Base):
     """Behavior/protocol events (plan section 5.2 behavior_events).
 
-    The local gateway is currently the only writer; ``source`` distinguishes
-    future event feeds (process monitor, trace adapter). ``asset_id`` stays
-    empty until traffic-to-asset correlation lands. Event rows carry the
-    observer's declared confidence grade (high/medium/low), never raw content.
+    Writers append rows directly: ``source="netmon"`` for zero-cooperation LLM
+    connection observations, ``source="auditd"``/``"poll"`` for the system
+    behavior channels. ``source`` distinguishes event feeds; ``asset_id`` stays
+    empty when no asset could be proven. Event rows carry the observer's
+    declared confidence grade (high/medium/low), never raw content.
     """
 
     __tablename__ = "behavior_events"
@@ -96,4 +97,10 @@ class BehaviorEventRow(Base):
     model: Mapped[str | None] = mapped_column(String(90))
     tool: Mapped[str | None] = mapped_column(String(90))
     http_status: Mapped[int | None] = mapped_column(Integer)
+    # System behavior columns (added after V0.1 shipped; see database.ensure_schema):
+    pid: Mapped[int | None] = mapped_column(Integer)
+    ppid: Mapped[int | None] = mapped_column(Integer)
+    process_name: Mapped[str | None] = mapped_column(String(80))
+    target: Mapped[str | None] = mapped_column(String(512))
+    result: Mapped[str | None] = mapped_column(String(24))
     evidence_json: Mapped[str] = mapped_column(Text, default="[]")

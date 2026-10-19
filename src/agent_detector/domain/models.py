@@ -10,6 +10,7 @@ class ProcessInfo:
     name: str
     cmdline: tuple[str, ...] = ()
     create_time: float | None = None
+    ppid: int | None = None
 
 
 @dataclass(frozen=True)

@@ -6,6 +6,32 @@ from sqlalchemy.engine import Engine
 
 from agent_detector.persistence.models import Base
 
+# Additive columns introduced after V0.1 shipped; older databases are upgraded
+# in place by ensure_schema() (no Alembic yet).
+_BEHAVIOR_EVENT_COLUMNS = {
+    "pid": "INTEGER",
+    "ppid": "INTEGER",
+    "process_name": "VARCHAR(80)",
+    "target": "VARCHAR(512)",
+    "result": "VARCHAR(24)",
+}
+
+
+def ensure_schema(engine: Engine) -> list[str]:
+    """Idempotent additive migration; returns the column names it added."""
+    added: list[str] = []
+    with engine.begin() as connection:
+        existing = {row[1] for row in
+                    connection.exec_driver_sql("PRAGMA table_info(behavior_events)")}
+        if not existing:
+            return added
+        for name, ddl in _BEHAVIOR_EVENT_COLUMNS.items():
+            if name not in existing:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE behavior_events ADD COLUMN {name} {ddl}")
+                added.append(name)
+    return added
+
 
 def make_engine(db_path) -> Engine:
     path = Path(db_path)
@@ -20,4 +46,5 @@ def make_engine(db_path) -> Engine:
         cursor.close()
 
     Base.metadata.create_all(engine)
+    ensure_schema(engine)
     return engine

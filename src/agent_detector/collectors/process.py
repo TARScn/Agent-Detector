@@ -13,19 +13,28 @@ def _clean(text: str) -> str:
     return text.encode("utf-8", "replace").decode("utf-8")
 
 
-def collect_processes() -> list[ProcessInfo]:
-    """Read-only snapshot; inaccessible process metadata is silently skipped."""
+def collect_processes(*, with_cmdline: bool = True) -> list[ProcessInfo]:
+    """Read-only snapshot; inaccessible process metadata is silently skipped.
+
+    ``with_cmdline=False`` skips command lines — a full snapshot with cmdlines
+    can take seconds on Windows (measured ~7s vs ~0.06s for 366 processes), for
+    callers that only diff process identities and resolve details per new pid.
+    """
     result: list[ProcessInfo] = []
-    for proc in psutil.process_iter(attrs=["pid", "name", "cmdline", "create_time"]):
+    attrs = ["pid", "name", "create_time", "ppid"]
+    if with_cmdline:
+        attrs.insert(2, "cmdline")
+    for proc in psutil.process_iter(attrs=attrs):
         try:
             info = proc.info
             name = _clean(info.get("name") or "")
-            raw_cmdline = info.get("cmdline") or []
+            raw_cmdline = (info.get("cmdline") or []) if with_cmdline else []
             cmdline = tuple(_clean(arg) for arg in raw_cmdline[:_CMDLINE_ARGS_LIMIT])
             if not name and not cmdline:
                 continue
             result.append(ProcessInfo(pid=info["pid"], name=name, cmdline=cmdline,
-                                      create_time=info.get("create_time")))
+                                      create_time=info.get("create_time"),
+                                      ppid=info.get("ppid")))
         except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
             continue
     return result
