@@ -7,6 +7,10 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from agent_detector.application.scan_service import run_scan
+from agent_detector.behavior.audit.rules_template import (build_rules, install_commands,
+                                                          uninstall_commands)
+from agent_detector.behavior.ingest_service import (BehaviorIngestError,
+                                                    BehaviorIngestService)
 from agent_detector.behavior.monitor_service import MonitorError, MonitorManager
 from agent_detector.common.config import DB_PATH, MAX_PROBES
 from agent_detector.fingerprints.loader import load_rules
@@ -18,6 +22,7 @@ app = FastAPI(title="Agent Detector", version="0.1.0")
 engine = make_engine(DB_PATH)
 scan_lock = threading.Lock()
 monitor_manager = MonitorManager(engine)
+behavior_service = BehaviorIngestService(engine)
 
 
 class ScanRequest(BaseModel):
@@ -27,6 +32,12 @@ class ScanRequest(BaseModel):
 class MonitorRequest(BaseModel):
     interval: float | None = None
     suppress_seconds: int | None = None
+
+
+class BehaviorStartRequest(BaseModel):
+    mode: str | None = None
+    log_path: str | None = None
+    from_start: bool | None = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -132,3 +143,66 @@ def monitor_events(limit: int = 100):
 def monitor_stats():
     with Session(engine) as session:
         return BehaviorEventRepository(session).stats(source="netmon")
+
+
+@app.get("/api/assets/{asset_id}/events")
+def asset_events(asset_id: str, limit: int = 50):
+    with Session(engine) as session:
+        return {"items": BehaviorEventRepository(session).list_events(
+            limit=limit, asset_id=asset_id)}
+
+
+@app.get("/api/behavior/status")
+def behavior_status():
+    return behavior_service.status()
+
+
+@app.post("/api/behavior/start")
+def behavior_start(body: BehaviorStartRequest | None = None):
+    try:
+        return behavior_service.start(mode=body.mode if body else None,
+                                      log_path=body.log_path if body else None,
+                                      from_start=body.from_start if body else None)
+    except BehaviorIngestError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/behavior/stop")
+def behavior_stop():
+    return behavior_service.stop()
+
+
+@app.get("/api/behavior/events")
+def behavior_events(limit: int = 100, agent: str | None = None, source: str | None = None,
+                    event_type: str | None = None):
+    with Session(engine) as session:
+        return {"items": BehaviorEventRepository(session).list_events(
+            limit=limit, source=source, agent_label=agent, event_type=event_type)}
+
+
+@app.get("/api/behavior/stats")
+def behavior_stats(source: str | None = None):
+    with Session(engine) as session:
+        return BehaviorEventRepository(session).stats(source=source)
+
+
+@app.get("/api/behavior/audit-rules")
+def behavior_audit_rules(watch_dir: str | None = None, uid_min: int = 1000,
+                         include_net: bool = True, include_kill: bool = False):
+    try:
+        rule_set = build_rules([watch_dir] if watch_dir else [], uid_min=uid_min,
+                               include_net=include_net, include_kill=include_kill)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "rules": list(rule_set.rules),
+        "install": install_commands(rule_set),
+        "install_persistent": install_commands(rule_set, persistent=True),
+        "uninstall": uninstall_commands(rule_set),
+        "notes": [
+            "规则需要 root 执行（sudo auditctl / augenrules）；本工具不会自动提权。",
+            "audit.log 默认仅 root 可读：以 root 运行采集器，或在 "
+            "/etc/audit/auditd.conf 设置 log_group 让采集用户可读。",
+            "--watch-dir（-F dir=）为递归目录过滤，只审计这些目录内的文件行为。",
+        ],
+    }
