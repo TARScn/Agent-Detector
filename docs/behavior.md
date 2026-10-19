@@ -91,4 +91,4 @@ known_model_ports:    # loopback 目的端口 → 本机模型服务名
 零合作通道给出"谁在调谁"的底图；内容级与强证据由授权通道补充（均规划中，不属本版）：
 
 - **hooks / 遥测适配器**：Agent 运行时事件（如工具调用）以 `source="hook"` 写入同一张 `behavior_events`，可将资产升级到 EXECUTION_CONFIRMED。
-- **进程行为监测**：进程树 + 子进程活动 + 更细粒度网络事件（M4 完整版），补 PPID 缺口与短连接盲区。
+- **进程行为监测（已实现，见 [syscall-monitoring.md](syscall-monitoring.md)）**：Linux 以 auditd 采集进程执行 / 文件写-移动-删除 / connect，经进程树归属到 Agent；Windows 与无 root 环境使用采样降级模式（仅进程执行级）；与 netmon 事件在同一时间线按 `source` 区分。
