@@ -15,6 +15,8 @@ from agent_detector.common.security import redact
 from agent_detector.domain.enums import AssetState, EvidenceKind, VersionSource
 from agent_detector.domain.models import (DetectedAsset, Evidence, HostFacts, ProcessInfo,
                                           VersionInfo)
+from agent_detector.fingerprints.match import (compile_excludes, match_client_process,
+                                               match_signature_process, process_text)
 from agent_detector.fingerprints.schema import ClientRule, SignatureRule
 from agent_detector.recognition.identity import build_asset_id, normalize_path, slugify
 
@@ -65,8 +67,7 @@ class ClientRuleDetector:
         self._home = home
         self._npm_global_root = npm_global_root
         self._run_npm_lookup = run_npm_lookup
-        self._excludes = ([re.compile(p) for p in rule.process.exclude_patterns]
-                          if rule.process else [])
+        self._excludes = compile_excludes(rule.process)
 
     def detect(self, facts: HostFacts) -> list[DetectedAsset]:
         home = self._home or Path.home()
@@ -199,14 +200,11 @@ class ClientRuleDetector:
                     {"path": fact.path, "size": fact.size}, probe.confidence))
 
     def _match_processes(self, facts, evidence, states) -> list[tuple[ProcessInfo, str]]:
-        spec = self.rule.process
-        if spec is None:
+        if self.rule.process is None:
             return []
-        exe_names = {name.lower() for name in spec.executable_names}
-        tokens = [token.lower() for token in spec.cmdline_tokens]
         matched: list[tuple[ProcessInfo, str]] = []
         for proc in facts.processes:
-            reason = self._match_one(proc, spec, exe_names, tokens)
+            reason = match_client_process(self.rule, proc, self._excludes)
             if reason is None:
                 continue
             states.add(AssetState.RUNNING)
@@ -216,25 +214,8 @@ class ClientRuleDetector:
                 f"process {proc.pid} looks like {self.rule.name} ({reason})",
                 {"pid": proc.pid, "name": proc.name,
                  "cmdline": redact(" ".join(proc.cmdline))[:_CMDLINE_TEXT_LIMIT],
-                 "match": reason}, spec.confidence))
+                 "match": reason}, self.rule.process.confidence))
         return matched
-
-    def _match_one(self, proc: ProcessInfo, spec, exe_names: set[str],
-                   tokens: list[str]) -> str | None:
-        text = " ".join((proc.name, *proc.cmdline)).replace("\\", "/").lower()
-        if any(pattern.search(text) for pattern in self._excludes):
-            return None
-        if proc.name.lower() in exe_names:
-            return "executable-name"
-        if proc.cmdline:
-            stem = proc.cmdline[0].replace("\\", "/").lower().rsplit("/", 1)[-1]
-            if stem in exe_names:
-                return "executable-path"
-        for arg in proc.cmdline:
-            lowered = arg.replace("\\", "/").lower()
-            if any(token in lowered for token in tokens):
-                return "package-path"
-        return None
 
 
 class SignatureRuleDetector:
@@ -254,9 +235,9 @@ class SignatureRuleDetector:
                 ports_by_pid.setdefault(sock.pid, []).append(sock.port)
         assets: list[DetectedAsset] = []
         for proc in facts.processes:
-            text = " ".join((proc.name, *proc.cmdline))
+            text = process_text(proc)
             for rule in self.rules:
-                if not re.search(rule.pattern, text, re.I):
+                if not match_signature_process(rule, proc):
                     continue
                 assets.append(self._asset(facts, rule, proc, text,
                                           ports_by_pid.get(proc.pid, [])))
