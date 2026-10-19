@@ -89,27 +89,38 @@ def _leading_semver(name: str) -> str | None:
     return f"{match.group(1)}.{match.group(2)}.{match.group(3)}"
 
 
-def _native_version(claude_dir: Path) -> str | None:
-    """Best effort: the newest semver-named entry under ~/.claude (versions/, downloads/)."""
+def _native_version_candidates(home: Path) -> list[Path]:
+    """Entries the native installer populates with versioned build artifacts."""
     candidates: list[Path] = []
+    claude_dir = home / ".claude"
     try:
         candidates.extend(claude_dir.iterdir())
     except OSError:
-        return None
+        pass
     for sub in ("versions", "downloads"):
         try:
             candidates.extend((claude_dir / sub).iterdir())
         except OSError:
             continue
-    best: tuple[tuple[int, int, int], str] | None = None
-    for entry in candidates:
+    # Native installer layout: ~/.local/share/claude/versions/<semver>
+    try:
+        candidates.extend((home / ".local" / "share" / "claude" / "versions").iterdir())
+    except OSError:
+        pass
+    return candidates
+
+
+def _native_version(home: Path) -> tuple[str, Path] | None:
+    """Newest semver-named entry across the installer's known locations."""
+    best: tuple[tuple[int, int, int], str, Path] | None = None
+    for entry in _native_version_candidates(home):
         found = _leading_semver(entry.name.lower())
         if found is None:
             continue
         key = tuple(int(part) for part in found.split("."))
         if best is None or key > best[0]:
-            best = (key, found)
-    return best[1] if best else None
+            best = (key, found, entry)
+    return (best[1], best[2]) if best else None
 
 
 class ClaudeCodeDetector:
@@ -153,13 +164,14 @@ class ClaudeCodeDetector:
                                      "directory ~/.claude exists",
                                      {"path": claude_dir.path, "is_dir": True}, 0.8))
             if not version.known:
-                found = _native_version(Path(claude_dir.path))
+                found = _native_version(home)
                 if found:
-                    version = VersionInfo(found, VersionSource.INSTALLER_METADATA, 0.8)
+                    value, source_path = found
+                    version = VersionInfo(value, VersionSource.INSTALLER_METADATA, 0.8)
                     evidence.append(Evidence(
                         EvidenceKind.INSTALL_METADATA,
-                        f"installer version {found} under ~/.claude",
-                        {"version": found}, 0.8))
+                        f"installer version {value} ({source_path})",
+                        {"version": value, "path": str(source_path)}, 0.8))
 
         claude_json = inspect_path(home / ".claude.json")
         if claude_json.exists:

@@ -70,6 +70,20 @@ def test_native_install_without_process(tmp_path):
     assert asset.version.source == VersionSource.UNKNOWN
 
 
+def test_native_installer_versions_dir_gives_clean_semver(tmp_path):
+    """Native installer layout: ~/.local/share/claude/versions/<semver> (downloads emptied)."""
+    home = build_home(tmp_path, native=True, claude_dir=True)
+    versions = home / ".local" / "share" / "claude" / "versions"
+    versions.mkdir(parents=True)
+    (versions / "2.1.301").write_bytes(b"")
+    (home / ".claude" / "downloads").mkdir()
+    (asset,) = detector_for(home).detect(make_facts())
+    assert asset.version.value == "2.1.301"
+    assert asset.version.source == VersionSource.INSTALLER_METADATA
+    version_evidence = [e for e in asset.evidence if "2.1.301" in e.summary]
+    assert version_evidence and "path" in version_evidence[0].detail
+
+
 def test_claude_json_only_is_configured(tmp_path):
     home = build_home(tmp_path, claude_json_keys=["projects"])
     (asset,) = detector_for(home).detect(make_facts())
