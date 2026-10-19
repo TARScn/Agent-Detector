@@ -25,6 +25,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "agent_detector.web" = ["index.html"]
 "agent_detector.fingerprints" = ["rules/*.yaml"]
+"agent_detector.behavior" = ["rules/*.yaml"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]

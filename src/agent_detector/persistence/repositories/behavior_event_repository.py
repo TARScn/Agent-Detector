@@ -7,26 +7,34 @@ from agent_detector.persistence.models import BehaviorEventRow
 
 
 class BehaviorEventRepository:
-    """Read side of behavior_events; the gateway addon writes via raw sqlite3
-    (gateway.store), so this repository deliberately has no write API."""
+    """Read side of behavior_events; writers (currently the netmon monitor)
+    insert rows directly, so this repository deliberately has no write API."""
 
     def __init__(self, session: Session):
         self._session = session
 
-    def list_events(self, limit: int = 100, protocol: str | None = None) -> list[dict]:
+    def list_events(self, limit: int = 100, protocol: str | None = None,
+                    source: str | None = None) -> list[dict]:
         statement = select(BehaviorEventRow)
         if protocol:
             statement = statement.where(BehaviorEventRow.protocol == protocol)
+        if source:
+            statement = statement.where(BehaviorEventRow.source == source)
         statement = statement.order_by(BehaviorEventRow.id.desc()).limit(
             min(max(int(limit), 1), 500))
         return [self._to_dict(row) for row in self._session.scalars(statement)]
 
-    def stats(self) -> dict:
-        count = self._session.scalar(select(func.count()).select_from(BehaviorEventRow)) or 0
-        by_protocol = {protocol: n for protocol, n in self._session.execute(
-            select(BehaviorEventRow.protocol, func.count()).group_by(BehaviorEventRow.protocol))}
-        by_agent = {label: n for label, n in self._session.execute(
-            select(BehaviorEventRow.agent_label, func.count()).group_by(BehaviorEventRow.agent_label))}
+    def stats(self, source: str | None = None) -> dict:
+        def filtered(statement):
+            return statement.where(BehaviorEventRow.source == source) if source else statement
+
+        count = self._session.scalar(
+            select(func.count()).select_from(
+                filtered(select(BehaviorEventRow)).subquery())) or 0
+        by_protocol = {protocol: n for protocol, n in self._session.execute(filtered(
+            select(BehaviorEventRow.protocol, func.count()).group_by(BehaviorEventRow.protocol)))}
+        by_agent = {label: n for label, n in self._session.execute(filtered(
+            select(BehaviorEventRow.agent_label, func.count()).group_by(BehaviorEventRow.agent_label)))}
         return {"event_count": count, "by_protocol": by_protocol, "by_agent": by_agent}
 
     @staticmethod

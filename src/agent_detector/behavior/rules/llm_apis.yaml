@@ -1,0 +1,24 @@
+# Behavior intelligence rules: what counts as an observed LLM call.
+# Hosts are exact-matched (case-insensitive) against DNS-cache names resolved
+# for outbound connection destinations. Model ports apply to loopback
+# destinations (local inference servers). Override per machine by pointing
+# AGENT_DETECTOR_BEHAVIOR_RULES_DIR at a directory containing this file name.
+revision: 1
+known_llm_hosts:
+  - api.anthropic.com
+  - api.openai.com
+  - open.bigmodel.cn
+  - api.deepseek.com
+  - dashscope.aliyuncs.com
+  - api.moonshot.cn
+  - api.mistral.ai
+  - generativelanguage.googleapis.com
+  - api.groq.com
+  - api.x.ai
+  - api.together.xyz
+  - api.fireworks.ai
+known_model_ports:
+  - {port: 11434, name: Ollama}
+  - {port: 8000, name: vLLM}
+  - {port: 1234, name: LM Studio}
+  - {port: 1337, name: llama.cpp}
