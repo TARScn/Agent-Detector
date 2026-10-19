@@ -1,63 +1,405 @@
 <!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Agent Detector V0.1</title><style>
-:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#17212b;background:#f5f7fb}
-body{margin:0;max-width:1200px;padding:32px 24px;margin:auto}h1{font-size:28px;margin-bottom:4px}.muted{color:#617085}
-section{background:white;border:1px solid #e2e7ee;border-radius:12px;padding:20px;margin-top:20px}
-button,select{font:inherit;border:1px solid #cad5e2;background:white;padding:9px 14px;border-radius:8px;cursor:pointer}
-button.primary{background:#1e529f;color:white;border-color:#1e529f}button:disabled{opacity:.6;cursor:wait}
-.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px}.stats{display:flex;gap:24px;margin-top:12px;color:#617085}
-table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;border-bottom:1px solid #edf0f4;padding:10px}
-th{color:#617085;font-weight:600}details{max-width:420px}pre{white-space:pre-wrap;word-break:break-all;font-size:12px}
-#message{min-height:20px;color:#1e529f}.tag{background:#edf4ff;border-radius:5px;padding:3px 7px;display:inline-block;margin:1px 2px 1px 0}
-.state-INSTALLED{background:#e8f4e8;color:#256029}.state-CONFIGURED{background:#fff3d6;color:#7a5c00}
-.state-RUNNING{background:#e5efff;color:#1e529f}.state-EXECUTION_CONFIRMED{background:#e5f9ec;color:#0f6b3c}
-ul.evidence{margin:4px 0;padding-left:18px;font-size:13px}
+<title>Agent Detector · 管理控制台</title><style>
+:root{--side:#0f172a;--side-hover:#1e293b;--accent:#2563eb;--bg:#f1f5f9;--card:#fff;--border:#e2e8f0;
+--text:#0f172a;--muted:#64748b;font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-size:14px}
+/* ---------- 侧边栏 ---------- */
+.sidebar{position:fixed;inset:0 auto 0 0;width:224px;background:var(--side);color:#94a3b8;display:flex;flex-direction:column;z-index:10}
+.brand{display:flex;align-items:center;gap:10px;padding:20px 18px 18px;border-bottom:1px solid #1e293b}
+.brand .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,#2563eb,#7c3aed);display:flex;align-items:center;justify-content:center;color:#fff;flex:none}
+.brand b{color:#f1f5f9;font-size:15px;display:block;line-height:1.2}
+.brand small{font-size:11px;color:#64748b}
+.nav{padding:12px 10px;display:flex;flex-direction:column;gap:4px;flex:1}
+.nav a{display:flex;align-items:center;gap:11px;padding:11px 12px;border-radius:8px;color:#94a3b8;text-decoration:none;font-size:14px;border-left:3px solid transparent;transition:background .15s,color .15s}
+.nav a svg{width:17px;height:17px;flex:none}
+.nav a:hover{background:var(--side-hover);color:#e2e8f0}
+.nav a.active{background:var(--side-hover);color:#fff;border-left-color:var(--accent)}
+.nav .group{font-size:11px;color:#475569;padding:14px 12px 4px;letter-spacing:.08em}
+.side-foot{padding:14px 18px;border-top:1px solid #1e293b;font-size:11px;color:#475569;line-height:1.7}
+/* ---------- 主区 ---------- */
+.main{margin-left:224px;min-height:100vh;display:flex;flex-direction:column}
+.topbar{background:var(--card);border-bottom:1px solid var(--border);padding:0 28px;height:58px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:5}
+.topbar h1{font-size:16px;margin:0;flex:1}
+.top-right{display:flex;align-items:center;gap:14px;color:var(--muted);font-size:12px}
+.dot{width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block;margin-right:5px;vertical-align:1px}
+.dot.down{background:#ef4444}
+.content{padding:24px 28px;max-width:1280px;width:100%;margin:0 auto}
+.page{display:none}.page.active{display:block}
+/* ---------- 卡片 ---------- */
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:18px;box-shadow:0 1px 2px rgba(15,23,42,.04)}
+.card h3{margin:0 0 12px;font-size:14px;color:var(--text)}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media(max-width:900px){.grid-2{grid-template-columns:1fr}}
+.hero{display:flex;align-items:center;gap:24px;border-left:4px solid var(--accent)}
+.hero.warn{border-left-color:#d97706}
+.hero>div{flex:1}.hero h2{margin:0 0 6px;font-size:17px}.hero p{margin:0;color:var(--muted);line-height:1.7;font-size:13px}
+/* ---------- 统计卡 ---------- */
+.stat-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:14px;margin-bottom:18px}
+@media(max-width:1100px){.stat-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:640px){.stat-grid{grid-template-columns:repeat(2,1fr)}}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.stat .num{font-size:24px;font-weight:700;line-height:1.2}
+.stat .lbl{font-size:12px;color:var(--muted);margin-top:2px}
+.stat.hi .num{color:var(--accent)}
+/* ---------- 表格 ---------- */
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px;white-space:nowrap;background:#f8fafc}
+tbody tr:hover{background:#f8fafc}
+td .sub{font-size:11px;color:var(--muted)}
+code{background:#f1f5f9;border-radius:4px;padding:1px 5px;font-size:12px;color:#475569;word-break:break-all}
+pre{white-space:pre-wrap;word-break:break-all;font-size:12px;background:#0f172a;color:#e2e8f0;border-radius:8px;padding:12px;max-height:320px;overflow:auto;margin:8px 0 0}
+/* ---------- 徽章 ---------- */
+.tag{display:inline-block;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:600;margin:1px 3px 1px 0;white-space:nowrap}
+.st-INSTALLED{background:#dcfce7;color:#166534}.st-CONFIGURED{background:#fef3c7;color:#92400e}
+.st-RUNNING{background:#dbeafe;color:#1e40af}.st-BEHAVIOR_SUSPECTED{background:#ede9fe;color:#5b21b6}
+.st-EXECUTION_CONFIRMED{background:#ccfbf1;color:#115e59}.st-UNKNOWN{background:#e2e8f0;color:#475569}
+.ty{background:#f1f5f9;color:#475569;border:1px solid var(--border)}
+.conf-ok{color:#16a34a;font-weight:600}
+/* ---------- 控件 ---------- */
+button,select,input{font:inherit;font-size:13px;border:1px solid #cbd5e1;background:#fff;color:var(--text);padding:8px 13px;border-radius:7px}
+button{cursor:pointer}button:hover{background:#f8fafc}
+button:disabled{opacity:.55;cursor:wait}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:#1d4ed8}
+.btn.warn{background:#d97706;border-color:#d97706;color:#fff}
+.btn.warn:hover{background:#b45309}
+.btn.lg{padding:11px 22px;font-size:14px;font-weight:600}
+.btn.sm{padding:5px 10px;font-size:12px}
+.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:14px}
+.toolbar label{color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px}
+.toolbar input{width:200px}
+.muted{color:var(--muted)}
+.empty{color:var(--muted);text-align:center;padding:22px 0}
+.dl{margin:0}.dl>div{display:flex;padding:7px 0;border-bottom:1px dashed #f1f5f9;font-size:13px}
+.dl dt{width:130px;color:var(--muted);flex:none}.dl dd{margin:0;word-break:break-all}
+ul.plain{margin:0;padding-left:18px;line-height:2;color:var(--muted);font-size:13px}
+#toast{position:fixed;right:24px;bottom:24px;z-index:50;display:flex;flex-direction:column;gap:8px}
+.toast{background:#0f172a;color:#f1f5f9;padding:11px 16px;border-radius:8px;font-size:13px;box-shadow:0 8px 20px rgba(15,23,42,.25);animation:in .18s}
+.toast.err{background:#7f1d1d}
+@keyframes in{from{opacity:0;transform:translateY(8px)}}
 </style></head><body>
-<h1>Agent Detector <small style="font-size:14px;color:#617085">V0.1</small></h1>
-<p class="muted">本机 AI Agent / MCP / Model Runtime 资产发现 · SQLite 证据留存</p>
-<section><div class="toolbar">
-<button class="primary" id="passive">运行被动扫描</button>
-<button id="active">运行主动 + 被动扫描</button>
-<span class="muted">主动模式仅探测本机监听的 HTTP 端口</span></div>
-<p id="message" role="status"></p><div class="stats"><span id="summary">尚未加载扫描结果</span></div></section>
-<section><div class="toolbar"><h2 style="flex:1">资产</h2><label for="scan">扫描批次：</label><select id="scan"></select></div>
-<div style="overflow-x:auto"><table><thead><tr><th>资产</th><th>类型</th><th>状态</th><th>版本</th><th>置信度</th><th>PID / 端口</th><th>证据</th></tr></thead>
-<tbody id="items"><tr><td colspan="7">暂无结果</td></tr></tbody></table></div></section>
+
+<aside class="sidebar">
+  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></div>
+  <div><b>Agent Detector</b><small>本机 Agent 资产检测</small></div></div>
+  <nav class="nav">
+    <div class="group">检测</div>
+    <a href="#/scan" data-page="scan"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>扫描主页</a>
+    <a href="#/monitor" data-page="monitor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>监控页</a>
+    <div class="group">管理</div>
+    <a href="#/results" data-page="results"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="12" y1="3" x2="12" y2="21"/></svg>结果页</a>
+    <a href="#/settings" data-page="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>设置页</a>
+  </nav>
+  <div class="side-foot">V0.1 · <span id="side-health">连接中…</span><br>仅监听 127.0.0.1</div>
+</aside>
+
+<div class="main">
+  <header class="topbar">
+    <h1 id="page-title">扫描主页</h1>
+    <div class="top-right">
+      <span id="top-status"></span>
+      <span><span class="dot" id="health-dot"></span><span id="health-text">–</span></span>
+      <button class="btn sm" id="btn-refresh">刷新</button>
+    </div>
+  </header>
+  <div class="content">
+
+  <!-- ============ 扫描主页 ============ -->
+  <section id="page-scan" class="page">
+    <div class="hero card">
+      <div><h2>Agent 扫描</h2>
+      <p>只读采集本机进程、监听端口与安装 / 配置特征，依据声明式规则识别 Agent 客户端、框架、模型服务与 MCP 组件。不执行任何被发现的程序，不读取文件内容。</p></div>
+      <button class="btn primary lg" id="btn-agent-scan">开始 Agent 扫描</button>
+    </div>
+    <div class="stat-grid" id="stat-cards"></div>
+    <div class="grid-2">
+      <div class="card"><h3>最近扫描</h3><table><thead><tr><th>批次</th><th>类型</th><th>状态</th><th>资产</th><th>时间</th></tr></thead><tbody id="recent-scans"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody></table></div>
+      <div class="card"><h3>最新资产</h3><table><thead><tr><th>资产</th><th>类型</th><th>状态</th><th>版本</th></tr></thead><tbody id="recent-assets"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody></table></div>
+    </div>
+  </section>
+
+  <!-- ============ 监控页 ============ -->
+  <section id="page-monitor" class="page">
+    <div class="hero card warn">
+      <div><h2>流量监控</h2>
+      <p>对本机<b>已监听端口</b>发送少量 HTTP 指纹请求，识别 Ollama、vLLM、FastMCP、Dify 等本机服务。仅回环地址、不跟随重定向、不访问远程、端口数有上限（设置页可查看）。此为主动探测，按需手动启动。</p></div>
+      <button class="btn warn lg" id="btn-traffic">启动流量监控</button>
+    </div>
+    <div class="grid-2">
+      <div class="card"><h3>本机监听概况</h3><dl class="dl" id="listen-stats"></dl></div>
+      <div class="card"><h3>探测能力（服务指纹）</h3><div id="probe-tokens"></div></div>
+    </div>
+    <div class="card"><h3>流量监控发现</h3>
+      <table><thead><tr><th>服务</th><th>类型</th><th>端口</th><th>版本 / 说明</th><th>状态</th></tr></thead>
+      <tbody id="traffic-findings"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody></table></div>
+  </section>
+
+  <!-- ============ 结果页 ============ -->
+  <section id="page-results" class="page">
+    <div class="card">
+      <div class="toolbar">
+        <label>扫描批次 <select id="r-scan"></select></label>
+        <label>类型 <select id="r-type"><option value="">全部</option></select></label>
+        <label>状态 <select id="r-state"><option value="">全部</option></select></label>
+        <input id="r-search" placeholder="搜索资产名 / ID…">
+        <span class="muted" id="r-count"></span>
+      </div>
+      <table><thead><tr><th>资产</th><th>类型</th><th>状态</th><th>版本</th><th>置信度</th><th>PID / 端口</th><th>检测器</th><th>证据</th></tr></thead>
+      <tbody id="r-rows"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody></table>
+    </div>
+    <div class="card"><h3>扫描历史</h3>
+      <table><thead><tr><th>批次</th><th>类型</th><th>状态</th><th>进程 / 监听</th><th>资产</th><th>异常</th><th>开始时间</th><th>耗时</th></tr></thead>
+      <tbody id="r-history"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody></table></div>
+  </section>
+
+  <!-- ============ 设置页 ============ -->
+  <section id="page-settings" class="page">
+    <div class="grid-2">
+      <div class="card"><h3>系统信息</h3><dl class="dl" id="sys-info"></dl></div>
+      <div class="card"><h3>安全边界</h3><ul class="plain">
+        <li>仅监听 127.0.0.1，不对局域网开放</li>
+        <li>被动采集全部只读；不执行被发现的 Agent / Skill / MCP 启动命令</li>
+        <li>流量监控仅探测回环地址，不跟随重定向、有端口上限</li>
+        <li>配置文件只记录键名；凭证原文不入库，命令行密钥自动脱敏</li>
+        <li>版本无可靠来源时输出 UNKNOWN，不做猜测</li>
+      </ul></div>
+    </div>
+    <div class="card"><h3>检测规则 · client_rule</h3>
+      <table><thead><tr><th>ID</th><th>名称</th><th>资产类型</th><th>修订</th><th>安装探测</th><th>配置探测</th><th>版本来源</th><th>进程匹配</th></tr></thead>
+      <tbody id="client-rules"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody></table></div>
+    <div class="card"><h3>检测规则 · 通用签名</h3>
+      <table><thead><tr><th>名称</th><th>资产类型</th><th>正则</th></tr></thead>
+      <tbody id="sig-rules"><tr><td colspan="3" class="empty">加载中…</td></tr></tbody></table></div>
+    <div id="rule-errors"></div>
+  </section>
+
+  </div>
+</div>
+<div id="toast"></div>
+
 <script>
-const el=id=>document.getElementById(id);
-async function request(path,opts){const r=await fetch(path,opts);if(!r.ok)throw new Error(await r.text());return r.json()}
-function cell(t){const e=document.createElement('td');e.textContent=t??'—';return e}
-function statesCell(states){const td=document.createElement('td');for(const s of states){const b=document.createElement('span');b.className='tag state-'+s;b.textContent=s;td.append(b)}if(!states.length)td.textContent='—';return td}
-function versionCell(x){const td=cell(x.version==='UNKNOWN'?'未知':x.version);if(x.version!=='UNKNOWN'&&x.version_source){const s=document.createElement('div');s.className='muted';s.style.fontSize='12px';s.textContent='来源：'+x.version_source;td.append(s)}return td}
-function evidenceCell(x,scanId){const td=document.createElement('td'),d=document.createElement('details'),sum=document.createElement('summary');
-sum.textContent='查看证据';d.append(sum);d.ontoggle=()=>{if(d.open)loadEvidence(x.asset_id,scanId,d)};td.append(d);return td}
-async function loadEvidence(assetId,scanId,container){
- if(container.dataset.loaded)return;container.dataset.loaded='1';
- const q=scanId?('?scan_id='+scanId):'';
- let rows;try{rows=await request('/api/assets/'+encodeURIComponent(assetId)+'/evidence'+q)}
- catch(e){const p=document.createElement('p');p.className='muted';p.textContent='暂无证据记录';container.append(p);return}
- const ul=document.createElement('ul');ul.className='evidence';
- for(const ev of rows){const li=document.createElement('li');li.textContent='['+ev.kind+'] '+ev.summary;ul.append(li)}
- const pre=document.createElement('pre');pre.textContent=JSON.stringify(rows,null,2);container.append(ul,pre)}
-async function load(){
- const scans=await request('/api/scans');const prev=el('scan').value;
- el('scan').replaceChildren(...scans.map(s=>{const o=document.createElement('option');o.value=s.id;o.textContent='#'+s.id+' · '+s.mode+' · '+s.status+' · '+s.started_at.slice(0,19);return o}));
- if(scans.some(s=>String(s.id)===prev))el('scan').value=prev;
- const selected=scans.find(s=>String(s.id)===el('scan').value);
- el('summary').textContent=selected?('扫描 '+selected.id+'：'+((selected.stats.observations&&selected.stats.observations.processes)??'?')+' 进程 / '+((selected.stats.assets)??'?')+' 资产'):'暂无扫描';
- const rows=selected?await request('/api/assets?scan_id='+selected.id):[];el('items').replaceChildren();
- if(!rows.length){const tr=document.createElement('tr');const td=cell('本批次暂无资产');td.colSpan=7;tr.append(td);el('items').append(tr)}
- for(const x of rows){const tr=document.createElement('tr');
- tr.append(cell(x.name),cell(x.asset_type),statesCell(x.states),versionCell(x),
-  cell(Math.round(x.confidence*100)+'%'),
-  cell((x.running_pids.length?x.running_pids.join(','):'—')+' / '+(x.listening_ports.length?x.listening_ports.join(','):'—')),
-  evidenceCell(x,selected?selected.id:null));
-  el('items').append(tr)}}
-async function scan(active){el('passive').disabled=el('active').disabled=true;el('message').textContent='正在扫描…';
- try{const r=await request('/api/scans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active})});el('scan').value='';await load();el('message').textContent='扫描 #'+r.scan_id+' 完成，发现 '+r.assets+' 个资产'}
- catch(e){el('message').textContent='扫描失败：'+e.message}
- finally{el('passive').disabled=el('active').disabled=false}}
-el('passive').onclick=()=>scan(false);el('active').onclick=()=>scan(true);
-el('scan').onchange=load;load().catch(e=>el('message').textContent=e.message);
+'use strict';
+const $ = id => document.getElementById(id);
+const MODE_LABEL = {agent:'Agent 扫描', passive:'Agent 扫描', 'agent+traffic':'Agent + 流量监控', 'active+passive':'Agent + 流量监控'};
+const TYPE_LABEL = {AGENT_CLIENT:'Agent 客户端', AGENT_RUNTIME:'Agent 框架', AGENT_SERVICE:'Agent 服务',
+  AGENT_PLATFORM:'Agent 平台', MCP_SERVER:'MCP 服务', LLM_SERVICE:'模型服务', AI_APPLICATION:'AI 应用', UNKNOWN:'未知'};
+const PROBE_TOKENS = ['Ollama','vLLM','Open WebUI','FastMCP','Dify'];
+const state = {scans:[], assets:[], settings:null};
+
+/* ---------- 基础 ---------- */
+async function api(path, opts){const r=await fetch(path,opts);const t=await r.text();
+  if(!r.ok)throw new Error(t||r.statusText);return t?JSON.parse(t):null}
+function el(tag,cls,...children){const e=document.createElement(tag);
+  if(cls)e.className=cls;
+  for(const c of children.flat()){if(c==null)continue;e.append(c.nodeType?c:document.createTextNode(String(c)))}
+  return e}
+function emptyRow(cols,msg){const tr=el('tr');const td=el('td','empty',msg);td.colSpan=cols;tr.append(td);return tr}
+function fmtTime(iso){return iso?iso.slice(0,19).replace('T',' '):'—'}
+function toast(msg,err){const t=el('div','toast'+(err?' err':''),msg);$('toast').append(t);setTimeout(()=>t.remove(),3800)}
+function tag(text,cls){return el('span','tag '+(cls||''),text)}
+function stateTags(states){const td=el('td');(states||[]).forEach(s=>td.append(tag(s,'st-'+s)));
+  if(!(states||[]).length)td.textContent='—';return td}
+function typeCell(t){const td=el('td');td.append(tag(TYPE_LABEL[t]||t,'ty'));return td}
+function verCell(x){const td=el('td');
+  if(x.version==='UNKNOWN'){td.textContent='未知';return td}
+  td.append(el('span','conf-ok',x.version));
+  if(x.version_source)td.append(el('div','sub','来源：'+x.version_source));return td}
+
+/* ---------- 路由 ---------- */
+const ROUTES = {'scan':'扫描主页','monitor':'监控页','results':'结果页','settings':'设置页'};
+const LOADERS = {};
+function current(){const p=(location.hash||'#/scan').replace('#/','');return ROUTES[p]?p:'scan'}
+function route(){
+  const page=current();
+  document.querySelectorAll('.page').forEach(s=>s.classList.remove('active'));
+  $('page-'+page).classList.add('active');
+  $('page-title').textContent=ROUTES[page];
+  document.querySelectorAll('.nav a').forEach(a=>a.classList.toggle('active',a.dataset.page===page));
+  if(LOADERS[page])LOADERS[page]();
+}
+window.addEventListener('hashchange',route);
+
+/* ---------- 共享数据 ---------- */
+async function refreshShared(silent){
+  try{
+    const [health,scans,assets,settings]=await Promise.all([
+      api('/api/health'),api('/api/scans'),api('/api/assets'),api('/api/settings')]);
+    state.scans=scans;state.assets=assets;state.settings=settings;
+    $('health-dot').classList.remove('down');$('health-text').textContent='服务正常 v'+health.version;
+    $('side-health').textContent='服务正常';
+    return true;
+  }catch(e){
+    $('health-dot').classList.add('down');$('health-text').textContent='服务异常';
+    $('side-health').textContent='连接失败';
+    if(!silent)toast('接口请求失败：'+e.message,true);
+    return false;
+  }
+}
+
+/* ---------- 扫描动作 ---------- */
+async function runScan(active){
+  const btn=active?$('btn-traffic'):$('btn-agent-scan');
+  const old=btn.textContent;btn.disabled=true;btn.textContent=active?'监控进行中…':'扫描进行中…';
+  $('top-status').textContent=active?'流量监控运行中…':'Agent 扫描运行中…';
+  try{
+    const r=await api('/api/scans',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({active})});
+    const errNote=r.errors.length?`，${r.errors.length} 个异常`:'';
+    toast(`${MODE_LABEL[r.mode]||r.mode}完成：批次 #${r.scan_id}，发现 ${r.assets} 个资产${errNote}`);
+    await refreshShared(true);route();
+  }catch(e){toast('执行失败：'+e.message,true)}
+  finally{btn.disabled=false;btn.textContent=old;$('top-status').textContent=''}
+}
+$('btn-agent-scan').onclick=()=>runScan(false);
+$('btn-traffic').onclick=()=>runScan(true);
+$('btn-refresh').onclick=async()=>{await refreshShared();route()};
+
+/* ---------- 扫描主页 ---------- */
+LOADERS.scan=()=>{
+  const a=state.assets;
+  const n=f=>a.filter(f).length;
+  const last=state.scans[0];
+  const stats=[
+    [a.length,'资产总数','hi'],
+    [n(x=>x.states.includes('RUNNING')),'运行中','hi'],
+    [n(x=>x.states.includes('CONFIGURED')),'已配置',''],
+    [n(x=>x.asset_type==='AGENT_CLIENT'),'Agent 客户端',''],
+    [n(x=>x.asset_type==='MCP_SERVER'||x.asset_type==='LLM_SERVICE'),'MCP / 模型服务',''],
+    [last&&last.stats.errors?last.stats.errors.length:0,'上次扫描异常','']];
+  $('stat-cards').replaceChildren(...stats.map(([num,lbl,cls])=>
+    el('div','stat'+(cls?' '+cls:''),el('div','num',num),el('div','lbl',lbl))));
+  const rs=$('recent-scans');
+  rs.replaceChildren(...(state.scans.slice(0,6).map(s=>el('tr','',
+    el('td','','#'+s.id),el('td','',MODE_LABEL[s.mode]||s.mode),
+    el('td','',s.status==='completed'?'完成':s.status),
+    el('td','',String(s.stats.assets??'—')),
+    el('td','muted',fmtTime(s.started_at))))));
+  if(!state.scans.length)rs.replaceChildren(emptyRow(5,'暂无扫描，点击上方按钮开始'));
+  const ra=$('recent-assets');
+  ra.replaceChildren(...(a.slice(0,6).map(x=>el('tr','',
+    el('td','',x.name),typeCell(x.asset_type),stateTags(x.states),
+    el('td','',x.version==='UNKNOWN'?'未知':x.version)))));
+  if(!a.length)ra.replaceChildren(emptyRow(4,'暂无资产'));
+};
+
+/* ---------- 监控页 ---------- */
+LOADERS.monitor=()=>{
+  const last=state.scans[0];
+  const obs=last&&last.stats.observations||{};
+  $('listen-stats').replaceChildren(...[
+    ['进程数',obs.processes??'—'],['监听端口数',obs.listening_sockets??'—'],
+    ['端口探测上限',state.settings?state.settings.max_probes:'—'],
+    ['探测范围','仅 127.0.0.1 / ::1'],['最近采集',last?fmtTime(last.started_at):'—']]
+    .map(([k,v])=>el('div','',el('dt','',k),el('dd','',String(v)))));
+  const box=$('probe-tokens');
+  box.replaceChildren(...PROBE_TOKENS.map(t=>tag(t,'ty')));
+  box.append(el('p','muted','逐端口请求 /health → /openapi.json → /，响应中命中指纹即记录证据；单端口握手成功即停止。'));
+  const findings=state.assets.filter(x=>x.detector==='http-probe');
+  const tb=$('traffic-findings');tb.replaceChildren();
+  if(!findings.length){tb.append(emptyRow(5,'暂无流量监控发现（尚未运行，或未命中服务指纹）'))}
+  findings.forEach(x=>tb.append(el('tr','',
+    el('td','',x.name),typeCell(x.asset_type),
+    el('td','',x.listening_ports.join(', ')||'—'),
+    el('td','',x.version==='UNKNOWN'?'指纹命中':x.version),stateTags(x.states))));
+};
+
+/* ---------- 结果页 ---------- */
+function fillFilter(sel,values,labels){const cur=sel.value;
+  const all=el('option','','全部');all.value='';
+  sel.replaceChildren(all,...values.map(v=>{
+    const o=el('option','',labels?labels(v):v);o.value=v;return o}));
+  if(values.includes(cur))sel.value=cur}
+LOADERS.results=async()=>{
+  const sel=$('r-scan');
+  sel.replaceChildren(...state.scans.map(s=>{
+    const o=el('option','','#'+s.id+' · '+(MODE_LABEL[s.mode]||s.mode)+' · '+fmtTime(s.started_at));
+    o.value=s.id;return o}));
+  const keep=sel.dataset.keep;
+  if(keep&&state.scans.some(s=>String(s.id)===keep))sel.value=keep;
+  fillFilter($('r-type'),[...new Set(state.assets.map(x=>x.asset_type))],v=>TYPE_LABEL[v]||v);
+  fillFilter($('r-state'),[...new Set(state.assets.flatMap(x=>x.states))]);
+  await loadResults();
+  const his=$('r-history');
+  his.replaceChildren(...(state.scans.map(s=>{
+    const tr=el('tr');tr.style.cursor='pointer';tr.title='点击查看该批次结果';
+    tr.onclick=()=>{sel.value=s.id;sel.dataset.keep=s.id;loadResults()};
+    const dur=s.finished_at?((new Date(s.finished_at)-new Date(s.started_at))/1000).toFixed(1)+'s':'—';
+    const errN=s.stats.errors?s.stats.errors.length:0;
+    tr.append(el('td','','#'+s.id),el('td','',MODE_LABEL[s.mode]||s.mode),
+      el('td','',s.status==='completed'?'✓ 完成':s.status),
+      el('td','muted',(s.stats.observations?s.stats.observations.processes:'—')+' / '
+        +(s.stats.observations?s.stats.observations.listening_sockets:'—')),
+      el('td','',String(s.stats.assets??'—')),
+      errN?el('td','',String(errN)):el('td','muted','0'),
+      el('td','muted',fmtTime(s.started_at)),el('td','muted',dur));
+    return tr;
+  })));
+  if(!state.scans.length)his.replaceChildren(emptyRow(8,'暂无扫描'));
+};
+async function loadResults(){
+  const sel=$('r-scan');
+  const rows=sel.value?await api('/api/assets?scan_id='+sel.value):state.assets;
+  sel.dataset.keep=sel.value;
+  const kw=$('r-search').value.trim().toLowerCase();
+  const ty=$('r-type').value,st=$('r-state').value;
+  const filtered=rows.filter(x=>
+    (!ty||x.asset_type===ty)&&(!st||x.states.includes(st))&&
+    (!kw||x.name.toLowerCase().includes(kw)||x.asset_id.toLowerCase().includes(kw)));
+  $('r-count').textContent=filtered.length+' / '+rows.length+' 个资产';
+  const tb=$('r-rows');tb.replaceChildren();
+  if(!filtered.length){tb.append(emptyRow(8,'无匹配资产'));return}
+  filtered.forEach(x=>{
+    const name=el('td','',el('b','',x.name),el('div','sub',x.asset_id));
+    const loc=el('td','',(x.running_pids.length?x.running_pids.join(','):'—')
+      +' / '+(x.listening_ports.length?x.listening_ports.join(','):'—'));
+    const ev=el('td');const d=el('details');const sum=el('summary','','查看');
+    sum.style.cursor='pointer';d.append(sum);
+    d.ontoggle=async()=>{if(!d.open||d.dataset.loaded)return;d.dataset.loaded='1';
+      try{const list=await api('/api/assets/'+encodeURIComponent(x.asset_id)+'/evidence'
+        +(sel.value?'?scan_id='+sel.value:''));
+        const ul=el('ul','plain');
+        list.forEach(e=>ul.append(el('li','','['+e.kind+'] '+e.summary)));
+        const pre=el('pre');pre.textContent=JSON.stringify(list,null,2);
+        d.append(ul,pre)}catch(e){d.append(el('p','muted','证据加载失败：'+e.message))}};
+    ev.append(d);
+    tb.append(el('tr','',name,typeCell(x.asset_type),stateTags(x.states),verCell(x),
+      el('td','',Math.round(x.confidence*100)+'%'),loc,
+      el('td','muted',x.detector||'—'),ev));
+  });
+}
+['r-scan','r-type','r-state'].forEach(id=>$(id).addEventListener('change',loadResults));
+$('r-search').addEventListener('input',loadResults);
+
+/* ---------- 设置页 ---------- */
+LOADERS.settings=async()=>{
+  const s=state.settings||{};
+  $('sys-info').replaceChildren(...[
+    ['服务版本','v'+(s.version||'—')],['数据库',s.db_path||'—'],
+    ['监听地址',s.listen||'127.0.0.1'],['端口探测上限',s.max_probes??'—'],
+    ['扫描口径','Agent 扫描（只读被动采集）/ 流量监控（本机端口指纹）'],
+    ['规则加载','包内置 + AGENT_DETECTOR_RULES_DIR 外部目录']]
+    .map(([k,v])=>el('div','',el('dt','',k),el('dd','',v))));
+  try{
+    const rules=await api('/api/rules');
+    $('client-rules').replaceChildren(...(rules.client_rules.map(r=>el('tr','',
+      el('td','',el('code','',r.id)),el('td','',el('b','',r.name)),typeCell(r.asset_type),
+      el('td','','v'+r.revision),el('td','',r.install_probes+' 项'),
+      el('td','',r.config_probes+' 项'),el('td','',r.version_steps+' 级'),
+      el('td','',r.has_process_match?'启用':'—')))));
+    $('sig-rules').replaceChildren(...(rules.signature_rules.map(r=>el('tr','',
+      el('td','',r.name),typeCell(r.asset_type),el('td','',el('code','',r.pattern))))));
+    if(rules.errors.length){
+      const c=el('div','card');c.style.borderColor='#fca5a5';
+      c.append(el('h3','','规则加载异常（已跳过，不影响扫描）'));
+      rules.errors.forEach(e=>c.append(el('p','muted',e.file+'：'+e.error)));
+      $('rule-errors').replaceChildren(c);
+    }else{$('rule-errors').replaceChildren()}
+  }catch(e){toast('规则加载失败：'+e.message,true)}
+};
+
+/* ---------- 启动 ---------- */
+setInterval(async()=>{if(current()==='monitor'){await refreshShared(true);route()}},20000);
+refreshShared().then(route);
 </script></body></html>

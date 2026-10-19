@@ -7,7 +7,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from agent_detector.application.scan_service import run_scan
-from agent_detector.common.config import DB_PATH
+from agent_detector.common.config import DB_PATH, MAX_PROBES
+from agent_detector.fingerprints.loader import load_rules
 from agent_detector.persistence.database import make_engine
 from agent_detector.persistence.repositories import (AssetRepository, EvidenceRepository,
                                                      ScanRepository)
@@ -29,6 +30,34 @@ def homepage():
 @app.get("/api/health")
 def health():
     return {"status": "ok", "version": app.version}
+
+
+@app.get("/api/settings")
+def get_settings():
+    return {"version": app.version, "db_path": str(DB_PATH), "max_probes": MAX_PROBES,
+            "listen": "127.0.0.1"}
+
+
+@app.get("/api/rules")
+def list_rules():
+    loaded = load_rules()
+    return {
+        "client_rules": [
+            {"id": rule.id, "name": rule.name, "asset_type": rule.asset_type.value,
+             "revision": rule.revision,
+             "install_probes": (len(rule.install.npm_packages) + len(rule.install.paths)
+                                + len(rule.install.dirs)),
+             "config_probes": (len(rule.config.json_files)
+                               + len(rule.config.existing_files)),
+             "version_steps": len(rule.version),
+             "has_process_match": rule.process is not None}
+            for rule in loaded.client_rules],
+        "signature_rules": [
+            {"name": rule.name, "asset_type": rule.asset_type.value,
+             "pattern": rule.pattern}
+            for rule in loaded.signature_rules],
+        "errors": [{"file": error.file, "error": error.error} for error in loaded.errors],
+    }
 
 
 @app.post("/api/scans")

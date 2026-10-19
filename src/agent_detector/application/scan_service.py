@@ -26,7 +26,7 @@ def run_scan(engine: Engine, active: bool = False,
         detectors = build_detectors()
     with Session(engine) as session:
         scan_repo = ScanRepository(session)
-        mode = "active+passive" if active else "passive"
+        mode = "agent+traffic" if active else "agent"
         scan_id = scan_repo.create(mode)
         facts = collect_host_facts()
         assets: list[DetectedAsset] = []
