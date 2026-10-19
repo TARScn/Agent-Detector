@@ -1,0 +1,1 @@
+"""Linux audit collection channel (parser, normalizer, readers, rule template)."""

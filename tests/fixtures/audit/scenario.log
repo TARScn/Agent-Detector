@@ -1,0 +1,35 @@
+type=SYSCALL msg=audit(1760000100.101:900101): arch=c000003e syscall=59 success=yes exit=0 a0=55d3a1c2e3f0 a1=7ffd2c1a0b40 a2=7ffd2c1a0b60 a3=8 items=2 ppid=4100 pid=4101 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="python3" exe="/usr/bin/python3.12" key="agent_detector_exec"
+type=EXECVE msg=audit(1760000100.101:900101): argc=3 a0="python3" a1="train.py" a2="--epochs"
+type=CWD msg=audit(1760000100.101:900101): cwd="/home/agent/agent-lab"
+type=PATH msg=audit(1760000100.101:900101): item=0 name="/usr/bin/python3.12" inode=1234567 dev=fd:01 mode=0100755 ouid=0 ogid=0 rdev=00:00 nametype=NORMAL cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
+type=PATH msg=audit(1760000100.101:900101): item=1 name="/usr/bin/" inode=2 dev=fd:01 mode=040755 ouid=0 ogid=0 rdev=00:00 nametype=PARENT cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
+type=PROCTITLE msg=audit(1760000100.101:900101): proctitle=707974686F6E3300747261696E2E7079002D2D65706F636873
+type=EOE msg=audit(1760000100.101:900101): 
+type=SYSCALL msg=audit(1760000100.202:900102): arch=c000003e syscall=257 success=yes exit=3 a0=ffffff9c a1=55d3a1c2f100 a2=241 a3=1a4 items=1 ppid=4101 pid=4102 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="bash" exe="/usr/bin/bash" key="agent_detector_file"
+type=CWD msg=audit(1760000100.202:900102): cwd="/home/agent/agent-lab"
+type=PATH msg=audit(1760000100.202:900102): item=0 name="/home/agent/agent-lab/notes.md" inode=2001 dev=fd:01 mode=0100644 ouid=1000 ogid=1000 rdev=00:00 nametype=CREATE cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
+type=SYSCALL msg=audit(1760000100.303:900103): arch=c000003e syscall=316 success=yes exit=0 a0=ffffff9c a1=55d3a1c2f200 a2=ffffff9c a3=55d3a1c2f240 items=4 ppid=4101 pid=4103 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="mv" exe="/usr/bin/mv" key="agent_detector_file"
+type=CWD msg=audit(1760000100.303:900103): cwd="/home/agent/agent-lab"
+type=PATH msg=audit(1760000100.303:900103): item=0 name="/home/agent/agent-lab/" inode=1000 dev=fd:01 mode=040755 ouid=1000 ogid=1000 rdev=00:00 nametype=PARENT cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
+type=PATH msg=audit(1760000100.303:900103): item=1 name="notes.md" inode=2001 dev=fd:01 mode=0100644 ouid=1000 ogid=1000 rdev=00:00 nametype=DELETE cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
+type=PATH msg=audit(1760000100.303:900103): item=2 name="/home/agent/agent-lab/" inode=1000 dev=fd:01 mode=040755 ouid=1000 ogid=1000 rdev=00:00 nametype=PARENT cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
+type=PATH msg=audit(1760000100.303:900103): item=3 name="docs.md" inode=2001 dev=fd:01 mode=0100644 ouid=1000 ogid=1000 rdev=00:00 nametype=CREATE cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
+type=SYSCALL msg=audit(1760000100.404:900104): arch=c000003e syscall=263 success=yes exit=0 a0=ffffff9c a1=55d3a1c2f300 a2=0 a3=0 items=2 ppid=4101 pid=4104 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="rm" exe="/usr/bin/rm" key="agent_detector_file"
+type=CWD msg=audit(1760000100.404:900104): cwd="/home/agent/agent-lab"
+type=PATH msg=audit(1760000100.404:900104): item=0 name="/home/agent/agent-lab/" inode=1000 dev=fd:01 mode=040755 ouid=1000 ogid=1000 rdev=00:00 nametype=PARENT cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
+type=PATH msg=audit(1760000100.404:900104): item=1 name="docs.md" inode=2001 dev=fd:01 mode=0100644 ouid=1000 ogid=1000 rdev=00:00 nametype=DELETE cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
+type=SYSCALL msg=audit(1760000100.505:900105): arch=c000003e syscall=268 success=yes exit=0 a0=ffffff9c a1=55d3a1c2f400 a2=1ed a3=0 items=1 ppid=4101 pid=4105 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="chmod" exe="/usr/bin/chmod" key="agent_detector_file"
+type=CWD msg=audit(1760000100.505:900105): cwd="/home/agent/agent-lab"
+type=PATH msg=audit(1760000100.505:900105): item=0 name="/home/agent/agent-lab/hello.py" inode=2002 dev=fd:01 mode=0100644 ouid=1000 ogid=1000 rdev=00:00 nametype=NORMAL cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
+type=SYSCALL msg=audit(1760000100.606:900106): arch=c000003e syscall=42 success=yes exit=0 a0=3 a1=7ffd2c1a0c00 a2=16 a3=0 items=0 ppid=4101 pid=4106 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="python3" exe="/usr/bin/python3.12" key="agent_detector_net"
+type=SOCKADDR msg=audit(1760000100.606:900106): saddr=020001BB01020304
+type=EOE msg=audit(1760000100.606:900106): 
+type=SYSCALL msg=audit(1760000100.707:900107): arch=c000003e syscall=59 success=no exit=-13 a0=55d3a1c2e3f0 a1=7ffd2c1a0b40 a2=7ffd2c1a0b60 a3=8 items=0 ppid=4101 pid=4107 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="bash" exe="/usr/bin/bash" key="agent_detector_exec"
+type=SYSCALL msg=audit(1760000100.808:900108): arch=c000003e syscall=59 success=yes exit=0 a0=55d3a1c2e3f0 a1=7ffd2c1a0b40 a2=7ffd2c1a0b60 a3=8 items=0 ppid=1 pid=4108 auid=0 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=(none) ses=4294967295 comm="cron" exe="/usr/sbin/cron" key="system_audit"
+type=SYSCALL msg=audit(1760000100.909:900109): arch=c000003e syscall=257 success=yes exit=5 a0=ffffff9c a1=55d3a1c2f500 a2=241 a3=1a4 items=1 ppid=4101 pid=4109 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="python3" exe="/usr/bin/python3.12" key="agent_detector_file"
+type=CWD msg=audit(1760000100.909:900109): cwd="/home/agent/agent-lab"
+type=PATH msg=audit(1760000100.909:900109): item=0 name=2F686F6D652F6167656E742F6167656E742D6C61622F6D79E69687E4BBB6
+2E747874 inode=2003 dev=fd:01 mode=0100644 ouid=1000 ogid=1000 rdev=00:00 nametype=CREATE cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
+type=SYSCALL msg=audit(1760000101.010:900110): arch=c000003e syscall=257 success=yes exit=3 a0=ffffff9c a1=55d3a1c2f600 a2=0 a3=0 items=1 ppid=4200 pid=4201 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=5 comm="cat" exe="/usr/bin/cat"
+type=CWD msg=audit(1760000101.010:900110): cwd="/home/agent"
+type=PATH msg=audit(1760000101.010:900110): item=0 name="/etc/hostname" inode=3001 dev=fd:01 mode=0100644 ouid=0 ogid=0 rdev=00:00 nametype=NORMAL cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
