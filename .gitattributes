@@ -1,0 +1,3 @@
+# Audit log fixtures must stay LF even on Windows checkouts (core.autocrlf=true):
+# auditd never writes CRLF and the parser's field semantics assume raw log text.
+tests/fixtures/audit/*.log text eol=lf

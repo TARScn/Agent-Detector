@@ -1,0 +1,77 @@
+/* ---------------------------------------------------------------------------
+   Agent Detector console — design tokens
+   Fluent 2 values as used by the Microsoft 365 admin center / Agent 365:
+   neutral background, white surfaces, brand blue #0f6cbd, 4/8px radii,
+   Segoe UI type ramp. Keeping the values in one file is what lets the console
+   be restyled (or moved to a component framework) without touching views.
+   --------------------------------------------------------------------------- */
+
+:root {
+  /* Brand */
+  --brand: #0f6cbd;
+  --brand-hover: #115ea3;
+  --brand-pressed: #0c3b5e;
+  --brand-tint: #eff6fc;
+  --brand-tint-strong: #deecf9;
+  --brand-text: #0f548c;
+
+  /* Neutrals */
+  --bg: #faf9f8;
+  --surface: #ffffff;
+  --surface-subtle: #f3f2f1;
+  --surface-sunken: #f8f8f8;
+  --border: #e1dfdd;
+  --border-strong: #d1d1d1;
+  --divider: #edebe9;
+  --text: #242424;
+  --text-secondary: #424242;
+  --text-muted: #616161;
+  --text-disabled: #a19f9d;
+
+  /* Status tints (Fluent) */
+  --success-bg: #dff6dd; --success-text: #0e700e; --success: #107c10;
+  --warning-bg: #fff4ce; --warning-text: #835c00; --warning: #f7630c;
+  --danger-bg: #fde7e9;  --danger-text: #a80000;  --danger: #d13438;
+  --info-bg: #deecf9;    --info-text: #0f548c;    --info: #0f6cbd;
+  --critical-bg: #f3e0f9; --critical-text: #6b2d99; --critical: #8e44ad;
+
+  /* Type */
+  --font: "Segoe UI", "Segoe UI Web (West European)", -apple-system,
+          BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+
+  /* Elevation */
+  --shadow-2: 0 1px 2px rgba(0, 0, 0, .06);
+  --shadow-4: 0 2px 6px rgba(0, 0, 0, .08);
+  --shadow-8: 0 8px 24px rgba(0, 0, 0, .12);
+
+  /* Layout */
+  --topbar-height: 48px;
+  --nav-width: 248px;
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --content-max: 1440px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 20px;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--brand-text); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #c8c6c4; border-radius: 10px;
+  border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: #a19f9d; background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }

@@ -1,46 +1,40 @@
 <!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Agent Detector V0.1</title><style>
-:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#17212b;background:#f5f7fb}
-body{margin:0;max-width:1200px;padding:32px 24px;margin:auto}h1{font-size:28px;margin-bottom:4px}.muted{color:#617085}
-section{background:white;border:1px solid #e2e7ee;border-radius:12px;padding:20px;margin-top:20px}
-button,select{font:inherit;border:1px solid #cad5e2;background:white;padding:9px 14px;border-radius:8px;cursor:pointer}
-button.primary{background:#1e529f;color:white;border-color:#1e529f}button:disabled{opacity:.6;cursor:wait}
-.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px}.stats{display:flex;gap:24px;margin-top:12px;color:#617085}
-table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;border-bottom:1px solid #edf0f4;padding:10px}
-th{color:#617085;font-weight:600}details{max-width:360px}pre{white-space:pre-wrap;word-break:break-all;font-size:12px}
-#message{min-height:20px;color:#1e529f}.tag{background:#edf4ff;border-radius:5px;padding:3px 7px}
-</style></head><body>
-<h1>Agent Detector <small style="font-size:14px;color:#617085">V0.1</small></h1>
-<p class="muted">Linux 本地 AI Agent / MCP / Model Runtime 资产发现 · SQLite 证据留存</p>
-<section><div class="toolbar">
-<button class="primary" id="passive">运行被动扫描</button>
-<button id="active">运行主动 + 被动扫描</button>
-<span class="muted">主动模式仅探测本机监听的 HTTP 端口</span></div>
-<p id="message" role="status"></p><div class="stats"><span id="summary">尚未加载扫描结果</span></div></section>
-<section><div class="toolbar"><h2 style="flex:1">发现的资产</h2><label for="scan">扫描批次：</label><select id="scan"></select></div>
-<div style="overflow-x:auto"><table><thead><tr><th>组件</th><th>类别</th><th>状态</th><th>版本</th><th>PID / 端口</th><th>置信度</th><th>证据</th></tr></thead>
-<tbody id="items"><tr><td colspan="7">暂无结果</td></tr></tbody></table></div></section>
-<script>
-const el=id=>document.getElementById(id);
-async function request(path,opts){const r=await fetch(path,opts);if(!r.ok)throw new Error(await r.text());return r.json()}
-function cell(t){const e=document.createElement('td');e.textContent=t??'—';return e}
-async function load(){
- const scans=await request('/api/scans');const prev=el('scan').value;
- el('scan').replaceChildren(...scans.map(s=>{const o=document.createElement('option');o.value=s.id;o.textContent='#'+s.id+' · '+s.mode+' · '+s.started_at.slice(0,19);return o}));
- if(scans.some(s=>String(s.id)===prev))el('scan').value=prev;
- const selected=scans.find(s=>String(s.id)===el('scan').value);
- el('summary').textContent=selected?'扫描 '+selected.id+'：'+selected.observation_count+' 条观测 / '+selected.finding_count+' 个发现':'暂无扫描';
- const rows=await request('/api/findings'+(selected?'?scan_id='+selected.id:'?scan_id=-1'));el('items').replaceChildren();
- if(!rows.length){const tr=document.createElement('tr');const td=cell('本批次暂无发现');td.colSpan=7;tr.append(td);el('items').append(tr)}
- for(const x of rows){const tr=document.createElement('tr');for(const value of [x.component,x.category,x.state,x.version,(x.pid??'—')+' / '+(x.port??'—'),Math.round(x.confidence*100)+'%'])tr.append(cell(value));
- const td=document.createElement('td'),details=document.createElement('details'),sum=document.createElement('summary'),pre=document.createElement('pre');
- sum.textContent='查看证据';pre.textContent=JSON.stringify(x.evidence,null,2);details.append(sum,pre);td.append(details);tr.append(td);el('items').append(tr)}
-}
-async function scan(active){el('passive').disabled=el('active').disabled=true;el('message').textContent='正在扫描…';
- try{const r=await request('/api/scans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active})});el('scan').value='';await load();el('message').textContent='扫描 #'+r.scan_id+' 完成'}
- catch(e){el('message').textContent='扫描失败：'+e.message}
- finally{el('passive').disabled=el('active').disabled=false}}
-el('passive').onclick=()=>scan(false);el('active').onclick=()=>scan(true);
-el('scan').onchange=load;load().catch(e=>el('message').textContent=e.message);
-</script></body></html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Agent Detector · 本机 AI Agent 安全控制台</title>
+  <link rel="stylesheet" href="/assets/css/tokens.css">
+  <link rel="stylesheet" href="/assets/css/app.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path fill='%230f6cbd' d='M10 2.5 16.5 5v5.2c0 3.6-2.7 6.5-6.5 7.3-3.8-.8-6.5-3.7-6.5-7.3V5L10 2.5Z'/></svg>">
+</head>
+<body>
+  <div id="root" class="app"></div>
+  <noscript>本控制台需要启用 JavaScript。</noscript>
+  <script>
+    // Startup diagnostics: the console has no build step, so a module error would
+    // otherwise only appear in the browser console. Recorded errors are shown by
+    // app.js if the UI failed to boot.
+    window.__agentDetectorErrors = [];
+    const record = (message) => {
+      window.__agentDetectorErrors.push(message);
+      const root = document.getElementById('root');
+      if (root && !root.childElementCount) {
+        root.innerHTML = '<div class="page" style="padding:32px"><div class="card">'
+          + '<div class="card-head"><h2>控制台启动失败</h2></div>'
+          + '<div class="card-body"><p>请查看浏览器控制台的错误详情，或刷新页面重试。</p>'
+          + '<pre class="code">' + String(message).replace(/[<>&]/g, '') + '</pre></div></div></div>';
+      }
+    };
+    window.addEventListener('error', (event) => record(
+      `${event.message} @ ${event.filename || ''}:${event.lineno || 0}`));
+    window.addEventListener('unhandledrejection', (event) => record(
+      `未处理的 Promise 拒绝：${event.reason && (event.reason.stack || event.reason.message) || event.reason}`));
+  </script>
+  <script type="module">
+    import { boot } from './assets/js/app.js';
+    boot();
+  </script>
+</body>
+</html>

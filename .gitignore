@@ -6,3 +6,7 @@ data/
 *.sqlite3
 .env
 .DS_Store
+.zcode/
+
+# build artifacts (pip install -e)
+*.egg-info/

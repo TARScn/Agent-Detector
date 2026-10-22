@@ -1,0 +1,82 @@
+# 高级行为规则：低层事实（kind）→ Agent 行为（operation）。
+# 规则按顺序匹配、首个命中胜出：具体规则在前，兜底规则在后。
+#
+# kind 取值：proc.exec / file.write / file.move / file.delete / file.attr
+#            / file.read / net.connect / proc.kill
+# derive.target / derive.detail 取值：none / script_path / git_subcommand
+#            / argv_join / exec_basename
+# 说明：解释器（node/python/bash）经通用运行时启动的浏览器自动化会被记为
+# SCRIPT_EXEC（脚本路径），BROWSER_AUTOMATION 规则只命中专用浏览器/运行器。
+revision: 1
+rules:
+  - id: SCRIPT_EXEC
+    when:
+      kind: proc.exec
+      executable_names: [python, python2, python3, python3.10, python3.11, python3.12,
+                         python3.13, py, node, nodejs, deno, bun, bash, sh, dash, zsh,
+                         ksh, ruby, perl, php, pwsh, powershell, lua, rscript]
+    derive: {target: script_path}
+    confidence: high
+
+  - id: GIT_OPERATION
+    when: {kind: proc.exec, executable_names: [git]}
+    derive: {target: exec_basename, detail: git_subcommand}
+    confidence: high
+
+  - id: PACKAGE_INSTALL
+    when:
+      kind: proc.exec
+      executable_names: [pip, pip3, uv, poetry, pipx, npm, npx, pnpm, yarn, cargo,
+                         rustc, go, make, cmake, ninja, apt, apt-get, dpkg, dnf, yum,
+                         rpm, pacman, apk, brew]
+    derive: {target: argv_join}
+    confidence: high
+
+  - id: DATABASE_OPERATION
+    when:
+      kind: proc.exec
+      executable_names: [psql, mysql, mariadb, sqlite3, mongosh, mongo, redis-cli,
+                         clickhouse-client, influx]
+    derive: {target: argv_join}
+    confidence: high
+
+  - id: BROWSER_AUTOMATION
+    when:
+      kind: proc.exec
+      cmdline_tokens: ["--remote-debugging-port", "playwright", "puppeteer",
+                       "chrome-devtools", "selenium", "webdriver"]
+    derive: {target: argv_join}
+    confidence: medium
+
+  - id: COMMAND_EXEC
+    when: {kind: proc.exec}
+    derive: {target: argv_join}
+    confidence: high
+
+  - id: FILE_MODIFY
+    when: {kind: file.write}
+    confidence: high
+
+  - id: FILE_MOVE
+    when: {kind: file.move}
+    confidence: high
+
+  - id: FILE_DELETE
+    when: {kind: file.delete}
+    confidence: high
+
+  - id: FILE_ATTR_CHANGE
+    when: {kind: file.attr}
+    confidence: high
+
+  - id: FILE_READ
+    when: {kind: file.read}
+    confidence: medium
+
+  - id: NETWORK_CONNECT
+    when: {kind: net.connect}
+    confidence: high
+
+  - id: PROC_KILL
+    when: {kind: proc.kill}
+    confidence: high
