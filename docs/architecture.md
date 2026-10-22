@@ -1,75 +1,100 @@
-# V0.1 Architecture / 验收范围
+# V0.2 架构 / 验收范围
+
+Windows V0.2 · 工程实现说明。产品设计稿见 `J:\myNotes\plans\agent探测实现.md`。
+
+## 三种模式与三条链路
+
+| 模式 | 做什么 | 能做到什么 | 做不到什么 |
+| --- | --- | --- | --- |
+| Discovery | 进程、注册表/安装记录、Agent 配置、MCP 配置、扩展目录 → 稳定资产身份 | 发现 Agent、版本（带来源）、运行实例 | 不保证判定"这个进程一定是某个 Agent"，只给证据与置信度 |
+| Monitor | Sysmon / auditd / 采样 / 出站连接 / 原生 Hook 事件 → 统一行为事件 | 观察进程、文件、网络与工具调用 | 观察不等于拦截：系统级行为无法提前阻断 |
+| Protect | Agent 原生 PreToolUse → 策略引擎 → 平台原生响应 | 在受支持 Agent 的工具调用**执行前** allow / ask / deny | 只覆盖接入 Hook 且经过检查点的调用；未适配的 Agent 不保证 |
 
 ## 数据链路
 
 ```
-【资产发现】
-collectors（进程/端口/文件系统，跨平台只读采集）
-  → HostFacts
-  → detectors（从 fingerprints/rules/*.yaml 装配的规则解释器）
-  → DetectedAsset（状态集 + 置信度 + 带来源版本 + 证据）
-  → merge（按稳定 asset_id 合并）
-  → SQLite（scan_tasks / assets / asset_snapshots / evidence，WAL）
+【Agent 发现】
+collectors/（进程 / 文件元数据，跨平台只读）
+    → HostFacts
+    → discovery/fingerprints（从 rules/*.yaml 装配的规则解释器）
+    → DetectedAsset（状态集 + 置信度 + 带来源版本 + 证据）
+    → merge（按稳定 asset_id 合并）
+    → storage（scan_tasks / assets / asset_snapshots / evidence）
+    → discovery/inventory（Agent 资产 + 运行实例 + Hook 状态 + 保护状态）
+    → storage（agent_assets / agent_instances）
 
-【行为观察（零合作）】
-behavior/netmon（出站连接轮询 + DNS 缓存关联 + LLM API 情报名单）
-  → NetObservation（pid/进程/目标域名/证据标签）
-  → MonitorManager（抑制窗口去重 + pid→asset 归属）
-  → SQLite（behavior_events，source="netmon"）
+【行为监测】
+原生 Hook ────┐
+Sysmon ───────┤   services/ingest（Sysmon / auditd / 采样）
+auditd ───────┼──> domain/facts.BehaviorFact ──> detection/behavior_rules（高级行为）
+采样 ─────────┤                                   ├─ detection/attribution（进程树 → Agent）
+出站连接 ─────┘                                   ├─ detection/risk（风险分级）
+                                                  └─ suppression + 速率上限 + 保留策略
+                                                  → storage/behavior_events（source 区分通道）
 
-【系统行为观察（Linux auditd；无 root 时采样降级）】
-behavior/audit（auditd 规则 → 日志 tail / 回放）→ parser → normalizer（BehaviorFact 事实层）
-  → ProcessGraph（pid + create_time 身份，祖先链；快照种子 + exec 事实更新）
-  → attribution（复用指纹匹配原语 + 资产快照 running_pids，永不凭空创建资产）
-  → behavior_rules（behaviors.yaml：事实 → 高级行为）
-  → BehaviorIngestService（抑制窗口去重 + 速率上限 + 保留清理）
-  → SQLite（behavior_events，source="auditd" / "poll"）
-
-→ FastAPI（/api/scans /api/assets /api/assets/{id}/evidence /api/assets/{id}/events /api/monitor/* /api/behavior/*）+ CLI
+【执行前拦截】
+Agent 工具调用 → hook_bridge（stdlib，极轻量）
+    → POST /internal/v1/hooks/decide（loopback + Token）
+    → hooks/normalizer（统一 ToolCall，平台差异止于此）
+    → detection/correlation（Hook 父进程链 → 运行实例）
+    → policy/engine（确定性规则，首个命中胜出，不调用 LLM）
+    → 记录事件 + 生成告警
+    → hooks/adapters（转换成该 Agent 的原生响应）→ 返回 Agent
 ```
 
-检测规则与检测代码分离：产品特征全部在 YAML（见 [rules.md](rules.md)、
-[behavior.md](behavior.md) 与 [syscall-monitoring.md](syscall-monitoring.md)），引擎只实现探测原语（文件元数据、JSON 键名窥视、
-npm 根发现、进程匹配、连接与 DNS 关联、audit 记录解析与进程树归属）。单个检测器异常被扫描服务隔离记录，
-不影响其他检测器与扫描任务；监控单轮异常同样被隔离，不中断观察线程。
+## 目录结构（`src/`）
+
+```
+agent_detector/
+  api/          app.py 组装；routers/ 每个资源一个模块（/api/v1、/internal/v1）
+  cli/          scan / agents / events / collect / policy / hooks / serve
+  collectors/   原始采集：process、filesystem、sysmon、audit/（auditd）、netflow、dns_cache、poll
+  common/       config（全部环境变量）、security（脱敏）
+  detection/    判别层：correlation、attribution、process_graph、behavior_rules、risk、llm_intel
+  discovery/    发现层：scanner、inventory、mcp、identity、agents（支持矩阵）、fingerprints/
+  domain/       enums、models、facts（跨平台事实层）
+  hooks/        base、registry、normalizer、installer、adapters/{claude,codex,cursor}
+  policy/       schema、loader、engine、paths、rules/policies.yaml
+  services/     hooks（决策编排）、ingest（系统行为）、monitor（出站连接）、retention
+  storage/      database、models、repositories/
+  web/          无构建步骤的控制台（index.html + assets/css + assets/js）
+hook_bridge/    放进 Agent 工具调用路径里的极轻量进程（仅标准库）
+```
+
+`hook_bridge` 与 `agent_detector` 是两个独立包：前者不得依赖 FastAPI、数据库或规则引擎，
+否则每次工具调用都要付出导入代价（设计文档 §11.4）。
 
 ## 核心定义
 
-- **Asset**：稳定资产身份 = sha256(hostname | 规则 id | 规范化范围路径)，与 PID 无关；重扫只更新 last_seen。
-- **States**：INSTALLED / CONFIGURED / RUNNING 可并存（文档 §2.3），由独立证据源分别点亮；行为状态（BEHAVIOR_SUSPECTED 等）由行为事件累积，同样叠加而非覆盖。
-- **Behavior event**：统一行为事件表 `behavior_events`，`source` 区分通道（`netmon` 网络调用；`auditd` / `poll` 系统行为；预留 hook/trace）；连接级与进程树级证据（谁调了哪个 API / 哪个进程后代做了什么），不含通信内容与文件内容。
-- **System behavior**：事实层（BehaviorFact：kind/pid/ppid/路径/结果）与高级行为（SCRIPT_EXEC、FILE_MOVE、GIT_OPERATION…）两层分离，归属基于进程树且**不等于模型自主决定**；字段与证据标签见 [syscall-monitoring.md](syscall-monitoring.md)。
-- **Version**：必须带 `version_source`（package-metadata > installer-metadata > process-claim）；无可靠来源输出 UNKNOWN，禁止猜测。
-- **Evidence**：只存路径、键名、大小、mtime、脱敏后的命令行；不存文件内容与凭证原文。
-- **Snapshot**：每次扫描对每个资产落一条快照，支持历史对比与变更观察。
+- **Asset**：稳定身份 = sha256(hostname | 规则 id | 规范化范围路径)，与 PID 无关；重扫只更新 last_seen。
+- **Instance**：`instance_id` = hash(asset_id, pid, 启动时间)。Windows 会复用 PID，所以 PID 不能当身份（设计文档 §3.4）。
+- **States**：INSTALLED / CONFIGURED / RUNNING 可并存，由独立证据源分别点亮。
+- **Protection status**：PROTECTED / MONITOR_ONLY / DEGRADED / UNPROTECTED，只由 Hook 配置的**实际检查结果**决定。
+- **Fact**：跨平台事实（kind / pid / ppid / argv / 路径 / 结果），Sysmon 与 auditd 都归一到它，上层只认事实。
+- **Behavior event**：统一表 `behavior_events`，`source` 区分通道（native_hook / sysmon / auditd / poll / netmon）。
+- **Decision**：allow / ask / deny / audit；`decision=allow` **不推导** `execution_status=successed`，后者要由 PostToolUse 确认。
+- **Evidence**：只存路径、键名、大小、mtime、脱敏后的命令行；不存文件内容与凭据原文。
 
-## 可扩展接口
+## 能力边界（写在代码与界面里，不只写在文档里）
 
-- collectors：未来增加 /proc 深取、docker、systemd；auditd 采集已落地在 `behavior/audit`（见 [syscall-monitoring.md](syscall-monitoring.md)），eBPF 采集通道为后续（与 auditd 共用同一事实层）。
-- detectors：新增检测目标 = 新增一条 client_rule YAML 或 signature 规则；
-  全新产品探测原语时才扩展引擎。
-- behavior：已落地两个通道——`netmon`（网络调用，零合作）与 `auditd`/`poll`（系统行为）；
-  情报名单 `llm_apis.yaml` + 行为规则 `behaviors.yaml` 均支持外部目录覆盖；
-  后续通道（hooks 事件适配器、eBPF、ETW）都以 behavior_events 为统一落点。
-- probes：HTTP（已实现，loopback 限定）、协议握手（受 allowlist 和速率约束）。
-- persistence：Repository 接口隔离，后续可换 PostgreSQL。
-- web：身份认证、RBAC、异步扫描、SSE 进度。
+- Hook 只覆盖经过检查点的调用：Codex 官方说明部分执行路径可能绕过 Hook，Cursor 内部文件操作不经检查点。
+- Codex / Cursor 的响应 Schema 标为 `schema_verified = False`，界面显示"待验证"。
+- 未安装 Hook 的 Agent 一律显示"仅监测"，界面与 CLI 都不会声称已保护。
+- 用户级 Hook 不具备不可篡改性（同权限用户可改），企业级需要托管配置与签名（设计文档 §11.2）。
+- WSL2 内的 Agent 不在首期范围：发行版运行在子 PID namespace，auditd 与 Windows 侧 Hook 均不可用。
 
-## V0.1 验收
+## 验收（V0.2 当前状态）
 
-1. API 与 Web UI 可启动；GET /api/health 正常返回。
-2. 被动扫描发现资产并保留状态、版本来源与证据；Claude Code 区分安装/配置/运行。
-3. 主动模式不访问远程地址、不跟随重定向；手动开启。
-4. 网络行为监控零配置可用：启动后本机进程的 LLM API 调用（连接级）落库并可归属资产；读操作全部只读，不解析通信内容。
-5. SQLite 数据跨进程重启保留；资产不因重扫重复；行为事件历史可查。
-6. 无可靠版本信息时输出 UNKNOWN；process-claim 来源明确标注。
-7. pytest 覆盖规则加载、检测行为、身份稳定性、持久化、故障隔离与行为监控匹配/去重/归属。
-8. 系统行为监测：Linux 以 auditd 采集 Agent 后代进程的行为（进程执行 / 文件写-移动-删除 / connect）并归属到资产；
-   无 root 环境以采样模式降级（仅进程执行级）。回放模式可在任意平台复现整条管线；
-   真机 auditd 验收需一台真实 Linux 主机（WSL2 因发行版运行在子 PID namespace 而不可用，见 syscall-monitoring.md）。
+1. 控制台与 API 可启动：`agent-detector serve` → `GET /api/health`、`GET /api/v1/overview`。
+2. 扫描产出稳定资产身份、运行实例、版本来源与证据；Agent 资产带能力矩阵与保护状态。
+3. 决策链路闭环：`hook_bridge` → `/internal/v1/hooks/decide` → 策略 → 阻断 → 事件 + 告警，
+   `pytest` 覆盖策略语义、适配器响应、安装器合并/移除、决策接口与 SSE。
+4. 采集通道均"如实汇报"：Sysmon 未安装时返回原因而不是空跑；auditd 无 root 时降级为采样并说明。
+5. 目录、删除、凭据、配置篡改等风险行为在策略样例中给出 deny / ask；LLM 不参与必经决策。
+6. 前端六个页面（总览 / Agent 资产 / 行为时间线 / 策略 / 告警 / 设置）在浏览器中验证通过，页面显式标注"待开发"的能力。
 
-## 后续迭代建议
+## 后续迭代
 
-V0.2：进程二进制取证、hooks/遥测事件适配器（内容级证据通道）、容器支持、eBPF 采集通道（与 auditd 共用事实层）；
-V0.3：授权网络流量观察增强（ETW/SNI 补盲）、MCP/A2A 协议解析、Agent 行为序列（自主循环 / 失败重试）与风险评分；
-V0.4：统一资产模型、权限与 API key、异步扫描、规则集中分发与热更新、审计。
+- 采集通道：eBPF（与 auditd 共用事实层）、ETW、容器内 Agent 发现、WSL2 采集模块。
+- 拦截面：Gemini CLI / OpenCode / Copilot CLI 适配器，MCP 工具级策略，Windows Named Pipe + 用户 SID 的决策通道。
+- 治理面：策略可视化编辑与签名、企业托管配置、告警通知与报表、多用户与权限。

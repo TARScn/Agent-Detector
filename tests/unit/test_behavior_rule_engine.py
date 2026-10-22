@@ -1,8 +1,8 @@
 import pytest
 from pydantic import ValidationError
 
-from agent_detector.behavior.audit.normalizer import BehaviorFact
-from agent_detector.behavior.behavior_rules import (BehaviorRuleSet, load_behavior_rules,
+from agent_detector.domain.facts import BehaviorFact
+from agent_detector.detection.behavior_rules import (BehaviorRuleSet, load_behavior_rules,
                                                     match_fact)
 
 

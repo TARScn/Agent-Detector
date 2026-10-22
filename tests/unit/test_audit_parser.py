@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agent_detector.behavior.audit.parser import AuditLogParser, parse_lines
+from agent_detector.collectors.audit.parser import AuditLogParser, parse_lines
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "audit" / "scenario.log"
 

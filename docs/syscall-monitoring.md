@@ -10,21 +10,21 @@
 Linux audit 子系统（由操作者以 root 安装的最小化规则，键 agent_detector_*）
    │  /var/log/audit/audit.log ← TailReader（EOF 起读、轮转感知）｜ ReplayReader（文件回放）
    ▼
-behavior/audit/parser     按 audit(msg=audit(ts:serial)) 分组，续行合并，十六进制字段解码
+collectors/audit/parser     按 audit(msg=audit(ts:serial)) 分组，续行合并，十六进制字段解码
    ▼
-behavior/audit/normalizer → BehaviorFact（事实层：kind / pid / ppid / 进程名 / argv / 路径对 / 结果）
+collectors/audit/normalizer → BehaviorFact（事实层：kind / pid / ppid / 进程名 / argv / 路径对 / 结果）
    ▲
    │  poll 模式（无权限降级）：psutil 采样 (pid, create_time) 差集 → 仅 proc.exec 事实
    ▼
-behavior/graph  ProcessGraph（pid + create_time 身份；快照种子 + exec 事实更新 + /proc 实时校验）
+detection/process_graph  ProcessGraph（pid + create_time 身份；快照种子 + exec 事实更新 + /proc 实时校验）
    ▼
-behavior/attribution  祖先回溯（≤12 层）→ 资产快照 running_pids / 指纹规则（与扫描同一套匹配原语）
+detection/attribution  祖先回溯（≤12 层）→ 资产快照 running_pids / 指纹规则（与扫描同一套匹配原语）
    ▼
-behavior/behavior_rules（rules/behaviors.yaml）事实 → 高级行为（首个命中规则胜出，兜底 COMMAND_EXEC）
+detection/behavior_rules（detection/rules/behaviors.yaml）事实 → 高级行为（首个命中规则胜出，兜底 COMMAND_EXEC）
    ▼
-behavior/ingest_service（抑制窗口去重 + 速率上限 + 保留清理）→ SQLite behavior_events（source=auditd/poll）
+services/ingest（抑制窗口去重 + 速率上限 + 保留清理）→ SQLite behavior_events（source=auditd/poll）
    ▼
-Web 行为页时间线 + /api/behavior/* + CLI（behavior status/rules/events/collect/replay/purge）
+Web 行为页时间线 + /api/v1/events + CLI（channels / collect / replay / events / purge）
 ```
 
 ## 采集通道
@@ -41,7 +41,7 @@ Web 行为页时间线 + /api/behavior/* + CLI（behavior status/rules/events/co
 
 ```bash
 # 查看推荐规则与安装/卸载命令（--persistent 追加 rules.d + augenrules 形式）
-agent-detector behavior rules --watch-dir /home/user/agent-lab --persistent
+agent-detector rules --watch-dir /home/user/agent-lab --persistent
 ```
 
 生成的规则形如：
@@ -63,7 +63,7 @@ agent-detector behavior rules --watch-dir /home/user/agent-lab --persistent
 
 ## 判定与归属
 
-低层事实 → 高级行为（`behavior/rules/behaviors.yaml`，规则按顺序匹配、首个命中胜出）：
+低层事实 → 高级行为（`detection/rules/behaviors.yaml`，规则按顺序匹配、首个命中胜出）：
 
 | 事实 kind | 触发 | 高级行为 | 置信度 |
 |---|---|---|---|
@@ -129,23 +129,24 @@ agent-detector behavior rules --watch-dir /home/user/agent-lab --persistent
 
 ```bash
 # Linux 主机（root 或已加入 log_group 的用户）
-agent-detector behavior rules --watch-dir /home/user/agent-lab   # 打印规则与安装命令（root 执行）
-agent-detector behavior collect --duration 120                   # 限时观察，实时打印命中的行为
-agent-detector behavior status                                   # 采集状态与计数
-agent-detector behavior events --limit 50 --source auditd        # 查询事件
+agent-detector rules --watch-dir /home/user/agent-lab   # 打印规则与安装命令（root 执行）
+agent-detector collect --duration 120                   # 限时观察，实时打印命中的行为
+agent-detector status                                   # 采集状态与计数
+agent-detector events --limit 50 --source auditd        # 查询事件
 
 # 任意平台（含 Windows）
-agent-detector behavior collect --mode poll --duration 60        # 采样降级模式
-agent-detector behavior replay tests/fixtures/audit/scenario.log # 回放验证
-agent-detector behavior purge                                    # 应用保留策略
+agent-detector collect --mode poll --duration 60        # 采样降级模式
+agent-detector replay tests/fixtures/audit/scenario.log # 回放验证
+agent-detector purge                                    # 应用保留策略
 ```
 
 Web：行为页（启动/停止采集、状态与计数、auditd 规则卡片、按 Agent / 来源筛选的行为时间线；netmon 的 LLM 调用事件与系统行为在同一时间线，按 `source` 区分）。
 
 ```
-GET  /api/behavior/status | stats | events?limit&agent&source&event_type
-POST /api/behavior/start (body: {mode, log_path, from_start}) | /api/behavior/stop
-GET  /api/behavior/audit-rules?watch_dir=&uid_min=
+GET  /api/v1/telemetry/status （含 stats 与事件过滤）
+POST /api/v1/telemetry/behavior/start  (body: {mode, log_path, from_start})
+POST /api/v1/telemetry/behavior/stop
+GET  /api/v1/telemetry/audit-rules?watch_dir=&uid_min=
 GET  /api/assets/{asset_id}/events        # 资产维度的行为事件（产品文档 §7）
 ```
 
@@ -166,7 +167,7 @@ GET  /api/assets/{asset_id}/events        # 资产维度的行为事件（产品
 
 ## Linux 真机验收步骤（待执行）
 
-1. 目标主机安装 auditd，`agent-detector behavior rules --watch-dir <工作目录>` 后以 root 执行规则；确认 `auditctl -l` 有 5 组键。
+1. 目标主机安装 auditd，`agent-detector rules --watch-dir <工作目录>` 后以 root 执行规则；确认 `auditctl -l` 有 5 组键。
 2. 运行场景脚本（在监视目录内）：创建文件 → 运行 `python3 hello.py` → `mv` 重命名 → `rm` 删除 → `git status` →（可选）外联 connect。
 3. 启动真实 Agent（推荐 Claude Code，已有指纹；或经 `AGENT_DETECTOR_RULES_DIR` 注入演示指纹），让它执行同样操作。
 4. 验收标准：行为页（或 `behavior events`）出现归属正确的 SCRIPT_EXEC / FILE_MOVE / FILE_DELETE / GIT_OPERATION 等事件，`pid/ppid/进程名/目标/证据/置信度` 齐全；非 Agent 树进程默认不落库；记录事件率 / CPU / `auditctl -s` 的 backlog 与 lost 计数。

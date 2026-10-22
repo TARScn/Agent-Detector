@@ -2,10 +2,10 @@ from types import SimpleNamespace
 
 import psutil
 
-from agent_detector.behavior.netmon import (ConnInfo, collect_outbound, is_loopback_ip,
+from agent_detector.collectors.netflow import (ConnInfo, collect_outbound, is_loopback_ip,
                                             match_llm_call, resolve_known_hosts,
                                             resolve_process_names)
-from agent_detector.behavior.rules import load_rules
+from agent_detector.detection.llm_intel import load_rules
 
 
 def sock(status, ip, port, pid):

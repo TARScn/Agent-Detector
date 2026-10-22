@@ -1,89 +1,149 @@
-# Agent Detector V0.1
+# Agent Detector · Windows V0.2
 
-本机 AI Agent 资产发现工具。Python + FastAPI + SQLAlchemy/SQLite + 原生 Web UI。
-产品定位面向 Linux 部署，采集与检测层跨平台（Windows 可用于开发验证）。
+本机 AI Agent 的安全检测与行为治理工具：**发现 Agent → 关联进程行为 → 理解工具调用 → 执行前拦截 → 审计追溯**。
 
-## 功能
-- **被动扫描**：通过 psutil 采集进程、命令行与本机 TCP LISTEN 端口；由规则引擎识别 Agent 客户端、框架、模型服务和 MCP 组件。
-- **声明式规则**：检测特征全部在 YAML（`fingerprints/rules/`），新增检测目标只写规则不改代码；支持 `AGENT_DETECTOR_RULES_DIR` 外部规则目录按 id 覆盖内置规则。规范见 [docs/rules.md](docs/rules.md)。
-- **Claude Code 专属规则**：区分安装（npm / 原生安装器 / `~/.claude`）、配置（`~/.claude.json` 键名、`settings.json`）与运行（进程）三类证据，并排除同名但不同产品的 Claude Desktop 进程。
-- **资产模型**：稳定资产 ID（与 PID 无关，重扫不重复建资产）、多状态共存（INSTALLED / CONFIGURED / RUNNING）、独立置信度。
-- **版本带来源**：优先包元数据（npm `package.json`），其次安装器元数据；无可靠来源输出 `UNKNOWN`，不做猜测。
-- **主动探测**：仅在手动启用时（扫描页"深度扫描"），对本机已观测的监听端口发送少量 HTTP GET 请求；不执行漏洞利用、不访问远程地址。
-- **网络行为监控（零合作）**：轮询本机出站连接，结合系统 DNS 缓存与 LLM API 情报名单，识别"哪个进程在调用哪个 LLM API"并记录目标地址——无需目标 Agent 设代理、改配置或装证书；只记录连接级证据，不读取通信内容。见 [docs/behavior.md](docs/behavior.md)。
-- **系统行为监测（Linux auditd）**：在系统层采集 Agent 进程及其后代进程的行为——进程执行、文件写入 / 移动 / 删除 / 属性变更、网络连接——并通过进程树回溯归属到具体 Agent；行为规则声明式配置（SCRIPT_EXEC / FILE_MOVE / GIT_OPERATION / PACKAGE_INSTALL…）。无 root 或 Windows 时降级为进程采样模式（仅进程执行级）。见 [docs/syscall-monitoring.md](docs/syscall-monitoring.md)。
-- **可追溯结果**：SQLite 保存扫描任务、资产、快照、证据与行为事件；文件内容与凭证原文不入库，命令行密钥自动脱敏，启动参数原文默认不落库。
-- **Web 管理控制台**：左侧导航五页 —— 扫描主页（Agent 扫描 / 深度扫描 + 概览统计）、监控页（网络行为监控启停 + 事件流）、行为页（系统行为采集启停 + auditd 规则命令卡 + 行为时间线，合并 netmon 事件）、结果页（按批次/类型/状态筛选 + 证据明细 + 扫描历史）、设置页（系统信息 + 只读规则列表）。
-- **CLI 与 Web 共用同一引擎**：`agent-detector scan` / `agent-detector assets list` / `agent-detector monitor` / `agent-detector behavior …`。
+它不是 Agent 开发框架，而是独立运行在 Agent 外部的监测工具。参考 Microsoft Agent 365 / Defender 的建模方式，
+结合 Claude Code、Codex CLI、Cursor 官方开放的 Hook 接口实现。
 
-## 快速启动
+产品设计稿：`J:\myNotes\plans\agent探测实现.md`。
+
+## 三种模式
+
+| 模式 | 数据来源 | 能做到 |
+| --- | --- | --- |
+| **Discovery** | 进程、安装记录、Agent 配置、MCP 配置 | 发现 Agent，给出稳定资产身份、带来源的版本、运行实例 |
+| **Monitor** | Sysmon / auditd / 进程采样 / 出站连接 / 原生 Hook | 观察进程、文件、网络与工具调用行为 |
+| **Protect** | Agent 原生 PreToolUse Hook | 在受支持 Agent 的**工具调用执行前** allow / ask / deny |
+
+> 监测到进程正在删除文件，不代表能在删除前阻止它。只有接入原生 Hook 的 Agent 才能被前置阻断，
+> 未接入的 Agent 在界面上一律显示"仅监测"。
+
+## 快速开始
+
+```powershell
+# 1. 安装（创建虚拟环境 + 可编辑安装 + 通道体检 + 生成 Hook Token）
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+
+# 2. 启动控制台（默认 http://127.0.0.1:8787）
+.venv\Scripts\python.exe -m agent_detector.cli.main serve
+
+# 3. 首次扫描
+.venv\Scripts\python.exe -m agent_detector.cli.main scan
+```
+
+Linux / macOS 上等价（采集通道会自动降级）：
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[test]"
-uvicorn agent_detector.web.app:app --host 127.0.0.1 --port 8000
+uvicorn agent_detector.api.app:app --host 127.0.0.1 --port 8787
 ```
 
-访问 http://127.0.0.1:8000 。不要将无鉴权服务直接暴露到公网。
+## 控制台
 
-```bash
-# CLI 扫描（与 Web 共用后端引擎）
-agent-detector scan
-agent-detector scan --active --json
-agent-detector assets list
+无构建步骤的前端（`index.html` + 原生 ES 模块），风格参考 Microsoft 365 admin center / Agent 365：
+白色命令栏、分组左导航、卡片式内容区与状态徽章。
 
-# 网络行为监控（零合作识别 LLM API 调用，Web 监控页也可启停）
-agent-detector monitor --duration 60   # 观察 60 秒，输出命中的 进程 → API 地址
+| 页面 | 内容 |
+| --- | --- |
+| 总览 | 发现 Agent / 今日行为 / 已阻断 / 未启用拦截 四个数字 + 保护状态分布 + 采集通道 + 实时事件 |
+| Agent 资产 | 资产清单（能力矩阵、Hook 状态、保护状态、实例与会话数）；详情页含身份、实例、会话、MCP、证据 |
+| 行为时间线 | 统一事件流（Hook / Sysmon / auditd / 采样 / 网络），SSE 实时追加，可展开证据标签 |
+| 安全策略 | 13 条内置规则的决策、风险、优先级与匹配条件；可停用规则或改判决策并立即生效 |
+| 风险告警 | 阻断调用与高风险事件的告警，可确认 / 解决 |
+| 设置 | 系统信息、采集通道、Hook 安装（dry-run → 写入并备份）、auditd 规则生成器、支持矩阵、待开发清单 |
 
-# 系统行为监测（Linux 需 root 安装 auditd 规则；其他平台用采样降级）
-agent-detector behavior rules --watch-dir /home/user/agent-lab   # 打印规则与安装命令（root 执行）
-agent-detector behavior collect --duration 120                   # auditd 采集（Linux）
-agent-detector behavior collect --mode poll --duration 60        # 采样模式（无 root / Windows）
-agent-detector behavior replay tests/fixtures/audit/scenario.log # 回放一份 audit 日志
-agent-detector behavior events --limit 50 --source auditd
-agent-detector behavior purge                                    # 应用保留策略
+页面上标注"待开发"的部分是明确的未完成能力（例如策略可视化编辑、告警通知渠道），不会伪装成已实现。
 
-# REST API
-curl -X POST http://127.0.0.1:8000/api/scans -H 'Content-Type: application/json' -d '{"active": false}'
-curl http://127.0.0.1:8000/api/assets
-curl "http://127.0.0.1:8000/api/assets/<asset_id>/evidence"
-curl http://127.0.0.1:8000/api/monitor/stats
-curl http://127.0.0.1:8000/api/behavior/status
+## Hook 与执行前拦截
 
-pytest -q
+```powershell
+agent-detector hooks status                      # 各 Agent 的 Hook 配置状态
+agent-detector hooks plan claude_code            # dry-run：打印将要写入的内容
+agent-detector hooks install claude_code --apply # 写入（先备份，只增删本工具的条目）
+agent-detector hooks uninstall cursor --apply    # 卸载
+agent-detector policy test --command "rm -rf ~/.ssh"   # 策略自查，不需要 Agent 参与
 ```
 
-可用环境变量：`AGENT_DETECTOR_DB` (默认 `./data/agent_detector.sqlite3`)、`AGENT_DETECTOR_MAX_PROBES` (默认 20)、`AGENT_DETECTOR_RULES_DIR` (外部规则目录，按 id 覆盖内置规则)、`AGENT_DETECTOR_MONITOR_INTERVAL/_SUPPRESS` 与 `AGENT_DETECTOR_BEHAVIOR_RULES_DIR` (行为规则配置，见 [docs/behavior.md](docs/behavior.md))；系统行为通道另有 `AGENT_DETECTOR_AUDIT_LOG`、`AGENT_DETECTOR_BEHAVIOR_SUPPRESS/_RETENTION_DAYS/_MAX_EVENTS_PER_MINUTE/_PATH_POLICY/_STORE_ARGV/_POLL_INTERVAL/_INCLUDE_UNATTRIBUTED`（见 [docs/syscall-monitoring.md](docs/syscall-monitoring.md)）。
+链路：`hook_bridge`（仅标准库，位于 Agent 工具调用路径内）→ `POST /internal/v1/hooks/decide`
+（loopback + Token）→ 策略引擎（确定性，不调用 LLM）→ 事件 + 告警 → 转换为该 Agent 的原生响应。
 
-## 架构（src/agent_detector/）
+- 服务不可达时默认 **fail-closed**（拒绝调用），可用 `AGENT_DETECTOR_HOOK_FAILURE_MODE=allow` 改为审计放行。
+- `decision=allow` 不等于执行成功：成功由 `PostToolUse` 事件确认（`execution_status`）。
+- 详见 [docs/hooks.md](docs/hooks.md) 与 [docs/policy.md](docs/policy.md)。
+
+## CLI
 
 ```
-domain/        资产/证据/版本领域模型与枚举
-collectors/    进程、端口、文件系统采集（跨平台）
-fingerprints/  声明式检测规则（rules/*.yaml）+ 加载器 + 规则解释引擎
-detectors/     Detector 协议；build_detectors() 从 YAML 规则装配检测器
-recognition/   稳定资产 ID 生成
-application/   扫描编排（采集 → 检测 → 合并 → 持久化，检测器异常隔离）
-persistence/   SQLAlchemy 实体 + Repository（scan_tasks / assets / asset_snapshots / evidence / behavior_events）
-probes/        本机 HTTP 主动指纹
-behavior/      行为监测：netmon 出站连接 × DNS 缓存 × LLM 情报名单（零合作）；
-               auditd/poll 系统行为采集（进程执行 / 文件操作 / 网络连接）+ 进程图归属 + 行为规则
-cli/           命令行入口
-web/           FastAPI 路由 + 单页 UI
-common/        配置与脱敏工具
+agent-detector serve                                 启动控制台与决策服务
+agent-detector scan [--active] [--json]              资产扫描（+  Agent 清单刷新）
+agent-detector agents list|show <asset_id>           Agent 资产、实例、会话、保护状态
+agent-detector assets [--scan-id N]                  组件资产（含 MCP / 模型服务）
+agent-detector events [--source X] [--risk high]     行为事件（Hook / Sysmon / auditd / 采样 / 网络）
+agent-detector alerts [--status open]                安全告警
+agent-detector monitor --duration 60                 出站 LLM 调用观察（零合作）
+agent-detector collect --mode sysmon --duration 60   系统行为采集（sysmon / auditd / poll）
+agent-detector replay tests/fixtures/audit/scenario.log   离线回放 audit 日志（任意平台）
+agent-detector channels                              采集通道可用性体检
+agent-detector audit-rules --watch-dir /path         打印 auditd 规则与安装命令（不自动提权）
+agent-detector policy list | policy test --command …  策略清单与决策自查
+agent-detector hooks status|plan|install|uninstall|snippet
+agent-detector purge [--older-than-days N] [--all]   保留策略清理
 ```
 
-新增检测目标：在 `fingerprints/rules/` 添加一条 client_rule YAML（或往 signatures.yaml 加正则），
-下次扫描即生效，无需改代码；也可用 `AGENT_DETECTOR_RULES_DIR` 指向外部规则目录覆盖内置规则。
-规范与字段说明见 [docs/rules.md](docs/rules.md)。
+## REST API
+
+```
+GET  /api/v1/overview                          仪表盘汇总
+GET  /api/v1/agents | /{id} | /{id}/mcp         Agent 资产与详情
+POST /api/v1/discovery/scan                     发起扫描
+GET  /api/v1/events | /events/stats | /events/stream   事件查询（before_id 游标分页）与 SSE 实时流
+GET  /api/v1/policies | PUT /{id} | POST /reload        策略查询与覆盖
+GET  /api/v1/alerts | PATCH /{id}               告警
+GET  /api/v1/telemetry/status | /audit-rules    通道状态与 auditd 规则模板
+POST /api/v1/telemetry/monitor/start|stop       出站连接观察
+POST /api/v1/telemetry/behavior/start|stop      系统行为采集
+GET  /api/v1/hooks | POST /{agent}/plan|install|uninstall   Hook 管理（默认 dry-run）
+GET  /api/v1/system | /api/v1/capabilities      环境信息与能力清单
+POST /internal/v1/hooks/decide                  Hook 决策（内部控制接口，需 Token）
+```
+
+## 数据模型
+
+`scan_tasks` / `assets` / `asset_snapshots` / `evidence`（发现）；
+`agent_assets` / `agent_instances` / `agent_sessions`（Agent 资产与运行实例）；
+`behavior_events`（统一行为事件，`source` 区分通道）；
+`security_policies` / `security_alerts`（策略覆盖与告警）。
+
+- 资产身份与 PID 无关；实例身份含启动时间（Windows 会复用 PID）。
+- 事件只存元数据与脱敏摘要：不含对话内容、文件内容与凭据原文。
+- 版本信息一律带 `version_source`，无可靠来源输出 `UNKNOWN`。
+
+## 环境变量（摘要）
+
+`AGENT_DETECTOR_DB`（数据库路径）、`_HOST` / `_PORT`（监听地址，默认 127.0.0.1:8787）、
+`_HOOK_TOKEN` / `_HOOK_TOKEN_FILE`、`_HOOK_FAILURE_MODE`（block|allow）、`_HOOK_TIMEOUT`、`_POLICY_DIR`、
+`_AGENTS_FILE`、`_SYSMON_CHANNEL`、`_ALERT_RISK_LEVEL`、`_RULES_DIR`、`_BEHAVIOR_RULES_DIR`、
+`_AUDIT_LOG`、`_BEHAVIOR_*`（抑制窗口 / 速率 / 保留 / 路径策略 / 是否存 argv）等。
+完整列表见 `src/agent_detector/common/config.py`。
 
 ## 范围与安全限制
-- 其他用户进程可能需要更高系统权限，建议遵循最小权限。
-- V0.1 不提供流量内容解析、POC 验证和全网扫描；网络行为监控只读系统 socket 表与 DNS 缓存，产出连接级证据（不读取通信内容），不承诺内容级确认。
-- 系统行为监测只读审计日志与进程表，**不自动以 root 安装审计规则**（只打印命令）；进程树证据不等于"模型自主决定"；路径原样入库（可配置脱敏），启动参数原文默认不落库；行为事件有速率上限与保留策略。WSL2 因发行版运行在子 PID namespace，auditd 不可用（采样降级模式仍可用）。
-- 版本信息如存在，均标注来源（`version_source`）；`process-claim` 类来源为未经验证的命令行声明。
-- 不执行被发现的 Agent、MCP stdio 启动命令或 Skill。
-- 默认仅建议本地使用；正式部署需要认证、授权、审计和访问保护。
 
-详见 [docs/architecture.md](docs/architecture.md) 与 `J:\myNotes\plans\agent探测实现.md`（产品实现计划）。
+- 默认只监听 `127.0.0.1`；`/internal/v1/hooks/decide` 是内部控制接口，用 Token 鉴权，不要暴露到网络。
+- Sysmon 的 Event ID 3（网络连接）默认关闭，需要按 [configs/sysmon.xml](configs/sysmon.xml) 显式启用。
+- Sysmon 文件事件不覆盖全部读写改名；auditd 需要 root 安装规则（工具只打印命令，不自动提权）。
+- 用户级 Hook 不具备不可篡改性（同权限用户可修改）；企业级需要托管配置、ACL 与策略签名。
+- WSL2 内的 Agent 不在首期范围：发行版运行在子 PID namespace，auditd 不可用，Windows 侧 Hook 也不适用。
+- 不执行被发现的 Agent、MCP stdio 启动命令或 Skill；不读取通信内容与文件内容。
+
+## 文档
+
+[architecture.md](docs/architecture.md) · [windows.md](docs/windows.md) · [hooks.md](docs/hooks.md) ·
+[policy.md](docs/policy.md) · [rules.md](docs/rules.md)（检测规则） · [behavior.md](docs/behavior.md)（网络调用观察） ·
+[syscall-monitoring.md](docs/syscall-monitoring.md)（系统行为监测）
+
+## 测试
+
+```bash
+pytest -q          # 策略语义、适配器、安装器、决策接口、SSE、采集归一化、持久化等
+```

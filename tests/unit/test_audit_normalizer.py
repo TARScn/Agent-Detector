@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from agent_detector.behavior.audit.normalizer import normalize_event, normalize_lines
-from agent_detector.behavior.audit.parser import AuditLogParser
-from agent_detector.behavior.audit.rules_template import EXEC_KEY, FILE_KEY, NET_KEY
+from agent_detector.collectors.audit.normalizer import normalize_event, normalize_lines
+from agent_detector.collectors.audit.parser import AuditLogParser
+from agent_detector.collectors.audit.rules_template import EXEC_KEY, FILE_KEY, NET_KEY
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "audit" / "scenario.log"
 ALL_KEYS = {EXEC_KEY, FILE_KEY, NET_KEY}

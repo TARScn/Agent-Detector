@@ -1,7 +1,7 @@
-from agent_detector.application import scan_service
+from agent_detector.discovery import scanner as scan_service
 from agent_detector.domain.enums import AssetState, AssetType
 from agent_detector.domain.models import DetectedAsset, HostFacts, VersionInfo
-from agent_detector.persistence.database import make_engine
+from agent_detector.storage.database import make_engine
 
 
 class GoodDetector:

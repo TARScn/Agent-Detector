@@ -9,7 +9,7 @@ import httpx
 
 from agent_detector.domain.enums import AssetState, AssetType, EvidenceKind
 from agent_detector.domain.models import DetectedAsset, Evidence, HostFacts, VersionInfo
-from agent_detector.recognition.identity import build_asset_id, slugify
+from agent_detector.discovery.identity import build_asset_id, slugify
 
 PATHS = ("/health", "/openapi.json", "/")
 HEADERS = {"User-Agent": "AgentDetector/0.1", "Accept": "application/json, text/plain, */*"}

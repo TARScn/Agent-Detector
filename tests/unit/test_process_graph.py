@@ -1,4 +1,4 @@
-from agent_detector.behavior.graph import ProcessGraph
+from agent_detector.detection.process_graph import ProcessGraph
 from agent_detector.domain.models import ProcessInfo
 
 

@@ -1,13 +1,13 @@
 # 检测规则规范
 
-检测规则是纯声明式 YAML，存放于包内 `src/agent_detector/fingerprints/rules/`。
-引擎（`fingerprints/engine.py`）只实现探测原语；**新增/调整检测目标只改数据，不改代码**。
+检测规则是纯声明式 YAML，存放于包内 `src/agent_detector/discovery/fingerprints/rules/`。
+引擎（`discovery/fingerprints/engine.py`）只实现探测原语；**新增/调整检测目标只改数据，不改代码**。
 
 ## 规则加载
 
 按顺序读取，后者覆盖前者：
 
-1. 包内规则目录 `fingerprints/rules/*.yaml`
+1. 包内规则目录 `discovery/fingerprints/rules/*.yaml`
 2. 环境变量 `AGENT_DETECTOR_RULES_DIR` 指向的外部目录
 3. `load_rules(extra_dir=...)` 显式传入的目录
 

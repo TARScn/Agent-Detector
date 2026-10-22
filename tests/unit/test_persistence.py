@@ -2,8 +2,8 @@ from sqlalchemy.orm import Session
 
 from agent_detector.domain.enums import AssetState, AssetType, EvidenceKind, VersionSource
 from agent_detector.domain.models import DetectedAsset, Evidence, VersionInfo
-from agent_detector.persistence.database import make_engine
-from agent_detector.persistence.repositories import (AssetRepository, EvidenceRepository,
+from agent_detector.storage.database import make_engine
+from agent_detector.storage.repositories import (AssetRepository, EvidenceRepository,
                                                       ScanRepository)
 
 

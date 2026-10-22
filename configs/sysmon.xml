@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Agent Detector — Sysmon 采集配置模板（设计文档 §4.1）
+
+  用法（需管理员权限；本工具不会自动提权）：
+    1. 安装 Sysmon：https://learn.microsoft.com/sysinternals/downloads/sysmon
+    2. 合并本配置：sysmon64.exe -c configs\sysmon.xml
+       已有配置时请先 `sysmon64.exe -c` 导出后在原文件上合并这三个开关，
+       不要直接覆盖整份配置。
+    3. 重启服务使配置生效：sysmon64.exe -c configs\sysmon.xml
+       验证：Get-WinEvent -LogName Microsoft-Windows-Sysmon/Operational -MaxEvents 5
+
+  只需要以下四类事件：
+    ProcessCreate (1)      进程创建 —— 识别 Agent 启动的子进程与命令行
+    NetworkConnect (3)     网络连接 —— 关联 Agent 的出站目标（默认关闭，必须显式开启）
+    FileCreate (11)        文件创建 —— 观察受监控目录的写入
+    FileDelete (23/26)     文件删除 —— 发现删除行为（需 FileDeleteDetected 或 Delete 规则）
+
+  注意（设计文档 §4.1）：Sysmon 的文件事件不覆盖全部读、写、改名行为，
+  不能把它当作完整的文件监控；需要更细粒度时另配 Windows 文件审核或 ETW。
+-->
+<Sysmon schemaversion="4.90">
+  <HashAlgorithms>SHA256</HashAlgorithms>
+  <CheckRevocation>false</CheckRevocation>
+  <EventFiltering>
+    <!-- 1: 进程创建：保留全部，Agent 子进程识别依赖它 -->
+    <ProcessCreate onmatch="exclude"/>
+
+    <!-- 3: 网络连接：默认关闭，这里是显式开启；如需降噪可加 exclude 规则 -->
+    <NetworkConnect onmatch="exclude">
+      <!-- 排除本机回环之外的高频噪声可按需补充，例如：
+      <Image condition="is">C:\Windows\System32\svchost.exe</Image>
+      -->
+    </NetworkConnect>
+
+    <!-- 5: 进程结束：用于生命周期跟踪，量小可保留 -->
+    <ProcessTerminate onmatch="exclude"/>
+
+    <!-- 11: 文件创建：只保留用户目录与常见项目目录，避免系统盘噪声 -->
+    <FileCreate onmatch="include">
+      <TargetFilename condition="begin with">C:\Users\</TargetFilename>
+      <TargetFilename condition="begin with">D:\</TargetFilename>
+    </FileCreate>
+
+    <!-- 22: DNS 查询：识别连接目标域名 -->
+    <DnsQuery onmatch="exclude"/>
+
+    <!-- 23/26: 文件删除：与 FileCreate 同样的范围限制 -->
+    <FileDelete onmatch="include">
+      <TargetFilename condition="begin with">C:\Users\</TargetFilename>
+      <TargetFilename condition="begin with">D:\</TargetFilename>
+    </FileDelete>
+    <FileDeleteDetected onmatch="include">
+      <TargetFilename condition="begin with">C:\Users\</TargetFilename>
+      <TargetFilename condition="begin with">D:\</TargetFilename>
+    </FileDeleteDetected>
+  </EventFiltering>
+</Sysmon>

@@ -1,4 +1,4 @@
-from agent_detector.recognition.identity import build_asset_id, normalize_path
+from agent_detector.discovery.identity import build_asset_id, normalize_path
 
 
 def test_normalize_path_unifies_separators_and_drive_case():

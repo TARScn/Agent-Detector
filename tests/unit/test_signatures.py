@@ -1,4 +1,4 @@
-from agent_detector.fingerprints.engine import SignatureRuleDetector
+from agent_detector.discovery.fingerprints.engine import SignatureRuleDetector
 from agent_detector.domain.enums import AssetState, AssetType
 from agent_detector.domain.models import HostFacts, ListeningSocket, ProcessInfo
 

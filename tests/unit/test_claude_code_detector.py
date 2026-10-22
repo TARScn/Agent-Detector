@@ -2,8 +2,8 @@
 a fabricated home directory. Proves the YAML rule drives the engine."""
 import json
 
-from agent_detector.fingerprints.engine import ClientRuleDetector
-from agent_detector.fingerprints.loader import load_rules
+from agent_detector.discovery.fingerprints.engine import ClientRuleDetector
+from agent_detector.discovery.fingerprints.loader import load_rules
 from agent_detector.domain.enums import AssetState, AssetType, VersionSource
 from agent_detector.domain.models import HostFacts, ProcessInfo
 

@@ -1,4 +1,4 @@
-from agent_detector.behavior.rules import BehaviorRules, load_rules
+from agent_detector.detection.llm_intel import BehaviorRules, load_rules
 
 
 def test_packaged_rules_load():

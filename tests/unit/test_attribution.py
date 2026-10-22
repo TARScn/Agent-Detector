@@ -1,9 +1,9 @@
-from agent_detector.behavior.attribution import AgentAttributor
-from agent_detector.behavior.graph import ProcessGraph
+from agent_detector.detection.attribution import AgentAttributor
+from agent_detector.detection.process_graph import ProcessGraph
 from agent_detector.domain.enums import AssetType
 from agent_detector.domain.models import ProcessInfo
-from agent_detector.fingerprints.schema import ClientRule, ProcessSpec, SignatureRule
-from agent_detector.recognition.identity import build_asset_id, normalize_path, slugify
+from agent_detector.discovery.fingerprints.schema import ClientRule, ProcessSpec, SignatureRule
+from agent_detector.discovery.identity import build_asset_id, normalize_path, slugify
 
 
 def offline_graph(*processes):

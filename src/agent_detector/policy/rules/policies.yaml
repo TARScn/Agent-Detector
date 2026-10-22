@@ -1,0 +1,229 @@
+# Agent Detector 策略规则（设计文档 §6.1 首期策略样例）
+#
+# 求值顺序：priority 升序，首个命中的规则决定结果；deny/ask 在前，allow/audit 兜底在后。
+#
+# match 语义：字段之间是 AND，列表内部是 OR。例如
+#   command_patterns: ['rm -rf']  → 命令行必须命中其中一条正则
+#   tools: [Bash, shell]         → 工具名必须是其中之一（大小写不敏感）
+#   path_patterns: [...]         → 调用中出现的任一路径命中即可
+#
+# path_patterns 支持 *（单段）与 **（任意层级）；目录本身与目录内容都要写，
+# 例如 ['**/.ssh', '**/.ssh/**']。
+# outside_cwd: true 表示该调用提到的所有路径都在会话工作目录之外（无法判定时不命中）。
+#
+# 注意：这里只是首期样例。命令里出现 Remove-Item 或 curl 并不等于恶意，真实处置
+# 需要结合操作类型、目标路径、文件敏感级别与目标域名判断（设计文档 §6.1）。
+kind: policy_set
+revision: 1
+
+defaults:
+  decision: allow
+  risk: low
+  reason: 未命中任何策略规则（默认放行，仅记录）
+
+rules:
+  # ---- 阻断：受保护目录 / 受保护文件 -------------------------------------
+  - id: deny-delete-protected-path
+    name: 禁止删除受保护目录
+    description: 在受保护路径上执行删除、格式化或覆盖写入的调用会被阻断。
+    decision: deny
+    risk: critical
+    priority: 10
+    reason: 命中受保护路径删除策略
+    match:
+      command_patterns:
+        - 'remove-item\b.*-recurse'
+        - '\brm\s+(-\w+\s+)*-\w*r\w*f'
+        - '\brm\s+(-\w+\s+)*-\w*f\w*r'
+        - '\brd\s+/s\b'
+        - '\bdel\s+/[sf]\b'
+        - '\bmkfs\b'
+        - '\bformat\s+[a-z]:'
+      path_patterns:
+        # 示例受保护目录：请按本机实际情况替换（设计文档验收用例即用此路径）
+        - 'D:/ImportantData'
+        - 'D:/ImportantData/**'
+        - '**/.ssh'
+        - '**/.ssh/**'
+        - '**/.gnupg/**'
+        - '**/.aws/**'
+        - 'C:/Windows/**'
+        - 'C:/Program Files/**'
+        - 'C:/Program Files (x86)/**'
+        - '/etc/**'
+        - '/boot/**'
+        - '/usr/lib/**'
+
+  - id: ask-recursive-delete-outside-project
+    name: 递归删除项目目录之外的内容
+    description: 目标路径全部位于会话工作目录之外时，递归删除需要人工确认后才可执行。
+    decision: ask
+    risk: high
+    priority: 12
+    reason: 递归删除目标在会话工作目录之外，需用户确认
+    match:
+      command_patterns:
+        - 'remove-item\b.*-recurse'
+        - '\brm\s+(-\w+\s+)*-\w*r\w*f'
+        - '\brm\s+(-\w+\s+)*-\w*f\w*r'
+      outside_cwd: true
+
+  - id: deny-credential-read
+    name: 禁止读取凭据文件
+    description: SSH 私钥、云凭据与 Token 文件不在 Agent 的可读范围内。
+    decision: deny
+    risk: critical
+    priority: 20
+    reason: 命中凭据访问策略（SSH 私钥 / 云凭据 / Token 文件）
+    match:
+      path_patterns:
+        - '**/.ssh'
+        - '**/.ssh/**'
+        - '**/.aws/credentials'
+        - '**/.aws/config'
+        - '**/.config/gcloud/**credentials**'
+        - '**/.kube/config'
+        - '**/.netrc'
+        - '**/.npmrc'
+        - '**/.docker/config.json'
+
+  - id: deny-credential-exfil
+    name: 禁止凭据外传
+    description: 私钥、API Key 出现在命令参数中且同一条命令包含网络外发动作。
+    decision: deny
+    risk: critical
+    priority: 30
+    reason: 命中凭据外传策略
+    match:
+      text_patterns:
+        - 'BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY'
+        - 'sk-ant-[a-z0-9_-]{8,}'
+        - 'aws_secret_access_key'
+      command_patterns:
+        - '\b(curl|wget|invoke-webrequest|invoke-restmethod|scp|sftp|ftp|nc)\b'
+
+  - id: deny-agent-config-write
+    name: 禁止修改 Agent 安全配置
+    description: 篡改本机 Hook 与安全策略配置会让保护本身失效。
+    decision: deny
+    risk: high
+    priority: 40
+    reason: 命中 Agent 安全配置保护策略
+    match:
+      path_patterns:
+        - '**/.claude/settings.json'
+        - '**/.claude/settings.local.json'
+        - '**/.codex/hooks.json'
+        - '**/.cursor/hooks.json'
+      command_patterns:
+        - '(>|>>|set-content|out-file|remove-item|del\b|mv\b|move-item|rm\b)'
+
+  - id: deny-agent-config-write-tool
+    name: 禁止用文件工具改写 Agent 安全配置
+    description: 同上，但针对 Write/Edit 类文件工具调用。
+    decision: deny
+    risk: high
+    priority: 42
+    reason: 命中 Agent 安全配置保护策略（文件写入工具）
+    match:
+      path_patterns:
+        - '**/.claude/settings.json'
+        - '**/.claude/settings.local.json'
+        - '**/.codex/hooks.json'
+        - '**/.cursor/hooks.json'
+      tools: [write, edit, multiedit, notebookedit, str_replace_editor, apply_patch,
+              create_file, replace_string_in_file]
+
+  - id: deny-system-path-write
+    name: 禁止写入系统目录
+    description: 系统目录的写操作需要系统管理员按标准流程执行，不由 Agent 代劳。
+    decision: deny
+    risk: high
+    priority: 44
+    reason: 命中系统目录保护策略
+    match:
+      path_patterns:
+        - 'C:/Windows/**'
+        - 'C:/Program Files/**'
+        - '/etc/**'
+        - '/usr/bin/**'
+        - '/usr/lib/**'
+        - '/System/**'
+      command_patterns:
+        - '(>|>>|set-content|out-file|copy-item|move-item|remove-item|chmod|chown)'
+
+  # ---- 确认：需要人类判断 -------------------------------------------------
+  - id: ask-download-and-run
+    name: 下载后直接执行需要确认
+    description: 同一条调用里既下载又执行远端内容。
+    decision: ask
+    risk: high
+    priority: 50
+    reason: 疑似下载脚本后直接执行，需用户确认
+    match:
+      command_patterns:
+        - '\b(curl|wget|invoke-webrequest|irm)\b'
+      text_patterns:
+        - '\|\s*(sh|bash|zsh|python|python3|node|iex|invoke-expression)\b'
+        - '(&&|;)\s*(\./|sh |bash |python |python3 |node |\.\\/)'
+
+  - id: ask-package-install
+    name: 安装依赖需要确认
+    description: 包管理器会修改系统或全局环境。
+    decision: ask
+    risk: medium
+    priority: 60
+    reason: 检测到包安装命令，需用户确认
+    match:
+      command_patterns:
+        - '\b(apt-get|apt|yum|dnf|pacman|apk|brew|choco|winget|scoop)\b\s+(install|add|-s)'
+        - '\bnpm\s+(install|i)\s+-g\b'
+        - '\bpip\s+install\b'
+        - '\bpipx\s+install\b'
+        - '\buv\s+pip\s+install\b'
+
+  - id: ask-mcp-high-risk-tool
+    name: 高风险 MCP 工具调用需要确认
+    description: 未经批准的高风险 MCP 工具（浏览器自动化、外发消息、远程写入）先确认。
+    decision: ask
+    risk: medium
+    priority: 70
+    reason: 高风险 MCP 工具调用，需用户确认
+    match:
+      tools: [mcp__browser, mcp__puppeteer, mcp__playwright, mcp__mail,
+              mcp__slack, mcp__wechat, mcp__filesystem-write, mcp__ssh]
+
+  - id: ask-network-upload
+    name: 向外部地址上传数据需要确认
+    description: 上传类网络调用（POST/PUT 到外部地址）先确认。
+    decision: ask
+    risk: medium
+    priority: 80
+    reason: 疑似向外部地址上传数据，需用户确认
+    match:
+      command_patterns:
+        - '\b(curl|wget|invoke-restmethod|invoke-webrequest)\b.*(-X\s*(POST|PUT)|--data|-d\s|--upload-file|-T\s)'
+        - '\brclone\b.*\b(copy|sync)\b'
+
+  # ---- 审计 / 放行 --------------------------------------------------------
+  - id: audit-git-write
+    name: Git 写操作仅审计
+    description: 提交、推送、回退不阻断，但保留可追溯记录。
+    decision: audit
+    risk: low
+    priority: 120
+    reason: Git 写操作（仅审计）
+    match:
+      command_patterns:
+        - '\bgit\s+(commit|push|reset|checkout|rebase|clean|filter-branch|tag\s+-d)\b'
+
+  - id: allow-read-only-shell
+    name: 只读浏览命令
+    description: 常见只读查看命令，明确放行以便审计记录区分。
+    decision: allow
+    risk: low
+    priority: 200
+    reason: 只读命令，放行
+    match:
+      command_patterns:
+        - '^\s*(ls|dir|pwd|cd|cat|type|head|tail|more|find|grep|rg|git\s+(status|log|diff|branch|show))\b'

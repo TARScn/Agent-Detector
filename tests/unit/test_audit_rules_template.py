@@ -1,6 +1,6 @@
 import pytest
 
-from agent_detector.behavior.audit.rules_template import (ALL_KEYS, PERSISTENT_PATH,
+from agent_detector.collectors.audit.rules_template import (ALL_KEYS, PERSISTENT_PATH,
                                                           build_rules, install_commands,
                                                           uninstall_commands)
 
