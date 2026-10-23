@@ -12,7 +12,7 @@ Agent 决定调用工具
    → hooks/normalizer 规范化成 ToolCall（平台差异至此为止）
    → policy/engine 判定 allow / ask / deny / audit
    → 记录 native_hook 行为事件、更新会话、必要时生成告警
-   → hooks/adapters 转换成该 Agent 的原生响应，由 hook_bridge 打印到 stdout
+   → interception/hooks 转换成该 Agent 的原生响应，由 hook_bridge 打印到 stdout
 ```
 
 `hook_bridge` 只依赖标准库：它位于 Agent 的工具调用路径内，任何导入都是用户能感知的延迟（设计文档 §11.4）。

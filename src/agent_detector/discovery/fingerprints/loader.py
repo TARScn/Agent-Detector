@@ -15,7 +15,7 @@ from typing import Any
 
 import yaml
 
-from agent_detector.discovery.fingerprints.schema import ClientRule, SignatureRule
+from agent_detector.discovery.fingerprints.schema import ClientRule, FrameworkRule, SignatureRule
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +31,13 @@ class RuleError:
 @dataclass
 class LoadedRules:
     client_rules: list[ClientRule] = field(default_factory=list)
+    framework_rules: list[FrameworkRule] = field(default_factory=list)
     signature_rules: list[SignatureRule] = field(default_factory=list)
     errors: list[RuleError] = field(default_factory=list)
 
 
 def packaged_rules_dir():
-    return resource_files("agent_detector.discovery.fingerprints").joinpath("rules")
+    return resource_files("agent_detector.discovery").joinpath("data/fingerprints")
 
 
 def load_rules(extra_dir: Path | str | None = None) -> LoadedRules:
@@ -48,6 +49,7 @@ def load_rules(extra_dir: Path | str | None = None) -> LoadedRules:
         sources.append(Path(extra_dir))
 
     client: dict[str, ClientRule] = {}
+    frameworks: dict[str, FrameworkRule] = {}
     signatures: list[SignatureRule] = []
     errors: list[RuleError] = []
     for source in sources:
@@ -61,6 +63,9 @@ def load_rules(extra_dir: Path | str | None = None) -> LoadedRules:
                 if kind == "client_rule":
                     rule = ClientRule.model_validate(data)
                     client[rule.id] = rule
+                elif kind == "framework_rule":
+                    rule = FrameworkRule.model_validate(data)
+                    frameworks[rule.id] = rule
                 elif kind == "signature_set":
                     from agent_detector.discovery.fingerprints.schema import SignatureSet
                     signatures.extend(SignatureSet.model_validate(data).rules)
@@ -71,6 +76,7 @@ def load_rules(extra_dir: Path | str | None = None) -> LoadedRules:
     for error in errors:
         logger.warning("rule file skipped: %s: %s", error.file, error.error)
     return LoadedRules(client_rules=list(client.values()),
+                       framework_rules=list(frameworks.values()),
                        signature_rules=signatures, errors=errors)
 
 

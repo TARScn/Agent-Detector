@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from agent_detector.collectors.sysmon import (SUPPORTED_EVENTS, SysmonEvent,
+from agent_detector.monitoring.collectors.host.sysmon import (SUPPORTED_EVENTS, SysmonEvent,
                                               fact_from_event, parse_event_xml,
                                               split_command_line, sysmon_available)
 

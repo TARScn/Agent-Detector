@@ -23,7 +23,7 @@ DNS 关联：两条路径（免管理员）
      只等应用留下缓存痕迹会漏检（实测 ZCode 的活跃连接在缓存中无记录）。
      证据标签区分来源：观测到为 dns_cache，主动解析为 proactive_resolve。
 
-判定（detection/rules/llm_apis.yaml 情报规则）：
+判定（monitoring/data/llm_apis.yaml 情报规则）：
   ├─ 远端 = loopback：端口命中模型服务清单（Ollama 11434 / vLLM 8000 / LM Studio 1234
   │   / llama.cpp 1337）且该端口属于扫描确认的 LLM_SERVICE 资产
   │   → local_model：host = "服务名:端口"，asset_id 直接取该资产（跨平台生效）
@@ -67,7 +67,7 @@ curl http://127.0.0.1:8000/api/monitor/stats
 | `AGENT_DETECTOR_MONITOR_SUPPRESS` | `300` | 同 pid+host 去重抑制窗口秒 |
 | `AGENT_DETECTOR_BEHAVIOR_RULES_DIR` | — | 外部情报名单目录（内含 `llm_apis.yaml`，有效则整体覆盖包内规则，无效则回退并告警） |
 
-情报名单 `src/agent_detector/detection/rules/llm_apis.yaml`：
+情报名单 `src/agent_detector/monitoring/data/llm_apis.yaml`：
 
 ```yaml
 known_llm_hosts:      # 精确匹配（小写），命中 DNS 缓存域名即记 llm_api

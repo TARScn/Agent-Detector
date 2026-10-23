@@ -20,7 +20,7 @@ detection/process_graph  ProcessGraph（pid + create_time 身份；快照种子 
    ▼
 detection/attribution  祖先回溯（≤12 层）→ 资产快照 running_pids / 指纹规则（与扫描同一套匹配原语）
    ▼
-detection/behavior_rules（detection/rules/behaviors.yaml）事实 → 高级行为（首个命中规则胜出，兜底 COMMAND_EXEC）
+monitoring/detection/behavior_rules（monitoring/data/behaviors.yaml）事实 → 高级行为（首个命中规则胜出，兜底 COMMAND_EXEC）
    ▼
 services/ingest（抑制窗口去重 + 速率上限 + 保留清理）→ SQLite behavior_events（source=auditd/poll）
    ▼
@@ -63,7 +63,7 @@ agent-detector rules --watch-dir /home/user/agent-lab --persistent
 
 ## 判定与归属
 
-低层事实 → 高级行为（`detection/rules/behaviors.yaml`，规则按顺序匹配、首个命中胜出）：
+低层事实 → 高级行为（`monitoring/data/behaviors.yaml`，规则按顺序匹配、首个命中胜出）：
 
 | 事实 kind | 触发 | 高级行为 | 置信度 |
 |---|---|---|---|

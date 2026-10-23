@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.orm import Session
 
-from agent_detector.storage.repositories import (AgentInventoryRepository, AlertRepository,
+from agent_detector.storage import (AgentInventoryRepository, AlertRepository,
                                                  BehaviorEventRepository)
 
 TOKEN = "test-token"

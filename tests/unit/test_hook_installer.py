@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import json
 
-from agent_detector.domain.enums import HookState
-from agent_detector.hooks.installer import (bridge_command, events_for, inspect, install,
+from agent_detector.core.enums import HookState
+from agent_detector.interception.hooks.installer import (bridge_command, events_for, inspect, install,
                                             plan, uninstall)
-from agent_detector.hooks.registry import get_adapter
+from agent_detector.interception.hooks.registry import get_adapter
 
 USER_SETTINGS = {
     "permissions": {"allow": ["Bash(git status)"]},

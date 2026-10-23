@@ -1,5 +1,5 @@
-from agent_detector.domain.models import HostFacts, ListeningSocket
-from agent_detector.probes.http import is_local, probe_facts
+from agent_detector.core.models import HostFacts, ListeningSocket
+from agent_detector.discovery.probes.http import is_local, probe_facts
 
 
 def test_local_guard():

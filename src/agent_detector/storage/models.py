@@ -135,11 +135,56 @@ class AgentAssetRow(Base):
     executable: Mapped[str | None] = mapped_column(String(512))
     config_paths_json: Mapped[str] = mapped_column(Text, default="[]")
     mcp_servers_json: Mapped[str] = mapped_column(Text, default="[]")
+    llm_endpoints_json: Mapped[str] = mapped_column(Text, default="[]")
+    app_id: Mapped[str | None] = mapped_column(String(96))
+    # Post-scan verification (design §6.3): active = seen in the latest scan,
+    # inactive = self-built whose project dir still exists but no live process,
+    # removed = re-verified gone (uninstalled / path deleted / sighting over).
+    status: Mapped[str] = mapped_column(String(24), default="active")
     capabilities_json: Mapped[str] = mapped_column(Text, default="{}")
     protection_status: Mapped[str] = mapped_column(String(24), default="UNKNOWN")
     hook_state: Mapped[str] = mapped_column(String(24), default="UNKNOWN")
     hook_detail_json: Mapped[str] = mapped_column(Text, default="{}")
     notes_json: Mapped[str] = mapped_column(Text, default="[]")
+    first_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+    last_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+
+
+class ApplicationRow(Base):
+    """Self-built agent application (design §6.3): one resolved project directory.
+
+    The Application sits between Host and Agent: one process runs one app, the
+    app may embed several frameworks. ``app_id`` is shared with the discovery
+    snapshot tables by convention (like agent_assets.asset_id), no SQL FK.
+    """
+
+    __tablename__ = "applications"
+
+    app_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    root_path: Mapped[str] = mapped_column(String(512))
+    runtime: Mapped[str] = mapped_column(String(32), default="unknown")
+    environment_path: Mapped[str | None] = mapped_column(String(512))
+    entrypoint: Mapped[str | None] = mapped_column(String(512))
+    entry_kind: Mapped[str] = mapped_column(String(32), default="cwd")
+    container_id: Mapped[str | None] = mapped_column(String(96))
+    # Same lifecycle as agent_assets.status: active / inactive / removed.
+    status: Mapped[str] = mapped_column(String(24), default="active")
+    first_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+    last_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+
+
+class ApplicationComponentRow(Base):
+    """One AI-relevant package seen in an application's dependency metadata."""
+
+    __tablename__ = "application_components"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    app_id: Mapped[str] = mapped_column(String(96), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    version: Mapped[str] = mapped_column(String(64), default="UNKNOWN")
+    version_source: Mapped[str] = mapped_column(String(32), default="unknown")
+    source_path: Mapped[str | None] = mapped_column(String(512))
     first_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
     last_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
 

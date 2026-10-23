@@ -4,13 +4,13 @@ from pathlib import Path
 import pytest
 from sqlalchemy.orm import Session
 
-from agent_detector.services import ingest as isvc
-from agent_detector.detection.process_graph import ProcessGraph
-from agent_detector.services.ingest import BehaviorIngestError, BehaviorIngestService
-from agent_detector.domain.enums import AssetState, AssetType
-from agent_detector.domain.models import DetectedAsset, ProcessInfo, VersionInfo
+from agent_detector.monitoring.services import ingest as isvc
+from agent_detector.monitoring.detection.process_graph import ProcessGraph
+from agent_detector.monitoring.services.ingest import BehaviorIngestError, BehaviorIngestService
+from agent_detector.core.enums import AssetState, AssetType
+from agent_detector.core.models import DetectedAsset, ProcessInfo, VersionInfo
 from agent_detector.storage.database import make_engine
-from agent_detector.storage.repositories import (AssetRepository,
+from agent_detector.storage import (AssetRepository,
                                                      BehaviorEventRepository,
                                                      ScanRepository)
 
@@ -161,7 +161,7 @@ def test_poll_mode_detects_new_child_of_agent(tmp_path):
 
 
 def test_poll_collector_uses_light_snapshot_and_per_pid_lookup():
-    from agent_detector.collectors.poll import PollCollector
+    from agent_detector.monitoring.collectors.host.poll import PollCollector
 
     light = [ProcessInfo(pid=7, name="python3", create_time=1.0, ppid=1)]
     details = {8: ProcessInfo(pid=8, name="node", cmdline=("node", "a.js"),

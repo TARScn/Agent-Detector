@@ -3,8 +3,8 @@ YAML, run against a fabricated home directory. Proves the YAML rule drives
 the engine."""
 from agent_detector.discovery.fingerprints.engine import ClientRuleDetector
 from agent_detector.discovery.fingerprints.loader import load_rules
-from agent_detector.domain.enums import AssetState, AssetType, VersionSource
-from agent_detector.domain.models import HostFacts, ProcessInfo
+from agent_detector.core.enums import AssetState, AssetType, VersionSource
+from agent_detector.core.models import HostFacts, ProcessInfo
 
 
 def cursor_rule():
@@ -168,8 +168,8 @@ def test_windows_agent_alias_copy_matches(tmp_path):
 
 def test_agent_matrix_maps_cursor_rule_to_cursor_entry():
     """规则 id 必须命中 agents.yaml 的 cursor 条目（Hook 适配器与保护状态依赖它）。"""
-    from agent_detector.discovery.agents import load_agent_matrix
-    from agent_detector.hooks.registry import get_adapter
+    from agent_detector.discovery.sources.agents import load_agent_matrix
+    from agent_detector.interception.hooks.registry import get_adapter
 
     matrix = load_agent_matrix()
     entry = matrix.for_type(cursor_rule().id)

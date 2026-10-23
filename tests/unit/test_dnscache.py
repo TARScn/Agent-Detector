@@ -1,8 +1,8 @@
 import json
 from types import SimpleNamespace
 
-from agent_detector.collectors import dns_cache as dnscache
-from agent_detector.collectors.dns_cache import DnsCache, parse_dns_cache_json
+from agent_detector.monitoring.collectors.host import dns_cache as dnscache
+from agent_detector.monitoring.collectors.host.dns_cache import DnsCache, parse_dns_cache_json
 
 SAMPLE = json.dumps([
     {"Entry": "api.anthropic.com", "Data": "93.184.216.34"},

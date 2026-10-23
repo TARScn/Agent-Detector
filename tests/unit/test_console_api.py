@@ -6,8 +6,8 @@ import json
 import pytest
 from sqlalchemy.orm import Session
 
-from agent_detector.storage.repositories import AgentInventoryRepository
-from agent_detector.storage.models import BehaviorEventRow
+from agent_detector.storage import AgentInventoryRepository
+from agent_detector.storage.models import BehaviorEventRow, utc_now_iso
 
 
 def test_health_and_capabilities(client):
@@ -22,7 +22,9 @@ def test_health_and_capabilities(client):
 def test_overview_has_the_four_console_numbers(client, services):
     with Session(services.engine) as session:
         session.add(BehaviorEventRow(
-            observed_at="2026-10-20T01:00:00+00:00", source="native_hook",
+            # overview 的 by_source / blocked_today 统计"今日"事件：
+            # 时间必须是当下，写死日期会在第二天起变成定时炸弹。
+            observed_at=utc_now_iso(), source="native_hook",
             agent_label="Claude Code", flow_id="hook-1", protocol="HOOK",
             upstream_host="",
             event_type="tool_call", operation="shell.exec", confidence="high",
@@ -49,8 +51,8 @@ def test_system_info_reports_environment_and_matrix(client):
 
 
 def test_discovery_scan_creates_the_agent_inventory(client, services, monkeypatch):
-    from agent_detector.domain.enums import AssetState, AssetType
-    from agent_detector.domain.models import DetectedAsset, VersionInfo
+    from agent_detector.core.enums import AssetState, AssetType
+    from agent_detector.core.models import DetectedAsset, VersionInfo
 
     asset = DetectedAsset(asset_id="claude-code--test", name="Claude Code",
                           asset_type=AssetType.AGENT_CLIENT,
@@ -64,7 +66,7 @@ def test_discovery_scan_creates_the_agent_inventory(client, services, monkeypatc
         def detect(self, facts):
             return [asset]
 
-    from agent_detector.discovery import scanner
+    from agent_detector.discovery.scanner import scan as scanner
 
     monkeypatch.setattr(scanner, "collect_host_facts", lambda: _facts())
     monkeypatch.setattr(scanner, "build_detectors", lambda: [FakeDetector()])
@@ -83,7 +85,7 @@ def test_discovery_scan_creates_the_agent_inventory(client, services, monkeypatc
 
 
 def _facts():
-    from agent_detector.domain.models import HostFacts, ProcessInfo
+    from agent_detector.core.models import HostFacts, ProcessInfo
 
     return HostFacts(hostname="host-1",
                      processes=(ProcessInfo(pid=4242, name="node.exe",
@@ -93,13 +95,13 @@ def _facts():
 
 
 def test_scan_conflict_is_reported_as_409(client, services):
-    from agent_detector.discovery import scanner
+    from agent_detector.discovery.scanner import scan as scanner
 
     def slow_scan(*_args, **_kwargs):
         assert services.scan_lock.acquire(blocking=False) is False
         return {"scan_id": 1, "status": "completed"}
 
-    import agent_detector.api.routers.discovery as discovery_router
+    import agent_detector.console.api.discovery as discovery_router
 
     original = discovery_router.run_scan
     discovery_router.run_scan = slow_scan
@@ -130,7 +132,7 @@ def test_policy_endpoints_expose_and_update_rules(client):
 
 
 def test_alerts_can_be_acknowledged(client, services):
-    from agent_detector.storage.repositories import AlertRepository
+    from agent_detector.storage import AlertRepository
 
     with Session(services.engine) as session:
         alert_id = AlertRepository(session).raise_alert(
@@ -165,7 +167,7 @@ def test_hook_endpoints_are_dry_run_by_default(client):
 
 
 def test_hook_install_writes_only_when_applied(client, home, monkeypatch):
-    from agent_detector.hooks import installer
+    from agent_detector.interception.hooks import installer
 
     monkeypatch.setattr(installer.Path, "home", classmethod(lambda cls: home))
     result = client.post("/api/v1/hooks/codex_cli/install", json={"apply": True}).json()

@@ -4,8 +4,8 @@ import json
 
 from agent_detector.discovery.fingerprints.engine import ClientRuleDetector
 from agent_detector.discovery.fingerprints.loader import load_rules
-from agent_detector.domain.enums import AssetState, AssetType, VersionSource
-from agent_detector.domain.models import HostFacts, ProcessInfo
+from agent_detector.core.enums import AssetState, AssetType, VersionSource
+from agent_detector.core.models import HostFacts, ProcessInfo
 
 
 def opencode_rule():
@@ -140,8 +140,8 @@ def test_asset_id_is_stable_across_scans(tmp_path):
 def test_agent_matrix_maps_opencode_rule_to_opencode_entry():
     """规则 id 必须命中 agents.yaml 的 opencode 条目；该产品无 Hook 适配器，
     能力矩阵应如实标注 protect=PLANNED（仅发现与监测）。"""
-    from agent_detector.discovery.agents import load_agent_matrix
-    from agent_detector.hooks.registry import get_adapter
+    from agent_detector.discovery.sources.agents import load_agent_matrix
+    from agent_detector.interception.hooks.registry import get_adapter
 
     matrix = load_agent_matrix()
     entry = matrix.for_type(opencode_rule().id)

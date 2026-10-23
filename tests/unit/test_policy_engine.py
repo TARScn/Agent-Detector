@@ -1,13 +1,13 @@
 """Policy engine: rule matching semantics, defaults and failure modes."""
 import pytest
 
-from agent_detector.domain.enums import Decision, HookEvent, RiskLevel
-from agent_detector.domain.models import ToolCall
-from agent_detector.policy.engine import PolicyEngine, risk_at_least
-from agent_detector.policy.loader import load_policies
-from agent_detector.policy.paths import (candidates_from_command, is_inside, match_path,
+from agent_detector.core.enums import Decision, HookEvent, RiskLevel
+from agent_detector.core.models import ToolCall
+from agent_detector.interception.policy.engine import PolicyEngine, risk_at_least
+from agent_detector.interception.policy.loader import load_policies
+from agent_detector.core.paths import (candidates_from_command, is_inside, match_path,
                                          path_related)
-from agent_detector.policy.schema import MatchSpec, PolicyRule, PolicySet
+from agent_detector.interception.policy.schema import MatchSpec, PolicyRule, PolicySet
 
 
 def call(tool: str, args: dict, cwd: str | None = "D:/Project-A",

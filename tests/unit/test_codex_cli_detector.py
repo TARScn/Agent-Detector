@@ -4,8 +4,8 @@ import json
 
 from agent_detector.discovery.fingerprints.engine import ClientRuleDetector
 from agent_detector.discovery.fingerprints.loader import load_rules
-from agent_detector.domain.enums import AssetState, AssetType, VersionSource
-from agent_detector.domain.models import HostFacts, ProcessInfo
+from agent_detector.core.enums import AssetState, AssetType, VersionSource
+from agent_detector.core.models import HostFacts, ProcessInfo
 
 
 def codex_rule():
@@ -158,7 +158,7 @@ def test_asset_id_is_stable_across_scans(tmp_path):
 
 def test_agent_matrix_maps_codex_rule_to_codex_cli_entry():
     """规则 id 规范化后必须命中 agents.yaml 的 codex_cli 条目（能力/保护状态依赖它）。"""
-    from agent_detector.discovery.agents import load_agent_matrix
+    from agent_detector.discovery.sources.agents import load_agent_matrix
 
     matrix = load_agent_matrix()
     entry = matrix.for_type(codex_rule().id)

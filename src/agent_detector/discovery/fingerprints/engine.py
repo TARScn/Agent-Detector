@@ -10,15 +10,15 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from agent_detector.collectors.filesystem import inspect_path, read_package_version
-from agent_detector.common.security import redact
-from agent_detector.domain.enums import AssetState, EvidenceKind, VersionSource
-from agent_detector.domain.models import (DetectedAsset, Evidence, HostFacts, ProcessInfo,
+from agent_detector.discovery.sources.filesystem import inspect_path, read_package_version
+from agent_detector.core.security import redact
+from agent_detector.core.enums import AssetState, EvidenceKind, VersionSource
+from agent_detector.core.models import (DetectedAsset, Evidence, HostFacts, ProcessInfo,
                                           VersionInfo)
 from agent_detector.discovery.fingerprints.match import (compile_excludes, match_client_process,
                                                match_signature_process, process_text)
 from agent_detector.discovery.fingerprints.schema import ClientRule, SignatureRule
-from agent_detector.discovery.identity import build_asset_id, normalize_path, slugify
+from agent_detector.core.identity import build_asset_id, normalize_path, slugify
 
 _CMDLINE_TEXT_LIMIT = 400
 _VERSION_CLAIM_RE = re.compile(
