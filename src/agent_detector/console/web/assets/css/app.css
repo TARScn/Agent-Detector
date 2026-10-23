@@ -275,6 +275,10 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--brand);
    where a two-column definition list would be cramped. Values are single-line
    with a tooltip, so every row has the same height and the card stays aligned. */
 .fact-list { display: flex; flex-direction: column; }
+/* A flush card body strips the 18px gutter so tables run edge-to-edge; a
+   fact list above such a table must re-add it or its labels touch the card
+   border (项目与依赖 card in the agent detail). */
+.card-body.flush .fact-list { padding: 8px 18px 0; }
 .fact-row { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 10px;
   align-items: center; padding: 8px 0; border-bottom: 1px solid var(--divider);
   font-size: 13px; min-height: 38px; }
