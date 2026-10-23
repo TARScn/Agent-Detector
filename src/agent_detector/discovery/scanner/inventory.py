@@ -223,6 +223,13 @@ class InventoryBuilder:
                 else:
                     applications.delete_application(app_id)
 
+        # Verdicts are in: removed/inactive assets have no live process by
+        # definition, so their instance rows must not stay "running" (they
+        # feed the dashboard's 运行中 count — leaving them produces ghost
+        # 运行中 entries). Assets skipped over a crashed detector keep both
+        # their active status and their instances.
+        repository.stop_instances_of_unrunnable_assets()
+
     def _installed_dependencies(self, app: dict) -> set[str] | None:
         """AI-relevant package names still *installed* in the app's environment.
 

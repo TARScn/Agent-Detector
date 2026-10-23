@@ -41,7 +41,10 @@ def overview(services: Services = Depends(_services)):
         alert_stats = AlertRepository(session).stats()
         components = AssetRepository(session).latest_snapshots()
         latest_scan = ScanRepository(session).latest_id()
-    running = {instance["asset_id"] for instance in instances}
+        running = {instance["asset_id"] for instance in instances
+                   if instance["asset_id"] in {a["asset_id"] for a in agents}}
+        # 只数未移除资产名下的实例：removed 资产的实例行要等下一次扫描才被
+        # 退役（inventory 的收尾清理），两次扫描之间不能把幽灵算成运行中。
     protection: dict[str, int] = {}
     for agent in agents:
         key = agent["protection_status"]

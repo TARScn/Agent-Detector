@@ -172,6 +172,26 @@ def test_rescan_marks_uninstalled_client_asset_removed(tmp_path, monkeypatch):
     assert rows[0]["status"] == "removed"
 
 
+def test_removed_asset_instances_are_stopped(tmp_path, monkeypatch):
+    """A removed asset must not leave running instance rows behind: the
+    dashboard counts 运行中 from those rows, so orphans read as ghost
+    运行中 assets that the asset list (correctly) does not show."""
+    monkeypatch.setattr(scan_service, "collect_host_facts",
+                        lambda: HostFacts("h", (), ()))
+    engine = make_engine(tmp_path / "db.sqlite3")
+    asset = make_asset("sig--1")
+    asset.running_pids = [4242]  # signature-style sighting with a live process
+    scan_service.run_scan(engine, detectors=[GoodDetector(asset)])
+    with Session(engine) as session:
+        assert len(AgentInventoryRepository(session).list_instances()) == 1
+    scan_service.run_scan(engine, detectors=[])  # sighting gone → removed
+    with Session(engine) as session:
+        repo = AgentInventoryRepository(session)
+        assert repo.list_assets() == []  # hidden from the list
+        assert repo.list_assets(include_removed=True)[0]["status"] == "removed"
+        assert repo.list_instances() == []  # and nothing counts as 运行中
+
+
 def test_reinstalled_asset_flips_back_to_active(tmp_path, monkeypatch):
     monkeypatch.setattr(scan_service, "collect_host_facts",
                         lambda: HostFacts("h", (), ()))
@@ -292,8 +312,12 @@ def test_self_built_inactive_when_directory_remains_but_not_running(tmp_path, mo
                         lambda: HostFacts("h", (), ()))
     scan_service.run_scan(engine, detectors=[], framework_rules=[LANGCHAIN_RULE])
     with Session(engine) as session:
-        assets = AgentInventoryRepository(session).list_assets(include_removed=True)
+        repo = AgentInventoryRepository(session)
+        assets = repo.list_assets(include_removed=True)
         apps = ApplicationRepository(session).list_applications()
     assert all(row["status"] == "inactive" for row in assets)
     assert apps and apps[0]["status"] == "inactive"
     assert apps[0]["root_path"]  # path kept for the re-check audit trail
+    # 进程没了的资产不能留 running 实例行 —— 总览的运行中按实例行计数
+    assert repo.list_instances() == []
+    assert len(repo.list_instances(include_stopped=True)) == 1

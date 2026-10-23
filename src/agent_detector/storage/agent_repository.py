@@ -143,6 +143,26 @@ class AgentInventoryRepository:
         statement = statement.order_by(AgentInstanceRow.last_seen_at.desc())
         return [self._instance_dict(row) for row in self._session.scalars(statement)]
 
+    def stop_instances_of_unrunnable_assets(self) -> int:
+        """Retire running instance rows whose asset is removed or inactive.
+
+        The dashboard counts 运行中 from these rows, so an asset whose
+        re-verification concluded "no live process" must not keep rows that
+        say otherwise. Retirement in ``upsert_instances`` only covers assets
+        the scan re-saw — a removed/inactive asset by definition was not
+        re-seen, so this sweep closes that gap and self-heals rows left
+        running by earlier versions. Assets skipped because their detector
+        crashed keep status active and their instances untouched.
+        """
+        stopped = 0
+        for row in self._session.scalars(
+                select(AgentInstanceRow).where(AgentInstanceRow.status == "running")):
+            asset = self._session.get(AgentAssetRow, row.asset_id)
+            if asset is None or asset.status in ("removed", "inactive"):
+                row.status = "stopped"
+                stopped += 1
+        return stopped
+
     def find_instance_by_pid(self, pid: int) -> dict | None:
         row = self._session.scalar(select(AgentInstanceRow).where(
             AgentInstanceRow.pid == pid, AgentInstanceRow.status == "running"
