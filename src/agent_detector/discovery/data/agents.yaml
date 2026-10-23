@@ -1,0 +1,169 @@
+# Agent 支持矩阵（设计文档 §1.2）
+#
+# 这里的 P0/P1/P2 / PLANNED(待适配) / UNVERIFIED(待验证) 都是"计划与适配状态"，
+# 不是"已完成"的声明。产品界面对未知 Agent 一律显示"不保证"，不会把计划当成能力。
+kind: agent_matrix
+revision: 1
+
+agents:
+  - id: claude_code
+    name: Claude Code
+    vendor: Anthropic
+    aliases: [claude, claude-code, claude code]
+    discovery: P0
+    monitor: P0
+    protect: P0
+    hook: claude_code
+    docs: https://code.claude.com/docs/en/hooks
+    notes:
+      - 官方提供 PreToolUse / PostToolUse 等 Hook 事件，支持结构化权限决定（版本门槛见适配器说明）。
+
+  - id: codex_cli
+    name: Codex CLI
+    vendor: OpenAI
+    aliases: [codex, codex-cli, openai-codex]
+    discovery: P0
+    monitor: P0
+    protect: P0
+    hook: codex_cli
+    docs: https://developers.openai.com/codex/hooks
+    notes:
+      - Hooks 覆盖 Shell、apply_patch、MCP 与其他本地工具调用。
+      - Codex 官方说明部分执行路径可能绕过 Hook，不能当作完整安全边界。
+      - 本版本适配器尚未按已安装版本核对响应 Schema（待验证）。
+
+  - id: cursor
+    name: Cursor
+    vendor: Anysphere
+    aliases: [cursor, cursor-agent, cursor editor]
+    discovery: P0
+    monitor: P0
+    protect: P0
+    hook: cursor
+    docs: https://cursor.com/docs/hooks
+    notes:
+      - 首期只接入 beforeShellExecution 与 beforeMCPExecution。
+      - Cursor 内部未经过检查点的文件操作无法提前阻断。
+
+  - id: github_copilot_cli
+    name: GitHub Copilot CLI
+    vendor: GitHub
+    aliases: [copilot, copilot-cli, gh-copilot]
+    discovery: P1
+    monitor: P1
+    protect: P1
+    hook: null
+    docs: https://docs.github.com/copilot
+    notes:
+      - 计划接入：Hook 适配器未实现，当前仅资产发现。
+
+  - id: gemini_cli
+    name: Gemini CLI
+    vendor: Google
+    aliases: [gemini, gemini-cli]
+    discovery: P1
+    monitor: P1
+    protect: PLANNED
+    hook: null
+    docs: https://github.com/google-gemini/gemini-cli
+    notes:
+      - 前置拦截待适配。
+
+  - id: opencode
+    name: OpenCode
+    vendor: OpenCode
+    aliases: [opencode]
+    discovery: P1
+    monitor: P1
+    protect: PLANNED
+    hook: null
+    notes:
+      - 前置拦截待适配。
+
+  - id: openclaw
+    name: OpenClaw
+    vendor: OpenClaw
+    aliases: [openclaw, clawdbot, moltbot]
+    discovery: P1
+    monitor: P1
+    protect: PLANNED
+    hook: null
+    docs: https://openclaw.ai
+    notes:
+      - 常驻形态是 gateway 守护进程 + worker 进程组，全部为 node 拉起，按命令行包路径识别。
+      - 前置拦截待适配（gateway 有 webhook 面但无 Hook 事件语义）。
+
+  - id: zcode
+    name: ZCode
+    vendor: Z.ai
+    aliases: [zcode, z-code]
+    discovery: P0
+    monitor: P1
+    protect: UNVERIFIED
+    hook: null
+    notes:
+      - 本机运行实例可被发现与监测；前置拦截能力待验证。
+
+  - id: unknown_agent
+    name: 其他未知 Agent
+    vendor: ""
+    aliases: []
+    discovery: P2
+    monitor: P2
+    protect: PLANNED
+    hook: null
+    notes:
+      - 未适配的 Agent 只能被动监测，产品不会声称已保护。
+
+  # ---------------------------------------------------------------------------
+  # 自建 Agent 框架（framework_rule 识别，依赖元数据匹配；设计 §2.2）
+  # 这里的 id 与 fingerprints/rules/framework_*.yaml 的 rule id 一一对应：
+  # 识别由项目依赖驱动，hook 一律未适配（框架本身没有 Hook 事件）。
+  # ---------------------------------------------------------------------------
+  - id: langchain
+    name: LangChain
+    vendor: LangChain
+    aliases: [lang-chain]
+    discovery: P1
+    monitor: P1
+    protect: PLANNED
+    hook: null
+    docs: https://python.langchain.com/docs/
+    notes:
+      - 自建框架：依赖命中只证明框架环境；运行归属依赖进程-项目关联。
+
+  - id: langgraph
+    name: LangGraph
+    vendor: LangChain
+    aliases: [lang-graph]
+    discovery: P1
+    monitor: P1
+    protect: PLANNED
+    hook: null
+    docs: https://langchain-ai.github.io/langgraph/
+    notes:
+      - 可脱离 langchain 独立使用，按独立框架识别。
+
+  - id: crewai
+    name: CrewAI
+    vendor: CrewAI
+    aliases: [crew-ai]
+    discovery: P1
+    monitor: P1
+    protect: PLANNED
+    hook: null
+    docs: https://docs.crewai.com/
+    notes:
+      - 自建框架：多 Agent 协作运行时。
+
+  - id: autogen
+    name: AutoGen
+    vendor: Microsoft
+    aliases: [auto-gen, pyautogen]
+    discovery: P1
+    monitor: P1
+    protect: PLANNED
+    hook: null
+    docs: https://microsoft.github.io/autogen/
+    notes:
+      - 包名跨代（pyautogen / autogen-agentchat），依赖规则已合并。

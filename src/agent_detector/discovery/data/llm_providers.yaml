@@ -1,0 +1,33 @@
+# =============================================================================
+# LLM API 供应商识别表：端点 host -> 供应商名
+# =============================================================================
+# llm_config.py 用它把配置里提取到的 base_url 翻译成供应商名。
+# 匹配规则：URL 的 host 等于 host 或以其结尾（`.` 边界对齐），所以既可写
+# 完整 host 也可写父域。纯数据，加供应商 = 加两行，不改代码。
+#
+# 隐私约定：本表只含公开的供应商域名，不收录任何密钥。
+# =============================================================================
+kind: llm_provider_set
+providers:
+  # 中国厂商
+  - {host: bigmodel.cn, vendor: "智谱 Z.ai"}
+  - {host: deepseek.com, vendor: "DeepSeek"}
+  - {host: dashscope.aliyuncs.com, vendor: "阿里云百炼"}
+  - {host: moonshot.cn, vendor: "月之暗面 Kimi"}
+  - {host: minimaxi.com, vendor: "MiniMax"}
+  - {host: doubao.com, vendor: "字节跳动火山方舟"}
+  - {host: volces.com, vendor: "字节跳动火山方舟"}
+  - {host: qwen.ai, vendor: "通义千问"}
+  - {host: hunyuan.tencent.com, vendor: "腾讯混元"}
+  # 国际厂商
+  - {host: api.anthropic.com, vendor: "Anthropic"}
+  - {host: api.openai.com, vendor: "OpenAI"}
+  - {host: generativelanguage.googleapis.com, vendor: "Google Gemini"}
+  - {host: api.x.ai, vendor: "xAI"}
+  - {host: api.cohere.com, vendor: "Cohere"}
+  - {host: api.mistral.ai, vendor: "Mistral"}
+  - {host: openrouter.ai, vendor: "OpenRouter"}
+  - {host: api.groq.com, vendor: "Groq"}
+  - {host: api.together.xyz, vendor: "Together AI"}
+  - {host: api.together.ai, vendor: "Together AI"}
+  - {host: api.llama-api.com, vendor: "Meta Llama"}

@@ -1,0 +1,23 @@
+# =============================================================================
+# LangGraph（自建 Agent 框架）检测规则 —— kind: framework_rule
+# =============================================================================
+# 注意（设计 §2.2）：langgraph 可能独立使用，环境里不一定有 langchain ——
+# 所以它是独立规则，依赖命中不依赖 LangChain 规则的结果。
+# =============================================================================
+kind: framework_rule
+id: langgraph
+name: LangGraph
+vendor: LangChain
+revision: 1
+runtimes: [python]
+
+dependencies:
+  any:
+    - langgraph
+
+confidence:
+  base: 0.45
+  installed: 0.3
+  configured: 0.1
+  running: 0.25
+  cap: 0.9
