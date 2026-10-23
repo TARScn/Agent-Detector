@@ -55,8 +55,6 @@ rules:
     pattern: '\bmcp[-_ ]server\b|\bmcp\.server\b|\bfastmcp\b'
 
   # ---- 其他 Agent 客户端 ----
-  # Codex CLI 已迁至专属规则 codex_cli.yaml（此处的 \bcodex\b 命中过宽，
-  # 且会与专属规则产生两个 asset_id 抢同一份证据）。
-  - name: OpenClaw
-    asset_type: AGENT_CLIENT
-    pattern: '\bopenclaw\b'
+  # Codex CLI 已迁至专属规则 codex_cli.yaml、OpenClaw 已迁至 openclaw.yaml。
+  # 宽松单词命中会与专属规则产生多个 asset_id 抢同一份证据，且签名匹配
+  # 拿不到版本 —— 有专属规则的产品一律不回这里。

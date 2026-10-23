@@ -1,0 +1,89 @@
+# =============================================================================
+# OpenClaw（开源个人 AI Agent 网关，前身 Clawdbot / Moltbot）检测规则
+# =============================================================================
+# 本文件是纯声明式数据：引擎按这里的描述去探测，不在代码里写死任何产品特征。
+# 修改本文件后无需改代码，下一次扫描即生效。
+#
+# 已核实的产品事实（2026-10-23，来源：本机 npm 全局实装 + 运行进程勘察）：
+#   * npm 全局包 openclaw，入口 openclaw.mjs（Node 启动器），服务端代码在
+#     包内 dist/（gateway、process/spawn-broker、process/supervisor、infra）；
+#   * 全部进程都是 node.exe 拉起 node_modules/openclaw 下的脚本 —— 可执行
+#     文件名匹配完全不可用，只能按命令行里的包路径片段匹配；
+#   * 常驻形态是 gateway 守护进程（默认端口 18789）+ spawn-broker worker +
+#     Windows 服务锚进程，另有按需的 onboard / tui 子命令。与 Codex 的
+#     app-server-daemon 不同，gateway 是用户主动 onboard 的产品本体而不是
+#     安装即自启的伴生守护，计入 RUNNING 是诚实的（不设 exclude_patterns）；
+#   * 状态目录 ~/.openclaw（openclaw.json 主配置 + workspace/state/agents）。
+#     已知边界：OPENCLAW_STATE_DIR 迁移过状态目录的用户会漏掉目录证据，
+#     规则文件读不到环境变量（与 ~/.codex 同款边界）。
+#
+# 证据与隐私约定（与 claude_code.yaml 相同）：
+#   * 所有探测均为只读 —— 不执行被发现的程序，不读取文件内容；
+#   * openclaw.json 只记录顶层键名（gateway/agents/models 等配置语义键），
+#     永不读取值 —— auth 凭据、会话与消息内容一律不入库；
+#   * 进程命令行会经脱敏（token 类字符串打码）后截断存证。
+#
+# '~' 表示被扫描用户的 home 目录；confidence 为该证据的可信度（0~1）。
+# =============================================================================
+kind: client_rule
+id: openclaw           # 与 agents.yaml 矩阵条目对齐
+name: OpenClaw
+asset_type: AGENT_CLIENT
+revision: 1
+
+# -----------------------------------------------------------------------------
+# 安装证据（INSTALLED）—— 存在以下任意一项即认为安装过
+# -----------------------------------------------------------------------------
+install:
+  # npm 全局包：package.json 的 version 字段是最可靠的版本来源。
+  # 引擎扫描 AppData/Roaming/npm、/usr/lib 等已知全局前缀，并以
+  # `npm root -g` 兜底（见 engine.npm_global_roots）。
+  npm_packages:
+    - package: 'openclaw'
+      confidence: 0.9
+
+  # 状态目录：onboard 完成即创建；即使包被卸载，目录残留仍证明安装过。
+  dirs:
+    - path: '~/.openclaw'
+      confidence: 0.8
+
+# -----------------------------------------------------------------------------
+# 版本来源 —— 按优先级自上而下尝试，命中即停；全部失败输出 UNKNOWN（禁止猜测）
+# -----------------------------------------------------------------------------
+version:
+  # 1) npm 包的 package.json（已安装包的实际版本）。
+  - from: npm_package_json
+    source: package-metadata
+    confidence: 0.9
+
+# -----------------------------------------------------------------------------
+# 配置证据（CONFIGURED）—— JSON 只读顶层键名，永不读值
+# -----------------------------------------------------------------------------
+config:
+  json_files:
+    - path: '~/.openclaw/openclaw.json'
+      keys_any: [gateway, agents, models]
+      confidence: 0.8
+
+# -----------------------------------------------------------------------------
+# 运行证据（RUNNING）—— 进程匹配
+# -----------------------------------------------------------------------------
+process:
+  # 命令行中的包路径片段（子串匹配）：node .../node_modules/openclaw/openclaw.mjs
+  # 与 node .../openclaw/dist/**（gateway / worker / supervisor / infra）
+  # 全部命中第一个 token；第二个 token 兜底非标准前缀的源码 checkout。
+  # 裸 "openclaw" 单词不作数（grep 命中过宽），与 claude_code.yaml 同一口径。
+  cmdline_tokens:
+    - 'node_modules/openclaw'
+    - 'openclaw/openclaw.mjs'
+  confidence: 0.85
+
+# -----------------------------------------------------------------------------
+# 置信度合成：base + 各状态权重之和，封顶 cap。状态可并存（文档 §2.3）
+# -----------------------------------------------------------------------------
+confidence:
+  base: 0.5
+  installed: 0.2
+  configured: 0.2
+  running: 0.25
+  cap: 0.95
