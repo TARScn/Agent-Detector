@@ -25,10 +25,10 @@
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 
 # 2. 启动控制台（默认 http://127.0.0.1:8787）
-.venv\Scripts\python.exe -m agent_detector.cli.main serve
+.venv\Scripts\python.exe -m agent_detector.console.cli.main serve
 
 # 3. 首次扫描
-.venv\Scripts\python.exe -m agent_detector.cli.main scan
+.venv\Scripts\python.exe -m agent_detector.console.cli.main scan
 ```
 
 Linux / macOS 上等价（采集通道会自动降级）：
@@ -36,7 +36,7 @@ Linux / macOS 上等价（采集通道会自动降级）：
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[test]"
-uvicorn agent_detector.api.app:app --host 127.0.0.1 --port 8787
+uvicorn agent_detector.console.api.app:app --host 127.0.0.1 --port 8787
 ```
 
 ## 控制台

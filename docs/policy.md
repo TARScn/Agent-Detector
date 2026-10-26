@@ -5,7 +5,7 @@
 
 ## 文件位置
 
-- 内置默认：`src/agent_detector/policy/rules/policies.yaml`
+- 内置默认：`src/agent_detector/interception/data/policies.yaml`
 - 外部覆盖：`AGENT_DETECTOR_POLICY_DIR=/path/to/dir`，同名文件整体替换内置文件
 - 运行时覆盖：界面/API 修改的"启用状态"与"决策"存数据库（`security_policies`），不改规则文件
 

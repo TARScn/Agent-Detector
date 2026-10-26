@@ -1,0 +1,154 @@
+# =============================================================================
+# Codex CLI（OpenAI 官方本地编码 Agent）检测规则
+# =============================================================================
+# 本文件是纯声明式数据：引擎按这里的描述去探测，不在代码里写死任何产品特征。
+# 修改本文件后无需改代码，下一次扫描即生效。
+#
+# 已核实的产品事实（2026-10，来源：github.com/openai/codex、npm @openai/codex）：
+#   * npm 包 @openai/codex，bin 是 bin/codex.js（Node 启动器，ESM）；
+#     平台原生二进制以 optionalDependencies 分发（@openai/codex-win32-x64、
+#     -linux-x64、-darwin-* 等），启动器运行时分发到对应平台包。
+#   * 原生可执行文件名统一为 codex（Windows 为 codex.exe）；npm 全局安装还会
+#     生成 codex.cmd / codex.ps1 垫片；GitHub Release 是单文件二进制（解包后
+#     改名为 codex），Homebrew 为 cask（brew install --cask codex）。
+#   * 状态目录默认 ~/.codex（Windows 为 %USERPROFILE%\.codex），可被 CODEX_HOME
+#     环境变量整体迁移 —— 本规则只探测默认位置，改过 CODEX_HOME 的用户会漏检，
+#     这是已知边界（规则文件读不到环境变量）。
+#
+# 证据与隐私约定（与 claude_code.yaml 相同）：
+#   * 所有探测均为只读，不读取文件内容；不执行被发现的程序——唯一例外是
+#     "无害执行"：被动证据已确认安装（INSTALLED）后，按本规则写死的 argv
+#     执行一次 --version 只读探针（无 shell、带超时、只取正则匹配的版本号）；
+#   * auth.json 是凭据文件，只 stat 存在性，键名也不读；
+#   * 进程命令行会经脱敏（token 类字符串打码）后截断存证。
+#
+# '~' 表示被扫描用户的 home 目录；confidence 为该证据的可信度（0~1）。
+# =============================================================================
+kind: client_rule
+id: codex-cli            # 规范化后为 codex_cli，与 agents.yaml 矩阵条目对齐
+name: Codex CLI
+asset_type: AGENT_CLIENT
+revision: 1
+
+# -----------------------------------------------------------------------------
+# 安装证据（INSTALLED）—— 存在以下任意一项即认为安装过
+# -----------------------------------------------------------------------------
+install:
+  # npm 全局包：启动器包必然与平台二进制包一同安装，探测它一个即可。
+  # package.json 的 version 字段是最可靠的版本来源。
+  npm_packages:
+    - package: '@openai/codex'
+      confidence: 0.9
+
+  # 二进制文件：~/.local/bin 是 GitHub Release 手动安装的常见位置；
+  # Homebrew cask 把二进制放到 brew 前缀的 bin 下。
+  paths:
+    - path: '~/.local/bin/codex'
+      confidence: 0.85
+    - path: '~/.local/bin/codex.exe'
+      confidence: 0.85
+    - path: '/opt/homebrew/bin/codex'
+      confidence: 0.85
+    - path: '/usr/local/bin/codex'
+      confidence: 0.85
+
+  # 状态目录：首次运行即创建（config.toml 未必立即生成）。
+  dirs:
+    - path: '~/.codex'
+      confidence: 0.8
+
+# -----------------------------------------------------------------------------
+# 版本来源 —— 按优先级自上而下尝试，命中即停；全部失败输出 UNKNOWN（禁止猜测）
+# -----------------------------------------------------------------------------
+version:
+  # 1) npm 包的 package.json（已安装包的实际版本，与 Release 版本一致）。
+  #    原生安装（Release 二进制 / brew）没有版本元数据，落到第 2 步或 UNKNOWN。
+  - from: npm_package_json
+    source: package-metadata
+    confidence: 0.9
+
+  # 2) 版本目录：Homebrew Caskroom 的 Caskroom/codex/<semver>/（Apple Silicon
+  #    在 /opt/homebrew，Intel mac 默认前缀是 /usr/local）；以及 codex 自管
+  #    子组件的版本目录（Windows 实测存在）：
+  #    packages/app-server-daemon/releases/<semver>-<target>/bin/codex.exe
+  - from: semver_dir_entries
+    dirs:
+      - '/opt/homebrew/Caskroom/codex'
+      - '/usr/local/Caskroom/codex'
+      - '~/.codex/packages/app-server-daemon/releases'
+    source: installer-metadata
+    confidence: 0.7
+
+  # 3) 原生二进制的 --version（GitHub Release 手动安装等无包元数据形态的
+  #    兜底；无害执行约定见文件头）。
+  - from: executable_version_flag
+    path: '~/.local/bin/codex.exe'
+    pattern: '(\d+\.\d+\.\d+)'
+    source: installer-metadata
+    confidence: 0.8
+  - from: executable_version_flag
+    path: '~/.local/bin/codex'
+    pattern: '(\d+\.\d+\.\d+)'
+    source: installer-metadata
+    confidence: 0.8
+
+# -----------------------------------------------------------------------------
+# 配置证据（CONFIGURED）—— 只看存在性，不读内容
+# -----------------------------------------------------------------------------
+config:
+  # config.toml 是主配置文件（TOML 格式；json_files 的键名探测不适用，
+  # 只做存在性判断）。
+  # auth.json 在用户登录（ChatGPT 账号或 API key）后生成 —— 真实使用过的
+  # 强证据。凭据文件：只 stat 存在性，永不读键名或值；置信度低于 config.toml
+  # （文件由 CLI 管理，用户可能无感知）。
+  existing_files:
+    - path: '~/.codex/config.toml'
+      confidence: 0.8
+    - path: '~/.codex/auth.json'
+      confidence: 0.7
+
+# -----------------------------------------------------------------------------
+# 运行证据（RUNNING）—— 进程匹配
+# -----------------------------------------------------------------------------
+process:
+  # 可执行文件名（含路径末段）精确匹配：原生二进制 + npm 垫片。
+  executable_names: [codex, codex.exe, codex.cmd, codex.ps1]
+
+  # 命令行中出现的包路径片段（子串匹配）：同时覆盖 Node 启动器
+  # （node .../node_modules/@openai/codex/bin/codex.js）和平台二进制包路径
+  # （.../@openai/codex-win32-x64/...codex.exe）。裸 "codex" 单词不作数
+  # （grep codex 不命中），与 claude_code.yaml 同一口径。
+  cmdline_tokens: ['@openai/codex']
+
+  # 排除指纹：Codex 自启的后台守护进程（app-server-daemon，命令行带
+  # --managed-daemon / app-server，随安装自动存在，无需用户启动）。它不是
+  # 交互式 Agent 会话 —— 计入 RUNNING 会把"装了 Codex"误报成"在跑 Codex"
+  # （Windows 实测：仅守护进程存活时扫描报出 2 个假实例）。
+  # 代价（已知并接受）：守护进程自身发起的行为事件在归因层会落到
+  # unattributed —— 归因与扫描共用同一份"像不像"定义，这是刻意的。
+  exclude_patterns: ['app-server-daemon']
+
+  confidence: 0.85
+
+# -----------------------------------------------------------------------------
+# LLM 底座探查 —— config.toml 的 model + 当前供应商表的 base_url。
+# {provider_id} 引用先捕获的 model_provider 值，实现"按当前档位查表"。
+# -----------------------------------------------------------------------------
+llm:
+  sources:
+    - path: '~/.codex/config.toml'
+      format: toml
+      fields:
+        model: 'model'
+        provider_id: 'model_provider'
+        base_url: 'model_providers.{provider_id}.base_url'
+
+# -----------------------------------------------------------------------------
+# 置信度合成：base + 各状态权重之和，封顶 cap。状态可并存（文档 §2.3）
+# -----------------------------------------------------------------------------
+confidence:
+  base: 0.5
+  installed: 0.2
+  configured: 0.2
+  running: 0.25
+  cap: 0.95

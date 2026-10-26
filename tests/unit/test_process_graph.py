@@ -1,5 +1,5 @@
-from agent_detector.detection.process_graph import ProcessGraph
-from agent_detector.domain.models import ProcessInfo
+from agent_detector.monitoring.detection.process_graph import ProcessGraph
+from agent_detector.core.models import ProcessInfo
 
 
 def snapshot():

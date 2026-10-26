@@ -5,12 +5,12 @@ import json
 
 from sqlalchemy.orm import Session
 
-from agent_detector.discovery.inventory import (InventoryBuilder, build_instance_id,
+from agent_detector.discovery.scanner.inventory import (InventoryBuilder, build_instance_id,
                                                 protection_for)
-from agent_detector.domain.enums import (AssetState, AssetType, HookState, ProtectionStatus,
+from agent_detector.core.enums import (AssetState, AssetType, HookState, ProtectionStatus,
                                          VersionSource)
-from agent_detector.domain.models import DetectedAsset, HostFacts, ProcessInfo, VersionInfo
-from agent_detector.storage.repositories import AgentInventoryRepository
+from agent_detector.core.models import DetectedAsset, HostFacts, ProcessInfo, VersionInfo
+from agent_detector.storage import AgentInventoryRepository
 
 
 def claude_asset(pids: list[int], states=None, asset_id="claude-code--abc") -> DetectedAsset:
@@ -71,7 +71,7 @@ def test_instances_are_retired_when_a_later_scan_does_not_see_them(services, hom
 
 
 def test_hook_install_upgrades_protection_status(services, home):
-    from agent_detector.hooks.installer import install
+    from agent_detector.interception.hooks.installer import install
 
     install("claude_code", home=home, apply=True)
     builder = InventoryBuilder(home=home)
@@ -128,3 +128,82 @@ def test_mcp_servers_are_attached_by_config_directory(services, home):
         stored = AgentInventoryRepository(session).get_asset("claude-code--abc")
     assert sorted(stored["mcp_servers"]) == ["github", "search"]
     assert "secret" not in json.dumps(stored)  # names only, never env blocks
+
+
+# ---------------------------------------------------------------------------
+# Self-built framework assets (design §6.3): app link, honest naming, cwd
+# ---------------------------------------------------------------------------
+
+
+def framework_asset(pids: list[int], states=None) -> DetectedAsset:
+    return DetectedAsset(
+        asset_id="langchain--proj", name="LangChain", asset_type=AssetType.AGENT_RUNTIME,
+        states=states or {AssetState.INSTALLED, AssetState.RUNNING},
+        confidence=0.8,
+        version=VersionInfo("0.3.7", VersionSource.PACKAGE_METADATA, 0.9),
+        running_pids=list(pids), detector="langchain",
+        executable="C:/proj/.venv/Scripts/python.exe")
+
+
+def test_framework_asset_links_to_application_and_carries_cwd(services, home):
+    proc = ProcessInfo(pid=3224, name="python.exe", cmdline=("python", "-m", "uvicorn"),
+                       create_time=1_700_000_100.0, ppid=100,
+                       exe="C:/proj/.venv/Scripts/python.exe", cwd="C:/proj")
+    builder = InventoryBuilder(home=home, framework_ids={"langchain"})
+    with Session(services.engine) as session:
+        items = builder.apply_scan(
+            session, [framework_asset([3224])], facts_with(*PROCESSES[:1], proc),
+            app_links={"langchain--proj": {"app_id": "app--1", "app_name": "ai-todo"}})
+        session.commit()
+        repository = AgentInventoryRepository(session)
+        stored = repository.get_asset("langchain--proj")
+        instances = repository.list_instances()
+    assert items[0]["app_id"] == "app--1"
+    assert stored["app_id"] == "app--1"
+    assert stored["name"] == "LangChain · ai-todo"
+    assert stored["protection_status"] == ProtectionStatus.MONITOR_ONLY.value
+    assert any("自建框架资产" in note for note in stored["notes"])
+    assert instances[0]["cwd"] == "C:/proj"
+
+
+def test_client_assets_are_unaffected_by_app_links(services, home):
+    builder = InventoryBuilder(home=home, framework_ids={"langchain"})
+    with Session(services.engine) as session:
+        items = builder.apply_scan(
+            session, [claude_asset([3224])], facts_with(*PROCESSES),
+            app_links={"claude-code--abc": {"app_id": "app--1", "app_name": "x"}})
+        session.commit()
+        stored = AgentInventoryRepository(session).get_asset("claude-code--abc")
+    assert items[0]["app_id"] is None
+    assert stored["app_id"] is None
+    assert stored["name"] == "Claude Code"
+
+
+def test_system_python_app_is_never_deleted_on_guesswork(services, home, tmp_path):
+    """无 venv 记录（系统 Python）的应用无法复查依赖 → 只做路径判定，
+    绝不因"依赖无法确认"而删除（2026-10-23 复核规则的安全边界）。"""
+    from agent_detector.discovery.fingerprints.schema import FrameworkRule
+    from agent_detector.storage.models import ApplicationRow, utc_now_iso
+
+    rule = FrameworkRule.model_validate({
+        "kind": "framework_rule", "id": "langchain", "name": "LangChain",
+        "dependencies": {"any": ["langchain"]}})
+    builder = InventoryBuilder(home=home, framework_ids={"langchain"},
+                               framework_rules=[rule])
+    with Session(services.engine) as session:
+        session.add(ApplicationRow(app_id="app--sys", name="sysapp",
+                                   root_path=str(tmp_path), runtime="python",
+                                   environment_path=None, status="active",
+                                   first_seen_at=utc_now_iso(),
+                                   last_seen_at=utc_now_iso()))
+        session.commit()
+        # 第一次扫描：资产入库并与应用关联
+        builder.apply_scan(
+            session, [framework_asset([3224])], facts_with(),
+            app_links={"langchain--proj": {"app_id": "app--sys", "app_name": "sysapp"}})
+        session.commit()
+        # 第二次扫描：进程没了，目录还在，但依赖无法复查
+        builder.apply_scan(session, [], facts_with())
+        session.commit()
+        stored = AgentInventoryRepository(session).get_asset("langchain--proj")
+    assert stored["status"] == "inactive"

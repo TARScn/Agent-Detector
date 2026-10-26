@@ -1,8 +1,8 @@
 """Hook adapters: payload normalization and native response shapes (§5.2-5.4)."""
-from agent_detector.domain.enums import Decision, HookEvent, RiskLevel
-from agent_detector.domain.models import PolicyVerdict, ToolCall
-from agent_detector.hooks.normalizer import describe_event, detect_agent_type, normalize
-from agent_detector.hooks.registry import ADAPTERS, get_adapter
+from agent_detector.core.enums import Decision, HookEvent, RiskLevel
+from agent_detector.core.models import PolicyVerdict, ToolCall
+from agent_detector.interception.hooks.normalizer import describe_event, detect_agent_type, normalize
+from agent_detector.interception.hooks.registry import ADAPTERS, get_adapter
 
 VERDICT = PolicyVerdict(decision=Decision.DENY, risk=RiskLevel.CRITICAL,
                         reason="命中受保护路径删除策略",

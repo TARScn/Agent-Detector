@@ -39,25 +39,33 @@ Agent 工具调用 → hook_bridge（stdlib，极轻量）
     → detection/correlation（Hook 父进程链 → 运行实例）
     → policy/engine（确定性规则，首个命中胜出，不调用 LLM）
     → 记录事件 + 生成告警
-    → hooks/adapters（转换成该 Agent 的原生响应）→ 返回 Agent
+    → interception/hooks（转换成该 Agent 的原生响应）→ 返回 Agent
 ```
 
 ## 目录结构（`src/`）
 
 ```
 agent_detector/
-  api/          app.py 组装；routers/ 每个资源一个模块（/api/v1、/internal/v1）
-  cli/          scan / agents / events / collect / policy / hooks / serve
-  collectors/   原始采集：process、filesystem、sysmon、audit/（auditd）、netflow、dns_cache、poll
-  common/       config（全部环境变量）、security（脱敏）
-  detection/    判别层：correlation、attribution、process_graph、behavior_rules、risk、llm_intel
-  discovery/    发现层：scanner、inventory、mcp、identity、agents（支持矩阵）、fingerprints/
-  domain/       enums、models、facts（跨平台事实层）
-  hooks/        base、registry、normalizer、installer、adapters/{claude,codex,cursor}
-  policy/       schema、loader、engine、paths、rules/policies.yaml
-  services/     hooks（决策编排）、ingest（系统行为）、monitor（出站连接）、retention
-  storage/      database、models、repositories/
-  web/          无构建步骤的控制台（index.html + assets/css + assets/js）
+  core/         共享内核：enums、models、facts、config（全部环境变量）、security（脱敏）、paths、identity
+  discovery/    能力① 资产发现
+    scanner/    scan（编排）、build、registry、resolver、inventory
+    sources/    agents（支持矩阵）、deps、frameworks、mcp、llm_config、filesystem
+    fingerprints/  engine、loader、match、schema（声明式指纹引擎）
+    probes/     http（主动探测，--active 时启用）
+    data/       agents.yaml、llm_*.yaml、fingerprints/*.yaml
+  monitoring/   能力② 行为监控
+    collectors/ host/{process,poll,netflow,dns_cache,sysmon}、audit/（auditd）
+    detection/  behavior_rules、llm_intel、attribution、correlation、process_graph、risk
+    services/   ingest（系统行为）、monitor（出站连接）、retention
+    data/       behaviors.yaml、llm_apis.yaml
+  interception/ 能力③ Hook 拦截
+    hooks/      base、registry、normalizer、installer、{claude,codex,cursor}
+    policy/     schema、loader、engine、decision（决策编排）、data/policies.yaml
+  console/      交付层
+    api/        app 组装；每个资源一个模块（/api/v1、/internal/v1）
+    cli/        scan / agents / events / collect / policy / hooks / serve
+    web/        无构建步骤的控制台（index.html + assets/css + assets/js）
+  storage/      database、models、各资源 repository（数据库唯一入口）
 hook_bridge/    放进 Agent 工具调用路径里的极轻量进程（仅标准库）
 ```
 

@@ -1,0 +1,27 @@
+# LLM 客户端 SDK 包名清单（与 fingerprints/rules 的 client 产品无关——这里是
+# "依赖里出现了哪个模型厂商客户端" 的兴趣名单，用于自建 Agent 的依赖扫描：
+# 命中即作为 AI 应用证据记录组件，永不读取这些包的任何内容。
+# 包名按 PEP 503 归一化匹配（大小写、-/_ 等价）。可按需增删，改完即生效。
+kind: llm_sdk_set
+revision: 1
+packages:
+  - openai
+  - anthropic
+  - google-genai
+  - google-generativeai
+  - zhipuai
+  - zai-sdk
+  - dashscope
+  - moonshot
+  - qianfan
+  - litellm
+  - ollama
+  - mistralai
+  - cohere
+  - together
+  - groq
+  - fireworks-ai
+  - volcengine-python-sdk
+  - replicate
+  - deepseek
+  - qwen

@@ -18,16 +18,16 @@ dependencies = [
 # Sysmon collection uses ctypes + wevtapi.dll, so pywin32 is not required.
 
 [project.scripts]
-agent-detector = "agent_detector.cli.main:main"
+agent-detector = "agent_detector.console.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"agent_detector.web" = ["index.html", "assets/**/*"]
-"agent_detector.discovery" = ["fingerprints/rules/*.yaml", "data/*.yaml"]
-"agent_detector.policy" = ["rules/*.yaml"]
-"agent_detector.detection" = ["rules/*.yaml"]
+"agent_detector.console.web" = ["index.html", "assets/**/*"]
+"agent_detector.discovery" = ["data/*.yaml", "data/fingerprints/*.yaml"]
+"agent_detector.interception" = ["data/*.yaml"]
+"agent_detector.monitoring" = ["data/*.yaml"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]

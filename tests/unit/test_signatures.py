@@ -1,6 +1,6 @@
 from agent_detector.discovery.fingerprints.engine import SignatureRuleDetector
-from agent_detector.domain.enums import AssetState, AssetType
-from agent_detector.domain.models import HostFacts, ListeningSocket, ProcessInfo
+from agent_detector.core.enums import AssetState, AssetType
+from agent_detector.core.models import HostFacts, ListeningSocket, ProcessInfo
 
 
 def test_vllm_process_with_listener():

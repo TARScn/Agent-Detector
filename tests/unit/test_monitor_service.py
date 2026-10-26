@@ -2,13 +2,13 @@ import time
 
 from sqlalchemy.orm import Session
 
-from agent_detector.services import monitor as ms
-from agent_detector.services.monitor import MonitorError, MonitorManager
-from agent_detector.collectors.netflow import ConnInfo
-from agent_detector.domain.enums import AssetState, AssetType
-from agent_detector.domain.models import DetectedAsset, VersionInfo
+from agent_detector.monitoring.services import monitor as ms
+from agent_detector.monitoring.services.monitor import MonitorError, MonitorManager
+from agent_detector.monitoring.collectors.host.netflow import ConnInfo
+from agent_detector.core.enums import AssetState, AssetType
+from agent_detector.core.models import DetectedAsset, VersionInfo
 from agent_detector.storage.database import make_engine
-from agent_detector.storage.repositories import (AssetRepository, BehaviorEventRepository,
+from agent_detector.storage import (AssetRepository, BehaviorEventRepository,
                                                      ScanRepository)
 
 

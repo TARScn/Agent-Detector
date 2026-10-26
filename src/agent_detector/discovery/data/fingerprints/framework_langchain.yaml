@@ -1,0 +1,34 @@
+# =============================================================================
+# LangChain（自建 Agent 框架）检测规则 —— kind: framework_rule
+# =============================================================================
+# 与 client_rule 的区别：framework_rule 不探测进程名和 home 目录，而是对
+# "进程 → 项目解析 → 依赖元数据" 得到的组件清单做声明式包名匹配。自建 Agent
+# 藏在普通解释器进程里，进程名匹配必然漏报（设计 §2.2/§3.1）。
+#
+# 证据与隐私约定：
+#   * 只匹配依赖元数据里的包名与版本（dist-info METADATA / pyproject / lock）；
+#   * 依赖命中只证明"框架环境"（INSTALLED），不证明运行了 Agent —— 运行状态
+#     由进程-项目归属单独给出（见 frameworks.py 的多框架诚实规则）。
+#
+# 包名按 PEP 503 归一化匹配；'any' 任一命中即可。
+# =============================================================================
+kind: framework_rule
+id: langchain
+name: LangChain
+vendor: LangChain
+revision: 1
+runtimes: [python]
+
+dependencies:
+  any:
+    - langchain
+    - langchain-core
+    - langchain-community
+
+# 置信度合成与 client_rule 同款：base + 各状态权重，封顶 cap。
+confidence:
+  base: 0.45
+  installed: 0.3
+  configured: 0.1
+  running: 0.25
+  cap: 0.9

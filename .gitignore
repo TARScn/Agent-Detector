@@ -2,7 +2,11 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-data/
+# Runtime data (SQLite DB, hook token, bookmarks) — root-anchored, so the
+# in-package resource dirs (discovery/data, monitoring/data, interception/data)
+# stay trackable. The un-anchored "data/" pattern used to hide agents.yaml,
+# llm_sdks.yaml and the framework_*.yaml rules from the repository entirely.
+/data/
 *.sqlite3
 .env
 .DS_Store

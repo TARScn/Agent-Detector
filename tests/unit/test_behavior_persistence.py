@@ -2,12 +2,12 @@ import sqlite3
 
 from sqlalchemy.orm import Session
 
-from agent_detector.services.retention import (clear_behavior_events,
+from agent_detector.monitoring.services.retention import (clear_behavior_events,
                                                  purge_behavior_events)
-from agent_detector.domain.models import ProcessInfo
+from agent_detector.core.models import ProcessInfo
 from agent_detector.storage.database import ensure_schema, make_engine
 from agent_detector.storage.models import BehaviorEventRow
-from agent_detector.storage.repositories import BehaviorEventRepository
+from agent_detector.storage import BehaviorEventRepository
 
 LEGACY_DDL = """
 CREATE TABLE behavior_events (

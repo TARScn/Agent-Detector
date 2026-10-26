@@ -1,0 +1,103 @@
+# =============================================================================
+# Hermes（Nous Research 的自进化个人 AI Agent，hermes-agent）检测规则
+# =============================================================================
+# 本文件是纯声明式数据：引擎按这里的描述去探测，不在代码里写死任何产品特征。
+# 修改本文件后无需改代码，下一次扫描即生效。
+#
+# 已核实的产品事实（2026-10-23，来源：本机实装勘察 + 运行进程）：
+#   * 安装形态是"单一家目录"：%LOCALAPPDATA%\hermes 既是安装又是状态 ——
+#     bin（hermes.exe / hermes-acp.exe 启动器）、tools（自管 Python 工具链，
+#     如 python-3.14.9+<日期>）、installs（哈希命名的引导元数据）、
+#     hermes-agent（源码 checkout，hermes_cli 包的来源），与 config.yaml、
+#     auth.json、sessions、skills、memories、state.db 等状态文件同层；
+#   * 进程形态：bin\hermes.exe 启动器 + 自管 Python 拉起
+#     `python -m hermes_cli.main --profile default gateway run` 网关守护
+#     进程（另有 hermes-acp.exe 的 ACP 适配器）。可执行文件名有区分度，
+#     与 openclaw 的 node.exe 不同，这里可以按进程名匹配；
+#   * 版本：安装物无包元数据（checkout 的 pyproject 是占位符 0.0.0，
+#     installs 是哈希目录不是 semver 目录），产品自带的 --version 只读探针
+#     是唯一来源（输出形如 "Hermes Agent v0.22.5 (2026.9.24) · stable"，
+#     取 v 后的语义版本；无害执行约定见下方隐私条款）。
+#
+# 证据与隐私约定（与 claude_code.yaml 相同）：
+#   * 所有探测均为只读，不读取文件内容；不执行被发现的程序——唯一例外是
+#     "无害执行"：被动证据已确认安装（INSTALLED）后，按本规则写死的 argv
+#     执行一次 --version 只读探针（无 shell、带超时、只取正则匹配的版本号）；
+#   * auth.json 是凭据文件，只 stat 存在性，键名也不读；
+#   * config.yaml 是 YAML，引擎的 llm.sources 只支持 json/jsonc/toml，
+#     LLM 底座探查不适配（已知边界），模型与端点留空；
+#   * 进程命令行会经脱敏（token 类字符串打码）后截断存证。
+#
+# '~' 表示被扫描用户的 home 目录；confidence 为该证据的可信度（0~1）。
+# =============================================================================
+kind: client_rule
+id: hermes            # 与 agents.yaml 矩阵条目对齐
+name: Hermes
+asset_type: AGENT_CLIENT
+revision: 1
+
+# -----------------------------------------------------------------------------
+# 安装证据（INSTALLED）—— 存在以下任意一项即认为安装过
+# -----------------------------------------------------------------------------
+install:
+  # 单一家目录：首次运行即创建，卸载残留仍证明安装过。
+  dirs:
+    - path: '~/AppData/Local/hermes'
+      confidence: 0.8
+
+  # 启动器：主程序 + ACP 适配器（updater 中间态 hermes.exe.deleteme 不算）。
+  paths:
+    - path: '~/AppData/Local/hermes/bin/hermes.exe'
+      confidence: 0.85
+    - path: '~/AppData/Local/hermes/bin/hermes-acp.exe'
+      confidence: 0.85
+
+# -----------------------------------------------------------------------------
+# 版本来源 —— 命中即停；全部失败输出 UNKNOWN（禁止猜测）
+# -----------------------------------------------------------------------------
+version:
+  # 自管工具链 + 源码 checkout 没有包元数据，产品自带的 --version 只读探针
+  # 是唯一来源（无害执行约定见文件头；仅在 INSTALLED 后执行）。
+  - from: executable_version_flag
+    path: '~/AppData/Local/hermes/bin/hermes.exe'
+    argv: ['--version']
+    pattern: 'v(\d+\.\d+\.\d+)'
+    timeout_ms: 8000
+    source: installer-metadata
+    confidence: 0.85
+
+# -----------------------------------------------------------------------------
+# 配置证据（CONFIGURED）—— 只看存在性，不读内容
+# -----------------------------------------------------------------------------
+config:
+  existing_files:
+    # 主配置（YAML；json 键名探测与 llm.sources 均不适用，只做存在性）。
+    - path: '~/AppData/Local/hermes/config.yaml'
+      confidence: 0.8
+    # 凭据文件：真实使用过的强证据；只 stat 存在性，永不读键名或值。
+    - path: '~/AppData/Local/hermes/auth.json'
+      confidence: 0.7
+
+# -----------------------------------------------------------------------------
+# 运行证据（RUNNING）—— 进程匹配
+# -----------------------------------------------------------------------------
+process:
+  # 可执行文件名（含路径末段）精确匹配：bin 下两个启动器 + unix 同名。
+  executable_names: [hermes, hermes.exe, hermes-acp, hermes-acp.exe]
+
+  # 命令行路径片段（子串匹配）：网关守护进程是
+  # <自管 python> -m hermes_cli.main --profile default gateway run，
+  # 模块名有区分度，覆盖所有经 hermes_cli 入口的进程。
+  cmdline_tokens: ['hermes_cli.main']
+
+  confidence: 0.85
+
+# -----------------------------------------------------------------------------
+# 置信度合成：base + 各状态权重之和，封顶 cap。状态可并存（文档 §2.3）
+# -----------------------------------------------------------------------------
+confidence:
+  base: 0.5
+  installed: 0.2
+  configured: 0.2
+  running: 0.25
+  cap: 0.95

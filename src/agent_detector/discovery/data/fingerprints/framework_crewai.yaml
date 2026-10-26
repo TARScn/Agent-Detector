@@ -1,0 +1,20 @@
+# =============================================================================
+# CrewAI（多 Agent 协作框架）检测规则 —— kind: framework_rule
+# =============================================================================
+kind: framework_rule
+id: crewai
+name: CrewAI
+vendor: CrewAI
+revision: 1
+runtimes: [python]
+
+dependencies:
+  any:
+    - crewai
+
+confidence:
+  base: 0.45
+  installed: 0.3
+  configured: 0.1
+  running: 0.25
+  cap: 0.9

@@ -1,0 +1,60 @@
+# =============================================================================
+# 通用命令行签名规则（廉价初筛）
+# =============================================================================
+# 对全部进程命令行做大小写不敏感的正则匹配。匹配上即产出候选资产：
+#   * 仅进程命中：RUNNING，置信度 0.65
+#   * 同时关联本机 LISTEN 端口：置信度 0.85
+# 有专属 client_rule 的产品（见 claude_code.yaml）不放在这里，避免两套逻辑抢证据。
+#
+# 注意：正则只匹配"可执行文件 / 模块 / 可识别 token"，
+# 不要写 'agent'、'python' 这类泛化词 —— 误报率会失控。
+# =============================================================================
+kind: signature_set
+rules:
+  # ---- 模型推理服务 ----
+  - name: Ollama
+    asset_type: LLM_SERVICE
+    pattern: '(?<![\w-])ollama(?:\s+serve)?(?![\w-])'
+  - name: vLLM
+    asset_type: LLM_SERVICE
+    pattern: '(?:\bvllm\b|vllm\.entrypoints)'
+  - name: LM Studio
+    asset_type: LLM_SERVICE
+    pattern: '\blmstudio\b|\blm-studio\b'
+
+  # ---- AI 应用 ----
+  - name: Open WebUI
+    asset_type: AI_APPLICATION
+    pattern: '\bopen-webui\b|\bopen_webui\b'
+
+  # ---- Agent 平台 ----
+  - name: Dify
+    asset_type: AGENT_PLATFORM
+    pattern: '(?:\bdify\b|\bdify-api\b)'
+
+  # ---- Agent 框架 ----
+  - name: LangGraph
+    asset_type: AGENT_RUNTIME
+    pattern: '\blanggraph\b'
+  - name: LangChain
+    asset_type: AGENT_RUNTIME
+    pattern: '\blangchain\b'
+  - name: AutoGen
+    asset_type: AGENT_RUNTIME
+    pattern: '\bautogen(?:_agentchat|_studio)?\b'
+  - name: CrewAI
+    asset_type: AGENT_RUNTIME
+    pattern: '\bcrewai\b'
+  - name: AgentScope
+    asset_type: AGENT_RUNTIME
+    pattern: '\bagentscope\b'
+
+  # ---- MCP 组件 ----
+  - name: MCP Server
+    asset_type: MCP_SERVER
+    pattern: '\bmcp[-_ ]server\b|\bmcp\.server\b|\bfastmcp\b'
+
+  # ---- 其他 Agent 客户端 ----
+  # Codex CLI 已迁至专属规则 codex_cli.yaml、OpenClaw 已迁至 openclaw.yaml。
+  # 宽松单词命中会与专属规则产生多个 asset_id 抢同一份证据，且签名匹配
+  # 拿不到版本 —— 有专属规则的产品一律不回这里。

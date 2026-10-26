@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.orm import Session
 
-from agent_detector.services.ingest import BehaviorIngestError
+from agent_detector.monitoring.services.ingest import BehaviorIngestError
 from agent_detector.storage.models import BehaviorEventRow
 
 
@@ -45,12 +45,12 @@ class FakeBehaviorService:
 def telemetry_client(services, monkeypatch):
     from fastapi.testclient import TestClient
 
-    from agent_detector.api.app import create_app
+    from agent_detector.console.api.app import create_app
 
     services.monitor._dns = SimpleNamespace(snapshot=lambda: {}, entry_count=0,
                                             running=False, failed=False,
                                             start=lambda: None, close=lambda: None)
-    monkeypatch.setattr("agent_detector.services.monitor.collect_outbound", lambda: [])
+    monkeypatch.setattr("agent_detector.monitoring.services.monitor.collect_outbound", lambda: [])
     services.ingest = FakeBehaviorService()
     return TestClient(create_app(serve_console=False))
 

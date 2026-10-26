@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-from agent_detector.domain.models import ProcessInfo
+from agent_detector.core.models import ProcessInfo
 from agent_detector.discovery.fingerprints.schema import ClientRule, ProcessSpec, SignatureRule
 
 

@@ -24,15 +24,15 @@ function Write-Step($text) { Write-Host "==> $text" -ForegroundColor Cyan }
 
 if (-not $KeepHookConfig) {
   Write-Step "卸载 Hook 条目（先备份，再移除本工具写入的条目）"
-  & $venvPython -m agent_detector.cli.main hooks uninstall --apply
+  & $venvPython -m agent_detector.console.cli.main hooks uninstall --apply
   Write-Host "    已保留你原有的 Hook 配置项；备份文件与被修改的配置在同一目录。" -ForegroundColor Green
 }
 
 Write-Step "当前 Hook 状态"
-& $venvPython -m agent_detector.cli.main hooks status
+& $venvPython -m agent_detector.console.cli.main hooks status
 
 Write-Step "保留策略清理（按配置的天数删除历史行为事件）"
-& $venvPython -m agent_detector.cli.main purge
+& $venvPython -m agent_detector.console.cli.main purge
 
 if ($PurgeData) {
   $dataDir = Join-Path $repoRoot "data"

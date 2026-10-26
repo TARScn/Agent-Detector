@@ -4,8 +4,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_detector.api.app import create_app
-from agent_detector.api.deps import Services, set_services
+from agent_detector.console.api.app import create_app
+from agent_detector.console.api.deps import Services, set_services
 from agent_detector.storage.database import make_engine
 
 

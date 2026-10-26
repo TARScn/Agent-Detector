@@ -32,6 +32,13 @@ _ADDITIVE_COLUMNS["behavior_events"].update({
     "execution_status": "VARCHAR(24)",
     "policy_id": "VARCHAR(64)",
 })
+# V0.2.x: LLM base-model inventory per Agent asset
+_ADDITIVE_COLUMNS["agent_assets"] = {"llm_endpoints_json": "TEXT"}
+# Self-built agent discovery: framework assets link to their application
+_ADDITIVE_COLUMNS["agent_assets"]["app_id"] = "VARCHAR(96)"
+# Post-scan verification lifecycle (re-install flips back to active on upsert)
+_ADDITIVE_COLUMNS["agent_assets"]["status"] = "VARCHAR(24) DEFAULT 'active'"
+_ADDITIVE_COLUMNS["applications"] = {"status": "VARCHAR(24) DEFAULT 'active'"}
 
 
 def ensure_schema(engine: Engine) -> list[str]:
