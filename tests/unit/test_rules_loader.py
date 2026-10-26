@@ -9,7 +9,8 @@ def test_packaged_rules_load_cleanly():
     loaded = load_rules()
     assert loaded.errors == []
     assert [r.id for r in loaded.client_rules] == ["claude-code", "codex-cli",
-                                                    "cursor", "openclaw", "opencode"]
+                                                    "cursor", "hermes", "openclaw",
+                                                    "opencode"]
     names = {r.name for r in loaded.signature_rules}
     assert {"Ollama", "vLLM", "LangGraph", "CrewAI"} <= names
     assert "Codex CLI" not in names  # moved to the codex-cli client rule

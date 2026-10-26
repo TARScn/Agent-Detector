@@ -93,6 +93,19 @@ agents:
       - 常驻形态是 gateway 守护进程 + worker 进程组，全部为 node 拉起，按命令行包路径识别。
       - 前置拦截待适配（gateway 有 webhook 面但无 Hook 事件语义）。
 
+  - id: hermes
+    name: Hermes
+    vendor: Nous Research
+    aliases: [hermes, hermes-agent]
+    discovery: P1
+    monitor: P1
+    protect: PLANNED
+    hook: null
+    notes:
+      - 安装与状态同层（AppData\Local\hermes），常驻形态是 gateway 守护进程 + ACP 适配器。
+      - 版本暂无只读来源（源码 checkout 的 pyproject 为占位符），诚实输出 UNKNOWN。
+      - 前置拦截待适配。
+
   - id: zcode
     name: ZCode
     vendor: Z.ai
