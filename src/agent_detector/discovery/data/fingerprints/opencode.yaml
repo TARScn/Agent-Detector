@@ -22,7 +22,9 @@
 #     监测归因，不声称保护。
 #
 # 证据与隐私约定（与 claude_code.yaml 相同）：
-#   * 所有探测均为只读 —— 不执行被发现的程序，不读取文件内容；
+#   * 所有探测均为只读，不读取文件内容；不执行被发现的程序——唯一例外是
+#     "无害执行"：被动证据已确认安装（INSTALLED）后，按本规则写死的 argv
+#     执行一次 --version 只读探针（无 shell、带超时、只取正则匹配的版本号）；
 #   * 进程命令行会经脱敏（token 类字符串打码）后截断存证。
 #
 # '~' 表示被扫描用户的 home 目录；confidence 为该证据的可信度（0~1）。
@@ -37,9 +39,14 @@ revision: 1
 # 安装证据（INSTALLED）—— 存在以下任意一项即认为安装过
 # -----------------------------------------------------------------------------
 install:
+  # npm 分发在 2026-10 迁移为作用域包 @opencode/cli（实机核实：shim 指向
+  # node_modules/@opencode/cli/bin/opencode.exe）；旧名 opencode-ai 保留给
+  # 历史安装。
   npm_packages:
-    - package: 'opencode-ai'
+    - package: '@opencode/cli'
       confidence: 0.9
+    - package: 'opencode-ai'
+      confidence: 0.85
 
   # 安装器的 bin 目录：名字高度特异（.opencode），个人文件不会撞名。
   paths:
@@ -59,10 +66,23 @@ install:
 # 版本来源 —— 命中即停；全部失败输出 UNKNOWN（禁止猜测）
 # -----------------------------------------------------------------------------
 version:
-  # 安装脚本不保留版本目录，npm 元数据是唯一可靠来源。
+  # npm 元数据优先（@opencode/cli 的 package.json version 与 --version 一致）。
   - from: npm_package_json
     source: package-metadata
     confidence: 0.9
+
+  # 2) 原生安装脚本渠道的二进制 --version 兜底（无 npm 元数据时；
+  #    无害执行约定见文件头）。
+  - from: executable_version_flag
+    path: '~/.opencode/bin/opencode.exe'
+    pattern: 'v?(\d+\.\d+\.\d+)'
+    source: installer-metadata
+    confidence: 0.8
+  - from: executable_version_flag
+    path: '~/.opencode/bin/opencode'
+    pattern: 'v?(\d+\.\d+\.\d+)'
+    source: installer-metadata
+    confidence: 0.8
 
 # -----------------------------------------------------------------------------
 # 配置证据（CONFIGURED）—— 只看存在性，不读内容

@@ -16,7 +16,9 @@
 #     这是已知边界（规则文件读不到环境变量）。
 #
 # 证据与隐私约定（与 claude_code.yaml 相同）：
-#   * 所有探测均为只读 —— 不执行被发现的程序，不读取文件内容；
+#   * 所有探测均为只读，不读取文件内容；不执行被发现的程序——唯一例外是
+#     "无害执行"：被动证据已确认安装（INSTALLED）后，按本规则写死的 argv
+#     执行一次 --version 只读探针（无 shell、带超时、只取正则匹配的版本号）；
 #   * auth.json 是凭据文件，只 stat 存在性，键名也不读；
 #   * 进程命令行会经脱敏（token 类字符串打码）后截断存证。
 #
@@ -76,6 +78,19 @@ version:
       - '~/.codex/packages/app-server-daemon/releases'
     source: installer-metadata
     confidence: 0.7
+
+  # 3) 原生二进制的 --version（GitHub Release 手动安装等无包元数据形态的
+  #    兜底；无害执行约定见文件头）。
+  - from: executable_version_flag
+    path: '~/.local/bin/codex.exe'
+    pattern: '(\d+\.\d+\.\d+)'
+    source: installer-metadata
+    confidence: 0.8
+  - from: executable_version_flag
+    path: '~/.local/bin/codex'
+    pattern: '(\d+\.\d+\.\d+)'
+    source: installer-metadata
+    confidence: 0.8
 
 # -----------------------------------------------------------------------------
 # 配置证据（CONFIGURED）—— 只看存在性，不读内容

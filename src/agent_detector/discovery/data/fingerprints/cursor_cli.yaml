@@ -33,7 +33,9 @@
 #     Adapter）和 ~/.cursor/hooks.json 的 Hook 追踪路径对齐。
 #
 # 证据与隐私约定（与 claude_code.yaml 相同）：
-#   * 所有探测均为只读 —— 不执行被发现的程序，不读取文件内容；
+#   * 所有探测均为只读，不读取文件内容；不执行被发现的程序——唯一例外是
+#     "无害执行"：被动证据已确认安装（INSTALLED）后，按本规则写死的 argv
+#     执行一次 --version 只读探针（无 shell、带超时、只取正则匹配的版本号）；
 #   * 进程命令行会经脱敏（token 类字符串打码）后截断存证。
 #
 # '~' 表示被扫描用户的 home 目录；confidence 为该证据的可信度（0~1）。
@@ -76,6 +78,19 @@ version:
       - '~/AppData/Local/cursor-agent/versions'
     source: installer-metadata
     confidence: 0.8
+
+  # 版本目录探测失败时的兜底：安装根目录 / Unix 符号链接的 --version
+  # （无害执行约定见文件头）。
+  - from: executable_version_flag
+    path: '~/AppData/Local/cursor-agent/cursor-agent.exe'
+    pattern: '(\d+\.\d+\.\d+)'
+    source: installer-metadata
+    confidence: 0.7
+  - from: executable_version_flag
+    path: '~/.local/bin/cursor-agent'
+    pattern: '(\d+\.\d+\.\d+)'
+    source: installer-metadata
+    confidence: 0.7
 
 # -----------------------------------------------------------------------------
 # 配置证据（CONFIGURED）—— 只看存在性，不读内容

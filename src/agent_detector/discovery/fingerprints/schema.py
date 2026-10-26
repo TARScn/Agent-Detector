@@ -62,12 +62,38 @@ class ConfigSpec(_Strict):
 
 
 class VersionStep(_Strict):
-    """One version source; steps are tried top to bottom, first hit wins."""
+    """One version source; steps are tried top to bottom, first hit wins.
 
-    from_: Literal["npm_package_json", "semver_dir_entries"] = Field(alias="from")
+    ``executable_version_flag`` runs the product's own ``--version``-style
+    probe: read-only by design (no state change), and bounded — it only runs
+    after passive evidence already claimed the binary as this product
+    (INSTALLED), always executes the argv written in this rule (never
+    anything taken from live processes), without a shell and under a hard
+    timeout. Only the first regex match is kept as the version.
+    """
+
+    from_: Literal["npm_package_json", "semver_dir_entries",
+                   "executable_version_flag"] = Field(alias="from")
     dirs: list[str] = Field(default_factory=list)
+    path: str = ""                    # executable_version_flag: the binary to probe
+    argv: list[str] = Field(default_factory=lambda: ["--version"])
+    pattern: str = r"\d+\.\d+\.\d+"   # first match wins; use a group to narrow
+    timeout_ms: int = 5000
     source: VersionSource = VersionSource.UNKNOWN
     confidence: float = 0.8
+
+    @field_validator("pattern")
+    @classmethod
+    def _pattern_compiles(cls, value: str) -> str:
+        re.compile(value)
+        return value
+
+    @field_validator("timeout_ms")
+    @classmethod
+    def _timeout_bounded(cls, value: int) -> int:
+        if not 500 <= value <= 15000:
+            raise ValueError("timeout_ms must be between 500 and 15000")
+        return value
 
 
 class ProcessSpec(_Strict):

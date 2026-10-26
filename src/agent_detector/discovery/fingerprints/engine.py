@@ -88,7 +88,7 @@ class ClientRuleDetector:
         found_packages = self._probe_npm_packages(home, evidence, states)
         self._probe_paths(home, evidence, states)
         self._probe_dirs(home, evidence, states)
-        version, version_evidence = self._resolve_version(home, found_packages)
+        version, version_evidence = self._resolve_version(home, found_packages, states)
         evidence.extend(version_evidence)
         self._probe_config(home, evidence, states, config_paths)
         matched = self._match_processes(facts, evidence, states)
@@ -159,7 +159,8 @@ class ClientRuleDetector:
                     f"directory {fact.path} exists",
                     {"path": fact.path, "is_dir": True}, probe.confidence))
 
-    def _resolve_version(self, home, found_packages) -> tuple[VersionInfo, list[Evidence]]:
+    def _resolve_version(self, home, found_packages,
+                         states: set[AssetState]) -> tuple[VersionInfo, list[Evidence]]:
         for step in self.rule.version:
             if step.from_ == "npm_package_json":
                 for package, package_json in found_packages:
@@ -190,7 +191,39 @@ class ClientRuleDetector:
                         EvidenceKind.INSTALL_METADATA,
                         f"installer version {value} ({entry})",
                         {"version": value, "path": str(entry)}, step.confidence)]
+            elif step.from_ == "executable_version_flag":
+                # Harmless by design, but gated: passive probes must have
+                # claimed this binary as the product (INSTALLED) before we
+                # ever execute it — unknown binaries are never run.
+                if AssetState.INSTALLED not in states:
+                    continue
+                probed = self._version_flag_probe(step, home)
+                if probed is not None:
+                    value, run_path = probed
+                    return VersionInfo(value, step.source, step.confidence), [Evidence(
+                        EvidenceKind.INSTALL_METADATA,
+                        f"--version probe reported {value} ({run_path})",
+                        {"version": value, "path": str(run_path),
+                         "argv": list(step.argv)}, step.confidence)]
         return VersionInfo.unknown(), []
+
+    def _version_flag_probe(self, step, home) -> tuple[str, Path] | None:
+        """Run the rule's fixed read-only version probe on a claimed binary."""
+        target = self._resolve(step.path, home)
+        if not target.is_file():
+            return None
+        try:
+            completed = subprocess.run(
+                [str(target), *step.argv], capture_output=True, text=True,
+                timeout=step.timeout_ms / 1000, cwd=str(target.parent), check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        output = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+        match = re.search(step.pattern, output)
+        if match is None:
+            return None
+        value = match.group(1) if match.groups() else match.group(0)
+        return value, target
 
     def _probe_config(self, home, evidence, states, config_paths) -> None:
         for probe in self.rule.config.json_files:

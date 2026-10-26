@@ -45,6 +45,12 @@ version:                     # 按优先级尝试，命中即停；全失败 →
     dirs: ['~/.claude/versions', '~/.local/share/claude/versions']
     source: installer-metadata
     confidence: 0.8
+  - from: executable_version_flag  # 产品的 --version 只读探针（无害执行，见下）
+    path: '~/.local/bin/claude.exe'
+    pattern: '(\d+\.\d+\.\d+)'     # 首个匹配；用分组收窄提取范围
+    timeout_ms: 5000               # 500~15000，硬超时
+    source: installer-metadata
+    confidence: 0.8
 
 config:                      # CONFIGURED 证据：只看键名/存在性，永不读值
   json_files:
@@ -71,6 +77,13 @@ confidence:                  # 合成公式 base + 命中状态权重，封顶 c
   安装引导键（如 `userID`）不要列。
 - `exclude_patterns` 在正向匹配之前执行，用于排除同名不同产品的进程。
 - 路径必须使用 `~` 相对形式，禁止写绝对路径——规则要跨机器复用。
+
+**无害执行约定（`executable_version_flag`）**：探测默认不执行被发现的
+程序；唯一例外是产品的 `--version` 类只读探针——它不改变系统状态。
+红线：仅在被动证据已确认安装（INSTALLED）后执行；argv 只能来自规则
+数据（永不取自进程命令行）；不经 shell、硬超时；只保留首个正则匹配
+作为版本号。npm shim（.cmd/.ps1）不能作为探针目标——无 shell 时无法
+执行，请指向真实二进制。
 
 ## 规则类型二：signature_set（一组通用命令行正则，廉价初筛）
 

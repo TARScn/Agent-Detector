@@ -5,7 +5,9 @@
 # 修改本文件后无需改代码，下一次扫描即生效。
 #
 # 证据与隐私约定：
-#   * 所有探测均为只读 —— 不执行被发现的程序，不读取文件内容；
+#   * 所有探测均为只读，不读取文件内容；不执行被发现的程序——唯一例外是
+#     "无害执行"：被动证据已确认安装（INSTALLED）后，按本规则写死的 argv
+#     执行一次 --version 只读探针（无 shell、带超时、只取正则匹配的版本号）；
 #   * JSON 文件只记录"顶层键名"，永不记录值（凭证、项目列表不入库）；
 #   * 进程命令行会经脱敏（token 类字符串打码）后截断存证。
 #
@@ -58,6 +60,18 @@ version:
       - '~/.claude/versions'
       - '~/.claude/downloads'
       - '~/.local/share/claude/versions'
+    source: installer-metadata
+    confidence: 0.8
+
+  # 3) 原生二进制的 --version（无 npm 元数据形态的兜底；无害执行约定见文件头）。
+  - from: executable_version_flag
+    path: '~/.local/bin/claude.exe'
+    pattern: '(\d+\.\d+\.\d+)'
+    source: installer-metadata
+    confidence: 0.8
+  - from: executable_version_flag
+    path: '~/.local/bin/claude'
+    pattern: '(\d+\.\d+\.\d+)'
     source: installer-metadata
     confidence: 0.8
 
