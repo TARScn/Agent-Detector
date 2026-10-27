@@ -109,7 +109,7 @@ class ProjectInfo:
     environment_path: str | None = None   # venv root when the interpreter lives in one
     entry: str | None = None              # entrypoint claim, e.g. "module:app" or script path
     entry_kind: str = "cwd"               # module | script | server-entry | cwd
-    container_id: str | None = None       # reserved; container association is out of scope
+    container_id: str | None = None       # Docker channel: full container id when the project lives in a container
     resolver_status: str = "resolved"     # resolved | unresolved
 
 
@@ -152,6 +152,8 @@ class AgentInstance:
     parent_chain: tuple[str, ...] = ()
     status: str = "running"
     evidence: tuple[str, ...] = ()
+    origin: str = "host"                  # "host" | "docker"
+    container_id: str | None = None       # set when the process lives in a container
 
 
 @dataclass
@@ -189,6 +191,8 @@ class AgentInventoryItem:
     mcp_servers: tuple[str, ...] = ()
     llm_endpoints: tuple[dict, ...] = ()
     app_id: str | None = None            # self-built: the application this framework runs in
+    origin: str = "host"                 # "host" | "docker"
+    container_id: str | None = None      # Docker channel: full container id
     instance_count: int = 0
     last_seen_at: str | None = None
     notes: tuple[str, ...] = ()

@@ -42,6 +42,8 @@ class AgentInventoryRepository:
         row.llm_endpoints_json = json.dumps(
             [dict(e) for e in item.llm_endpoints], ensure_ascii=False)
         row.app_id = item.app_id
+        row.origin = item.origin
+        row.container_id = item.container_id
         row.capabilities_json = json.dumps(item.capabilities, ensure_ascii=False)
         row.protection_status = item.protection.value
         row.hook_state = item.hook_state.value
@@ -68,11 +70,24 @@ class AgentInventoryRepository:
         return [self._asset_dict(row) for row in rows]
 
     def set_status(self, asset_id: str, status: str) -> bool:
-        """Post-scan verification verdict for an asset not seen in this scan."""
+        """Post-scan verification verdict for an asset not seen in this scan.
+
+        Both verdicts ("inactive", "removed") mean "no live process", so the
+        RUNNING state claim must go with them — the row keeps its INSTALLED /
+        CONFIGURED evidence, but a stale 运行中 badge on an inactive asset is
+        exactly the ghost this verification exists to prevent (its instances
+        are stopped separately). A later scan that re-sees the asset live
+        restores RUNNING through the normal upsert.
+        """
         row = self._session.get(AgentAssetRow, asset_id)
         if row is None:
             return False
         row.status = status
+        if status != "active":
+            states = json.loads(row.states_json or "[]")
+            if "RUNNING" in states:
+                states.remove("RUNNING")
+                row.states_json = json.dumps(states)
         return True
 
     def delete_asset(self, asset_id: str) -> None:
@@ -120,6 +135,8 @@ class AgentInventoryRepository:
             row.cmdline = instance.cmdline
             row.cwd = instance.cwd
             row.parent_chain_json = json.dumps(list(instance.parent_chain))
+            row.origin = instance.origin
+            row.container_id = instance.container_id
             row.status = instance.status
             row.evidence_json = json.dumps(list(instance.evidence), ensure_ascii=False)
             row.started_at = instance.started_at or row.started_at
@@ -222,6 +239,8 @@ class AgentInventoryRepository:
                 "mcp_servers": json.loads(row.mcp_servers_json or "[]"),
                 "llm_endpoints": json.loads(row.llm_endpoints_json or "[]"),
                 "app_id": row.app_id,
+                "origin": row.origin or "host",
+                "container_id": row.container_id,
                 "status": row.status or "active",
                 "capabilities": json.loads(row.capabilities_json or "{}"),
                 "protection_status": row.protection_status,
@@ -238,6 +257,8 @@ class AgentInventoryRepository:
                 "process_name": row.process_name, "executable": row.executable,
                 "cmdline": row.cmdline, "cwd": row.cwd,
                 "parent_chain": json.loads(row.parent_chain_json or "[]"),
+                "origin": row.origin or "host",
+                "container_id": row.container_id,
                 "status": row.status,
                 "evidence": json.loads(row.evidence_json or "[]"),
                 "started_at": row.started_at, "last_seen_at": row.last_seen_at}

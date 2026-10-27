@@ -53,6 +53,11 @@ async function listPage(ctx) {
     { label: 'Agent', render: (row) => el('div', {}, [
       el('div', { class: 'primary-cell', text: row.name }),
       el('div', { class: 'muted', text: row.agent_type }),
+      ...(row.dependencies && row.dependencies.length ? [el('div', { class: 'muted',
+        text: `依赖 ${(row.dependencies).map((d) => `${d.name} ${d.version}`).join('、')}`,
+        title: row.dependencies.map((d) => `${d.name} ${d.version}`).join('、') })] : []),
+      ...(row.origin === 'docker' ? [badge({
+        label: `容器 ${(row.container_id || '').slice(0, 12)}`, cls: 'info' })] : []),
     ]) },
     { label: '状态', width: '140px', render: (row) => fragment(statesBadges(row.states)
       .concat(row.status === 'inactive' ? [badge({ label: '未活跃', cls: 'outline' })] : [])) },
@@ -114,6 +119,9 @@ async function detailPage(ctx, assetId) {
   // Three cards of equal height: identity / protection & capability / MCP.
   const facts = [
     ['状态', fragment(statesBadges(detail.states)), { stack: true }],
+    ['运行环境', detail.origin === 'docker'
+      ? badge({ label: `容器 ${(detail.container_id || '').slice(0, 12)}`, cls: 'info' })
+      : badge({ label: '宿主机', cls: 'outline' })],
     ['版本', mono(detail.version || 'UNKNOWN')],
     ['版本来源', detail.version_source],
     ['可执行文件', mono(detail.executable || '—')],
@@ -153,8 +161,8 @@ async function detailPage(ctx, assetId) {
       hint: mcp.items?.length ? `${mcp.items.length} 个` : '' }),
   ]));
 
-  // 项目与依赖：自建框架资产由进程→项目解析产生，这里展示它归属的应用与
-  // AI 依赖组件（包名/版本/来源），全部来自依赖元数据，不读取项目源码。
+  // 包含关系不再单独成卡：产品/应用内嵌的框架由「项目与依赖」的组件表
+  // 呈现（如 n8n 的 @langchain/core），避免同一依赖在详情页出现两次。
   const application = detail.application;
   if (application) {
     const sourceMap = {

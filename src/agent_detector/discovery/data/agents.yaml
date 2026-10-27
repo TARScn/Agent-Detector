@@ -106,6 +106,20 @@ agents:
       - 版本暂无只读来源（源码 checkout 的 pyproject 为占位符），诚实输出 UNKNOWN。
       - 前置拦截待适配。
 
+  - id: n8n
+    name: n8n
+    vendor: n8n
+    aliases: [n8n-io]
+    discovery: P1
+    monitor: P1
+    protect: PLANNED
+    hook: null
+    docs: https://docs.n8n.io/
+    notes:
+      - 双形态：宿主 npm 全局安装 / 官方 Docker 镜像（容器内进程改名为 n8n）。
+      - AI Agent 节点基于 LangChain（@langchain/core），依赖口径并存识别框架资产。
+      - 凭据与工作流存于 .n8n/database.sqlite，只探测存在性，永不读取。
+
   - id: zcode
     name: ZCode
     vendor: Z.ai

@@ -19,6 +19,24 @@ MAX_PROBES = max(0, min(int(os.getenv("AGENT_DETECTOR_MAX_PROBES", "20")), 100))
 # pathological process tables, like MAX_PROBES does for the HTTP prober.
 MAX_PROJECT_PROBES = max(0, min(int(os.getenv("AGENT_DETECTOR_MAX_PROJECTS", "40")), 500))
 
+# Docker channel (Docker Core): container discovery over the read-only Docker
+# API (list/inspect/top/get_archive) — docker exec is never used. Knobs clamp
+# like MAX_PROBES so a pathological daemon or a huge site-packages archive
+# cannot run away with a scan.
+DOCKER_ENABLED = _env_flag("AGENT_DETECTOR_DOCKER_ENABLED", "1")
+DOCKER_TIMEOUT_S = min(max(float(os.getenv("AGENT_DETECTOR_DOCKER_TIMEOUT", "20")),
+                           1.0), 300.0)
+DOCKER_MAX_CONTAINERS = max(0, min(int(os.getenv("AGENT_DETECTOR_DOCKER_MAX_CONTAINERS",
+                                                 "200")), 5000))
+DOCKER_READ_MAX_BYTES = max(1024, min(int(os.getenv("AGENT_DETECTOR_DOCKER_READ_MAX_BYTES",
+                                                    str(262144))), 16 * 1024 * 1024))
+DOCKER_ARCHIVE_BYTE_CAP = max(DOCKER_READ_MAX_BYTES,
+                              min(int(os.getenv("AGENT_DETECTOR_DOCKER_ARCHIVE_BYTE_CAP",
+                                                str(256 * 1024 * 1024))),
+                                  4 * 1024 * 1024 * 1024))
+DOCKER_ARCHIVE_TIME_CAP_S = min(max(float(os.getenv("AGENT_DETECTOR_DOCKER_ARCHIVE_TIME_CAP",
+                                                    "60")), 1.0), 600.0)
+
 MONITOR_INTERVAL = min(max(float(os.getenv("AGENT_DETECTOR_MONITOR_INTERVAL", "2.0")),
                            0.5), 60.0)
 MONITOR_SUPPRESS_SECONDS = min(max(int(os.getenv("AGENT_DETECTOR_MONITOR_SUPPRESS", "300")),

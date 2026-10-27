@@ -17,13 +17,16 @@ id: langchain
 name: LangChain
 vendor: LangChain
 revision: 1
-runtimes: [python]
+runtimes: [python, node]
 
 dependencies:
   any:
     - langchain
     - langchain-core
     - langchain-community
+    # npm scoped 包名（容器通道 node_modules 布局，如 n8n 内嵌的
+    # @langchain/core）；归一化保持 @ 与 /，与 Python 包名互不干扰。
+    - '@langchain/core'
 
 # 置信度合成与 client_rule 同款：base + 各状态权重，封顶 cap。
 confidence:

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from agent_detector import __version__
+from agent_detector.console.api.agent_view import app_name_map, merge_agent_rows
 from agent_detector.console.api.deps import Services, get_services
 from agent_detector.monitoring.collectors.host.sysmon import sysmon_available
 from agent_detector.core.config import (ALERT_RISK_LEVEL, BEHAVIOR_PATH_POLICY,
@@ -41,16 +42,20 @@ def overview(services: Services = Depends(_services)):
         alert_stats = AlertRepository(session).stats()
         components = AssetRepository(session).latest_snapshots()
         latest_scan = ScanRepository(session).latest_id()
-        running = {instance["asset_id"] for instance in instances
-                   if instance["asset_id"] in {a["asset_id"] for a in agents}}
-        # 只数未移除资产名下的实例：removed 资产的实例行要等下一次扫描才被
+        # 与资产清单同一合并口径（框架折叠进产品/应用实体），数字不打架。
+        counts: dict[str, int] = {}
+        for instance in instances:
+            counts[instance["asset_id"]] = counts.get(instance["asset_id"], 0) + 1
+        entities = merge_agent_rows(agents, app_name_map(session), counts)
+        # 只数未移除实体名下的实例：removed 资产的实例行要等下一次扫描才被
         # 退役（inventory 的收尾清理），两次扫描之间不能把幽灵算成运行中。
     protection: dict[str, int] = {}
-    for agent in agents:
+    for agent in entities:
         key = agent["protection_status"]
         protection[key] = protection.get(key, 0) + 1
+    running = sum(1 for agent in entities if agent["instance_count"] > 0)
     return {
-        "agents": {"total": len(agents), "running": len(running),
+        "agents": {"total": len(entities), "running": running,
                    "protection": protection},
         "behavior": {"events_today": summary["events_since"],
                      "blocked_today": summary["blocked_since"],

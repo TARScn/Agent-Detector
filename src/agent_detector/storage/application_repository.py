@@ -71,13 +71,22 @@ class ApplicationRepository:
         row = self._session.get(ApplicationRow, app_id)
         return self._app_dict(row) if row else None
 
+    def for_container(self, container_id: str) -> list[dict]:
+        """Applications that live inside one container (Docker channel)."""
+        statement = select(ApplicationRow).where(
+            ApplicationRow.container_id == container_id).order_by(
+            ApplicationRow.last_seen_at.desc())
+        return [self._app_dict(row) for row in self._session.scalars(statement)]
+
     def all_for_verification(self) -> list[dict]:
-        """(app_id, root_path, environment_path, runtime) for every application,
-        any status — the inputs the post-scan dependency re-check needs."""
+        """(app_id, root_path, environment_path, runtime, container_id) for every
+        application, any status — the inputs the post-scan re-check needs
+        (container_id routes container apps away from host-path checks)."""
         rows = self._session.scalars(select(ApplicationRow))
         return [{"app_id": row.app_id, "root_path": row.root_path,
                  "environment_path": row.environment_path,
-                 "runtime": row.runtime} for row in rows]
+                 "runtime": row.runtime,
+                 "container_id": row.container_id} for row in rows]
 
     def set_status(self, app_id: str, status: str) -> bool:
         """Post-scan verification verdict for an application not seen this scan."""

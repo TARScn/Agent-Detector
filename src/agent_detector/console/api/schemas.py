@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 class ScanRequest(BaseModel):
     active: bool = False
     """Also probe local HTTP listeners (never remote addresses)."""
+    docker: bool = True
+    """Include the Docker container channel (read-only API, never docker exec)."""
 
 
 class MonitorStartRequest(BaseModel):

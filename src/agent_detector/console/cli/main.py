@@ -39,6 +39,8 @@ def main(argv=None) -> int:
 
     scan = commands.add_parser("scan", help="执行一次资产扫描")
     scan.add_argument("--active", action="store_true", help="同时探测本机 HTTP 监听端口")
+    scan.add_argument("--no-docker", action="store_true",
+                      help="跳过 Docker 容器发现（默认自动探测本机 daemon，只读 API）")
     scan.add_argument("--json", action="store_true", help="输出原始 JSON")
 
     assets = commands.add_parser("assets", help="组件资产（含 MCP / 模型服务）")
@@ -159,7 +161,7 @@ def _serve(args, engine) -> int:
 
 
 def _scan(args, engine) -> int:
-    result = run_scan(engine, active=args.active)
+    result = run_scan(engine, active=args.active, docker_enabled=not args.no_docker)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return EXIT_OK
@@ -167,6 +169,11 @@ def _scan(args, engine) -> int:
     print(f"scan #{result['scan_id']} {result['mode']} {result['status']}: "
           f"{observations['processes']} processes, "
           f"{observations['listening_sockets']} listening sockets")
+    docker_stats = result.get("docker") or {}
+    print(f"  docker: {docker_stats.get('containers_total', 0)} containers, "
+          f"{docker_stats.get('candidates', 0)} candidates, "
+          f"{docker_stats.get('agents', 0)} agents"
+          + (f" ({docker_stats.get('error')})" if docker_stats.get("error") else ""))
     for agent in result.get("agent_assets", []):
         print(f"  [Agent] {agent['name']:<16} {agent['agent_type']:<14} "
               f"protection={agent['protection_status']:<13} "
@@ -199,17 +206,25 @@ def _agents(args, engine) -> int:
             counts: dict[str, int] = {}
             for instance in instances:
                 counts[instance["asset_id"]] = counts.get(instance["asset_id"], 0) + 1
-            assets = repository.list_assets()
+            from agent_detector.console.api.agent_view import (app_name_map,
+                                                               merge_agent_rows)
+            assets = merge_agent_rows(repository.list_assets(),
+                                      app_name_map(session), counts)
             if not assets:
                 print("尚未建立 Agent 清单；先运行 `agent-detector scan`")
                 return EXIT_OK
             for asset in assets:
+                container = (asset.get("container_id") or "")[:12]
                 print(f"{asset['name']:<16} {asset['agent_type']:<14} "
                       f"version={asset['version']:<12} "
                       f"protection={asset['protection_status']:<13} "
                       f"hook={asset['hook_state']:<13} "
                       f"instances={counts.get(asset['asset_id'], 0):<2} "
-                      f"mcp={len(asset['mcp_servers'])}")
+                      f"mcp={len(asset['mcp_servers'])}"
+                      + (f" container={container}" if container else ""))
+                for dependency in asset.get("dependencies", []):
+                    print(f"    依赖: {dependency['name']} {dependency['version']}"
+                          f"（{dependency['asset_type']}）")
                 for note in asset["notes"]:
                     print(f"    note: {note}")
             return EXIT_OK

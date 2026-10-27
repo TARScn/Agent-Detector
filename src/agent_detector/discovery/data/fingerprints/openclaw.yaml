@@ -91,3 +91,22 @@ confidence:
   configured: 0.2
   running: 0.25
   cap: 0.95
+
+# -----------------------------------------------------------------------------
+# 容器内布局（Docker 通道通用容器 client 机制读取；路径为容器内部绝对路径）。
+# 原 docker 通道的 OpenClaw 特例代码已数据化到这里 —— 宿主与容器共用一条规则。
+# -----------------------------------------------------------------------------
+container:
+  package: 'openclaw'
+  npm_roots:
+    - '/usr/local/lib/node_modules'
+    - '/usr/lib/node_modules'
+  config_json:
+    - path: '/root/.openclaw/openclaw.json'
+      keys_any: [gateway, agents, models]
+      confidence: 0.8
+  process_tokens:
+    - 'node_modules/openclaw'
+    - 'openclaw/openclaw.mjs'
+  image_keywords:
+    - openclaw
