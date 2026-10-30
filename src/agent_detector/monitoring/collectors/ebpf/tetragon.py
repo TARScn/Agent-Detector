@@ -71,3 +71,20 @@ def uninstall_commands() -> list[str]:
         "sudo bash /tmp/tetragon-"
         + TETRAGON_VERSION + "-amd64/uninstall.sh  # 或直接删除 /usr/local/bin/tetragon",
     ]
+
+
+# TracingPolicies shipped with the repo (phase 3): TCP connect + directory
+# write observation. Install = copy into the auto-load dir; print-only here.
+POLICY_FILES = ("tracing-policy-connect.yaml", "tracing-policy-file-writes.yaml")
+
+
+def policy_install_commands() -> list[str]:
+    commands: list[str] = []
+    for name in POLICY_FILES:
+        commands.append(
+            f"sudo cp configs/tetragon/{name} /etc/tetragon/tetragon.tp.d/{name}")
+    commands += [
+        "sudo systemctl restart tetragon",
+        "journalctl -u tetragon -n 20 --no-pager | grep -i -E 'policy|error'",
+    ]
+    return commands

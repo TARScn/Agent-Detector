@@ -55,13 +55,15 @@ def test_parses_exit_and_kprobe_events():
     exits = [event for event in events if event.etype == "process_exit"]
     assert {event.pid for event in exits} == {4101, 4200}
     kprobes = [event for event in events if event.etype == "process_kprobe"]
-    assert len(kprobes) == 1
-    assert kprobes[0].function_name == "tcp_v4_connect"
-    assert kprobes[0].pid == 4101
+    assert {event.function_name for event in kprobes} == {
+        "security_socket_connect", "security_file_permission"}
+    connect = next(event for event in kprobes
+                   if event.function_name == "security_socket_connect")
+    assert connect.pid == 4101 and connect.exec_id
 
 
-def test_fixture_yields_seven_events_skipping_garbage_line():
-    assert len(load_events()) == 7
+def test_fixture_yields_nine_events_skipping_garbage_line():
+    assert len(load_events()) == 9
 
 
 def test_garbage_and_foreign_json_return_none():

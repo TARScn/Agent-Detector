@@ -1,0 +1,25 @@
+# Agent Detector · Tetragon TracingPolicy：进程级 TCP 外联观察。
+# 安装：sudo cp 本文件到 /etc/tetragon/tetragon.tp.d/ 后
+#       `sudo systemctl restart tetragon`（tetragon 启动时自动加载该目录）。
+# 只观察 connect 调用（系统级低频），事件归一为 behavior_events 的
+# net.connect / NETWORK_CONNECT（target=IP:port）；AF_UNIX/AF_NETLINK 本地
+# IPC 由采集端丢弃，不入库。内容不可见（TLS 载荷不采集）。
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: agent-detector-connect
+spec:
+  kprobes:
+    - call: "security_socket_connect"
+      syscall: false
+      args:
+        - index: 0
+          type: "sockaddr"
+      selectors:
+        - matchArgs:
+            # 仅 AF_INET(2) / AF_INET6(10)：sockaddr 首字段是地址族
+            - index: 0
+              operator: "SAddr"
+              values:
+                - "0.0.0.0/0"
+                - "::/0"

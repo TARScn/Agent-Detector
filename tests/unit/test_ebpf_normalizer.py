@@ -2,9 +2,7 @@
 from pathlib import Path
 
 from agent_detector.core.facts import FACT_KINDS
-from agent_detector.monitoring.collectors.ebpf.normalizer import (fact_from_event,
-                                                                  normalize_lines)
-from agent_detector.monitoring.collectors.ebpf.parser import parse_event_json
+from agent_detector.monitoring.collectors.ebpf.normalizer import normalize_lines
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "tetragon" / "sample.jsonl"
 LINES = FIXTURE.read_text(encoding="utf-8").splitlines()
@@ -42,12 +40,24 @@ def test_container_fact_carries_container_and_evidence_tags():
     assert "container:b13f15ab2a169c85976efbd3a28b57f" in fact.evidence
 
 
-def test_kprobe_event_not_normalized_until_net_phase():
-    events = [parse_event_json(line) for line in LINES]
-    kprobe = next(event for event in events
-                  if event is not None and event.etype == "process_kprobe")
-    assert fact_from_event(kprobe) is None
+def test_connect_kprobe_maps_to_net_connect():
+    fact = next(f for f in facts() if f.kind == "net.connect")
+    assert fact.endpoint == "93.184.216.34:80"
+    assert fact.pid == 4101 and fact.process_name == "ls"
+    assert "hook:security_socket_connect" in fact.evidence
+    # kprobe events share one exec_id: the serial carries event-level salt
+    assert fact.serial.endswith("security_socket_connect")
+
+
+def test_file_write_kprobe_maps_to_file_write_and_reads_stay_off():
+    write = next(f for f in facts() if f.kind == "file.write")
+    assert write.path == "/opt/agent/state.json"
+    assert write.pid == 4100 and "hook:security_file_permission" in write.evidence
+    # the MAY_READ(4) kprobe is not a fact: reads are off by default
+    assert not any(f.path == "/opt/agent/state.json" and f.kind == "file.read"
+                   for f in facts())
+    assert len([f for f in facts() if f.kind == "file.write"]) == 1
 
 
 def test_normalize_lines_count():
-    assert len(facts()) == 6  # 4 execs + 2 exits; kprobe and garbage skipped
+    assert len(facts()) == 8  # 4 execs + 2 exits + connect + one write

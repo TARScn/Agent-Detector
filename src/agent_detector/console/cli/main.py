@@ -389,6 +389,7 @@ def _channels(args, engine) -> int:
 def _tetragon(args, engine) -> int:
     from agent_detector.core.config import TETRA_LOG
     from agent_detector.monitoring.collectors.ebpf.tetragon import (install_commands,
+                                                                    policy_install_commands,
                                                                     tetragon_available,
                                                                     uninstall_commands)
 
@@ -400,6 +401,9 @@ def _tetragon(args, engine) -> int:
         print(f"tetragon: unavailable — {status.reason}")
     print("\n# 部署（systemd 单机方式；本工具只打印，不提权）")
     for command in install_commands(log_path):
+        print(command)
+    print("\n# 网络与文件观察（TracingPolicy，安装后重启 tetragon 生效）")
+    for command in policy_install_commands():
         print(command)
     print("\n# 卸载")
     for command in uninstall_commands():
