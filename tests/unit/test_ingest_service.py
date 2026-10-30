@@ -68,6 +68,8 @@ def test_replay_stores_attributed_behaviour(tmp_path):
     assert "rule:SCRIPT_EXEC" in script["evidence"]
     assert script["protocol"] == "SYS" and script["flow_id"] == "auditd-900101"
     assert script["observed_at"].startswith("2025-")
+    # "started" means the exec launched: execution succeeded, not failed.
+    assert script["execution_status"] == "succeeded"
 
     move = next(event for event in events if event["operation"] == "FILE_MOVE")
     assert move["target"] == ("/home/agent/agent-lab/notes.md"
@@ -77,6 +79,7 @@ def test_replay_stores_attributed_behaviour(tmp_path):
     denied = next(event for event in events
                   if event["operation"] == "SCRIPT_EXEC" and event["result"] == "denied")
     assert denied["target"] == "bash"
+    assert denied["execution_status"] == "failed"
 
 
 def test_unattributed_events_are_dropped_by_default(tmp_path):

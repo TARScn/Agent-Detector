@@ -572,7 +572,11 @@ class BehaviorIngestService:
             target=(target or "")[:512] or None, result=fact.result,
             container_id=fact.container_id[:96] if fact.container_id else None,
             risk_level=risk.value, decision="audit",
-            execution_status=("succeeded" if fact.result == "success" else "failed"))
+            # "started" is a successful exec launch (the audit/sysmon/tetragon
+            # normalizers emit it for every completed exec), so it counts as
+            # succeeded; "denied"/"failed" mean the operation did not go through.
+            execution_status=("succeeded" if fact.result in ("success", "started")
+                              else "failed"))
 
     @staticmethod
     def _evidence(fact: BehaviorFact, derived: DerivedBehavior,
