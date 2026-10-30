@@ -64,6 +64,10 @@ BEHAVIOR_PATH_POLICY = _env_choice("AGENT_DETECTOR_BEHAVIOR_PATH_POLICY",
 BEHAVIOR_STORE_ARGV = _env_flag("AGENT_DETECTOR_BEHAVIOR_STORE_ARGV")
 BEHAVIOR_POLL_INTERVAL = min(max(float(os.getenv("AGENT_DETECTOR_BEHAVIOR_POLL_INTERVAL",
                                                  "2.0")), 0.5), 60.0)
+# eBPF channel (Tetragon): the JSON export file the tetragon service writes
+# (--export-filename / /etc/tetragon/tetragon.conf.d/export-filename). The
+# collector only ever tails this file; it never talks to the kernel itself.
+TETRA_LOG = os.getenv("AGENT_DETECTOR_TETRA_LOG", "/var/log/tetragon/events.json")
 
 # ---------------------------------------------------------------------------
 # V0.2: control plane, hook bridge and policy (design sections 5, 6, 8)

@@ -18,7 +18,7 @@ class MonitorStartRequest(BaseModel):
 
 class BehaviorStartRequest(BaseModel):
     mode: str | None = Field(default=None,
-                             description="sysmon | auditd | poll（replay 走 CLI）")
+                             description="sysmon | auditd | tetragon | poll（replay 走 CLI）")
     log_path: str | None = None
     from_start: bool = False
 

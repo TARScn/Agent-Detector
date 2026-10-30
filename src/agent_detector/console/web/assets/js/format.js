@@ -38,6 +38,7 @@ export const SOURCE = {
   native_hook: { label: 'Agent Hook', icon: 'shield' },
   sysmon: { label: 'Sysmon', icon: 'activity' },
   auditd: { label: 'auditd', icon: 'terminal' },
+  tetragon: { label: 'eBPF', icon: 'activity' },
   poll: { label: '进程采样', icon: 'activity' },
   netmon: { label: '网络调用', icon: 'globe' },
   scan: { label: '扫描', icon: 'search' },

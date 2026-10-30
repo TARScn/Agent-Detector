@@ -44,6 +44,8 @@ _ADDITIVE_COLUMNS["agent_assets"]["origin"] = "VARCHAR(16) DEFAULT 'host'"
 _ADDITIVE_COLUMNS["agent_assets"]["container_id"] = "VARCHAR(96)"
 _ADDITIVE_COLUMNS["agent_instances"] = {"origin": "VARCHAR(16) DEFAULT 'host'",
                                         "container_id": "VARCHAR(96)"}
+# eBPF channel (Tetragon): container hex-ID prefix on behavior events
+_ADDITIVE_COLUMNS["behavior_events"]["container_id"] = "VARCHAR(96)"
 
 
 def ensure_schema(engine: Engine) -> list[str]:

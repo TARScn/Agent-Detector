@@ -78,7 +78,7 @@ def test_channel_status_and_behavior_lifecycle(telemetry_client):
     status = telemetry_client.get("/api/v1/telemetry/status").json()
     assert status["behavior"]["running"] is False
     channels = {item["id"] for item in status["channels"]}
-    assert {"sysmon", "auditd", "poll", "netmon", "native_hook"} == channels
+    assert {"sysmon", "auditd", "tetragon", "poll", "netmon", "native_hook"} == channels
 
     started = telemetry_client.post("/api/v1/telemetry/behavior/start",
                                     json={"mode": "auditd"}).json()

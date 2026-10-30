@@ -15,6 +15,7 @@ from agent_detector.storage import (AssetRepository,
                                                      ScanRepository)
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "audit" / "scenario.log"
+TETRA_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "tetragon" / "sample.jsonl"
 AGENT_PROC = ProcessInfo(pid=4100, name="claude", cmdline=("claude",),
                          create_time=1.0, ppid=1)
 ASSET_ID = "claude-code--abc123def456"
@@ -223,3 +224,75 @@ def test_start_stop_auditd_loop(tmp_path):
     time.sleep(0.8)
     stopped = service.stop()
     assert stopped["running"] is False and stopped["batches"] >= 1
+
+
+# ---------------------------------------------------------------- tetragon
+
+
+def test_tetragon_replay_stores_attributed_events_and_skips_exits(tmp_path):
+    engine = make_engine(tmp_path / "db.sqlite3")
+    seed_asset(engine)
+    service = make_service(engine)
+    result = service.run_replay(TETRA_FIXTURE, format="tetragon")
+    assert result["facts"] == 6   # 4 exec + 2 exit facts parsed
+    assert result["events"] == 3  # exits are lifecycle, container exec unattributed
+    assert service.exits_seen == 2
+
+    events = stored_events(engine, source="tetragon")
+    assert {event["operation"] for event in events} == {"SCRIPT_EXEC", "COMMAND_EXEC"}
+    script = next(event for event in events if event["operation"] == "SCRIPT_EXEC")
+    # label follows the last exec image (the seeded claude node was replaced by
+    # the python3 exec fact); the asset identity is what attribution proves.
+    assert script["agent_label"] == "python3" and script["asset_id"] == ASSET_ID
+    assert script["pid"] == 4100 and script["target"] == "main.py"
+    assert "self_asset_pid" in script["evidence"]
+    assert script["evidence"][0] == "tetragon"
+    assert script["flow_id"] == "tetragon-dGVzdGhvc3Q6MTAwMDA6NDEwMA=="
+    assert script["observed_at"].startswith("2026-")
+    ls_rows = sorted((event["pid"], event["target"]) for event in events
+                     if event["operation"] == "COMMAND_EXEC")
+    # pid is part of the suppression key: two ls processes stay distinct rows
+    assert ls_rows == [(4101, "/bin/ls -la"), (4102, "/bin/ls /opt/agent")]
+    assert all("ancestor_asset_pid" in event["evidence"]
+               for event in events if event["operation"] == "COMMAND_EXEC")
+
+
+def test_tetragon_replay_container_event_keeps_container_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(isvc, "BEHAVIOR_INCLUDE_UNATTRIBUTED", True)
+    engine = make_engine(tmp_path / "db.sqlite3")
+    service = make_service(engine)
+    result = service.run_replay(TETRA_FIXTURE, format="tetragon")
+    assert result["events"] == 4
+    container = next(event for event in stored_events(engine, source="tetragon")
+                     if event["pid"] == 4200)
+    assert container["container_id"] == "b13f15ab2a169c85976efbd3a28b57f"
+    assert container["asset_id"] is None  # container attribution lands in P2
+    assert "container:b13f15ab2a169c85976efbd3a28b57f" in container["evidence"]
+    assert container["operation"] == "SCRIPT_EXEC" and container["target"] == "inline"
+
+
+def test_tetragon_exit_fact_evicts_graph_node(tmp_path):
+    engine = make_engine(tmp_path / "db.sqlite3")
+    service = make_service(engine)
+    graph = service.graph
+    graph.observe_exec(pid=4101, ppid=4100, name="ls")
+    assert graph.node(4101) is not None
+    service.run_replay(TETRA_FIXTURE, format="tetragon")
+    assert graph.node(4101) is None  # exit facts keep the graph honest
+
+
+def test_tetragon_replay_rejects_unknown_format(tmp_path):
+    engine = make_engine(tmp_path / "db.sqlite3")
+    service = make_service(engine)
+    with pytest.raises(BehaviorIngestError):
+        service.run_replay(TETRA_FIXTURE, format="sysmon")
+
+
+def test_tetragon_mode_defaults_to_export_log(tmp_path):
+    engine = make_engine(tmp_path / "db.sqlite3")
+    service = BehaviorIngestService(engine, mode="tetragon",
+                                    process_snapshot=lambda: [],
+                                    graph=offline_graph())
+    assert service.mode == "tetragon" and service.source == "tetragon"
+    assert service.log_path.as_posix().endswith("events.json")
+    assert "tetragon" in service.status()["log_path"]

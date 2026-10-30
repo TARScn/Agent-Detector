@@ -78,6 +78,15 @@ class ProcessGraph:
                          else (existing.create_time if existing else None)))
         self._prune()
 
+    def observe_exit(self, pid: int) -> bool:
+        """Drop a graph node on process exit; True when a node was removed.
+
+        Exit is lifecycle bookkeeping, not a behavior: the fact never reaches
+        the rule engine or behavior_events. A live lookup re-seeds the node if
+        the pid was actually recycled between the exec and the exit event.
+        """
+        return self._nodes.pop(pid, None) is not None
+
     def node(self, pid: int | None, *, verify: bool = False) -> ProcNode | None:
         if pid is None or pid <= 0:
             return None

@@ -1,6 +1,6 @@
-"""System behavior ingest: Sysmon / auditd tail / replay / psutil polling.
+"""System behavior ingest: Sysmon / auditd tail / Tetragon tail / replay / psutil polling.
 
-One pipeline, four collectors. Per batch: collect facts → grade risk → derive
+One pipeline, five collectors. Per batch: collect facts → grade risk → derive
 the high-level behavior (rule engine) → attribute to an Agent (process graph +
 fingerprints) → suppression → store into behavior_events, raising an alert when
 the grade crosses the configured bar (design sections 4.1, 6.1).
@@ -28,6 +28,9 @@ from agent_detector.monitoring.detection.attribution import AgentAttributor, Att
 from agent_detector.monitoring.collectors.audit.normalizer import BehaviorFact, normalize_event
 from agent_detector.monitoring.collectors.audit.parser import AuditEvent, AuditLogParser
 from agent_detector.monitoring.collectors.audit.reader import ReplayReader, TailReader
+from agent_detector.monitoring.collectors.ebpf.normalizer import fact_from_event as tetra_fact_from_event
+from agent_detector.monitoring.collectors.ebpf.parser import parse_event_json as tetra_parse_event_json
+from agent_detector.monitoring.collectors.ebpf.tetragon import tetragon_available
 from agent_detector.monitoring.detection.behavior_rules import (DerivedBehavior, load_behavior_rules,
                                                     match_fact)
 from agent_detector.monitoring.detection.process_graph import ProcessGraph
@@ -43,7 +46,8 @@ from agent_detector.core.config import (ALERT_RISK_LEVEL, BEHAVIOR_AUDIT_KEYS,
                                           BEHAVIOR_MAX_EVENTS_PER_MINUTE,
                                           BEHAVIOR_PATH_POLICY, BEHAVIOR_POLL_INTERVAL,
                                           BEHAVIOR_RETENTION_DAYS, BEHAVIOR_STORE_ARGV,
-                                          BEHAVIOR_SUPPRESS_SECONDS, SYSMON_CHANNEL)
+                                          BEHAVIOR_SUPPRESS_SECONDS, SYSMON_CHANNEL,
+                                          TETRA_LOG)
 from agent_detector.core.security import redact
 from agent_detector.monitoring.collectors.host.process import collect_processes
 from agent_detector.core.enums import RiskLevel
@@ -55,7 +59,7 @@ from agent_detector.storage import AlertRepository, AssetRepository
 
 logger = logging.getLogger(__name__)
 
-MODES = ("sysmon", "auditd", "poll", "replay")
+MODES = ("sysmon", "auditd", "poll", "tetragon", "replay")
 _SUPPRESSION_CACHE_LIMIT = 4000
 _EVIDENCE_ARGV_LIMIT = 400
 
@@ -65,14 +69,18 @@ class BehaviorIngestError(RuntimeError):
 
 
 def default_mode() -> str:
-    """Best channel for this host: Sysmon on Windows, auditd on Linux, else poll.
+    """Best channel for this host: Sysmon on Windows, eBPF/auditd on Linux, else poll.
 
     Sysmon is only chosen when its event channel is actually readable; claiming
-    the channel without it would silently produce an empty feed.
+    the channel without it would silently produce an empty feed. On Linux the
+    Tetragon export file wins when it exists and is readable — richer facts
+    (exit, container id) than auditd — with auditd as the fallback.
     """
     if platform.system() == "Windows":
         return "sysmon" if sysmon_available(SYSMON_CHANNEL).available else "poll"
     if platform.system() == "Linux":
+        if tetragon_available(TETRA_LOG).available:
+            return "tetragon"
         return "auditd"
     return "poll"
 
@@ -89,7 +97,11 @@ class BehaviorIngestService:
         self.mode = (mode or default_mode()).lower()
         if self.mode not in MODES:
             raise BehaviorIngestError(f"unknown behavior mode: {mode}")
-        self.log_path = Path(log_path) if log_path else Path(BEHAVIOR_AUDIT_LOG)
+        if log_path:
+            self.log_path = Path(log_path)
+        else:
+            self.log_path = Path(TETRA_LOG if self.mode == "tetragon"
+                                 else BEHAVIOR_AUDIT_LOG)
         self.sysmon_channel = SYSMON_CHANNEL
         self.keys = tuple(keys) if keys else BEHAVIOR_AUDIT_KEYS
         self.interval = interval or BEHAVIOR_POLL_INTERVAL
@@ -113,7 +125,8 @@ class BehaviorIngestService:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
-        self._last_seen: dict[tuple[str, str, str], float] = {}
+        self._source_override: str | None = None
+        self._last_seen: dict[tuple[str, str, str, int], float] = {}
         self._recent: list[float] = []
         self._last_purge = 0.0
 
@@ -121,6 +134,7 @@ class BehaviorIngestService:
         self.batches = 0
         self.records_read = 0
         self.facts_seen = 0
+        self.exits_seen = 0
         self.events_stored = 0
         self.suppressed = 0
         self.dropped_no_rule = 0
@@ -136,12 +150,15 @@ class BehaviorIngestService:
 
     @property
     def source(self) -> str:
-        return {"poll": "poll", "sysmon": "sysmon"}.get(self.mode, "auditd")
+        if self._source_override:
+            return self._source_override
+        return {"poll": "poll", "sysmon": "sysmon",
+                "tetragon": "tetragon"}.get(self.mode, "auditd")
 
     def status(self) -> dict:
         return {
             "running": self.running, "mode": self.mode,
-            "log_path": str(self.log_path) if self.mode in ("auditd", "replay") else None,
+            "log_path": str(self.log_path) if self.mode in ("auditd", "tetragon", "replay") else None,
             "log_readable": self._log_readable(),
             "sysmon_channel": self.sysmon_channel if self.mode == "sysmon" else None,
             "sysmon": self._sysmon.status() if self._sysmon else
@@ -155,6 +172,7 @@ class BehaviorIngestService:
             "retention_days": BEHAVIOR_RETENTION_DAYS,
             "started_at": self.started_at, "batches": self.batches,
             "records_read": self.records_read, "facts": self.facts_seen,
+            "exits_seen": self.exits_seen,
             "events": self.events_stored, "suppressed": self.suppressed,
             "dropped_no_rule": self.dropped_no_rule,
             "dropped_unattributed": self.dropped_unattributed,
@@ -233,6 +251,16 @@ class BehaviorIngestService:
                 self._seed_graph()
                 self._poll.prime()
             return
+        if self.mode == "tetragon":
+            if self._reader is None:
+                try:
+                    with self.log_path.open("r", encoding="utf-8", errors="replace"):
+                        pass
+                except OSError as exc:
+                    raise BehaviorIngestError(self._tetra_hint(exc)) from exc
+                self._reader = TailReader(self.log_path, from_start=self._from_start)
+                self._seed_graph()
+            return
         if self._reader is None:
             try:
                 with self.log_path.open("r", encoding="utf-8", errors="replace"):
@@ -246,6 +274,12 @@ class BehaviorIngestService:
         return (f"cannot read audit log {self.log_path}: {exc}. auditd logs are "
                 "usually root-only: run the collector as root, or set log_group in "
                 "/etc/audit/auditd.conf to a group this user belongs to.")
+
+    def _tetra_hint(self, exc: OSError) -> str:
+        return (f"cannot read Tetragon export {self.log_path}: {exc}. the file "
+                "appears when the tetragon service runs with --export-filename "
+                "(default 600 root:root) — start the service or run the collector "
+                "as root / relax the permission.")
 
     def _seed_graph(self) -> None:
         try:
@@ -284,13 +318,21 @@ class BehaviorIngestService:
         self._maybe_purge(time.monotonic())
         return stored
 
-    def run_replay(self, path) -> dict:
-        """One-shot processing of a saved audit log (works on any platform)."""
+    def run_replay(self, path, format: str = "auditd") -> dict:
+        """One-shot processing of a saved export file (works on any platform).
+
+        ``format`` picks the line parser: ``auditd`` (default, text format) or
+        ``tetragon`` (JSON lines). Attribution and storage are identical.
+        """
+        if format not in ("auditd", "tetragon"):
+            raise BehaviorIngestError(f"unknown replay format: {format}")
         with self._lock:
             if self.running:
                 raise BehaviorIngestError("stop the running ingest before replay")
             previous_mode = self.mode
             self.mode = "replay"
+            # replayed lines keep the channel they came from, not "auditd"
+            self._source_override = "tetragon" if format == "tetragon" else None
         try:
             # Ancestry for agents that started before the captured window comes
             # from the live process snapshot; agents that exec inside the log are
@@ -301,22 +343,30 @@ class BehaviorIngestService:
             facts: list[BehaviorFact] = []
             for line in ReplayReader(path).lines():
                 self.records_read += 1
+                if format == "tetragon":
+                    event = tetra_parse_event_json(line)
+                    fact = tetra_fact_from_event(event) if event is not None else None
+                    if fact is not None:
+                        facts.append(fact)
+                    continue
                 for event in parser.feed(line):
                     fact = normalize_event(event, keys=keys)
                     if fact is not None:
                         facts.append(fact)
-            for event in parser.flush():
-                fact = normalize_event(event, keys=keys)
-                if fact is not None:
-                    facts.append(fact)
+            if format != "tetragon":
+                for event in parser.flush():
+                    fact = normalize_event(event, keys=keys)
+                    if fact is not None:
+                        facts.append(fact)
             self.facts_seen += len(facts)
             stored = self._process_facts(facts)
             self.batches += 1
         finally:
             with self._lock:
                 self.mode = previous_mode
-        return {"log_path": str(path), "facts": len(facts), "events": len(stored),
-                "items": stored}
+                self._source_override = None
+        return {"log_path": str(path), "format": format, "facts": len(facts),
+                "events": len(stored), "items": stored}
 
     # ---------------------------------------------------------------- collect
     def _collect_facts(self) -> list[BehaviorFact]:
@@ -329,6 +379,19 @@ class BehaviorIngestService:
             for event in self._sysmon.poll():
                 self.records_read += 1
                 fact = fact_from_event(event)
+                if fact is not None:
+                    facts.append(fact)
+            return facts
+        if self.mode == "tetragon":
+            if self._reader is None:
+                return []
+            facts: list[BehaviorFact] = []
+            for line in self._reader.poll():
+                self.records_read += 1
+                event = tetra_parse_event_json(line)
+                if event is None:
+                    continue
+                fact = tetra_fact_from_event(event)
                 if fact is not None:
                     facts.append(fact)
             return facts
@@ -357,6 +420,12 @@ class BehaviorIngestService:
         stored: list[dict] = []
         now = time.monotonic()
         for fact in facts:
+            if fact.kind == "proc.exit":
+                # Lifecycle bookkeeping: keep the graph honest about dead pids,
+                # never a stored behavior or a risk signal on its own.
+                self.exits_seen += 1
+                self.graph.observe_exit(fact.pid)
+                continue
             derived = match_fact(fact, rules)
             if derived is None:
                 self.dropped_no_rule += 1
@@ -372,7 +441,11 @@ class BehaviorIngestService:
                 self.dropped_unattributed += 1
                 continue
             target = self._target_for(fact, derived)
-            key = (attribution.agent_label, derived.operation, target or "")
+            # pid in the key: different processes of one agent must not swallow
+            # each other, while the same behavior from one process stays one
+            # row per window — across channels too (no source in the key).
+            key = (attribution.agent_label, derived.operation, target or "",
+                   fact.pid)
             last = self._last_seen.get(key)
             if last is not None and now - last < self.suppress_seconds:
                 self.suppressed += 1
@@ -484,6 +557,7 @@ class BehaviorIngestService:
             pid=fact.pid, ppid=fact.ppid,
             process_name=(fact.process_name or "")[:80] or None,
             target=(target or "")[:512] or None, result=fact.result,
+            container_id=fact.container_id[:96] if fact.container_id else None,
             risk_level=risk.value, decision="audit",
             execution_status=("succeeded" if fact.result == "success" else "failed"))
 

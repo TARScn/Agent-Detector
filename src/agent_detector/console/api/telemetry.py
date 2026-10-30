@@ -18,8 +18,9 @@ from agent_detector.console.api.deps import Services, get_services
 from agent_detector.console.api.schemas import BehaviorStartRequest, MonitorStartRequest
 from agent_detector.monitoring.collectors.audit.rules_template import (build_rules, install_commands,
                                                            uninstall_commands)
+from agent_detector.monitoring.collectors.ebpf.tetragon import tetragon_available
 from agent_detector.monitoring.collectors.host.sysmon import sysmon_available
-from agent_detector.core.config import SYSMON_CHANNEL
+from agent_detector.core.config import SYSMON_CHANNEL, TETRA_LOG
 from agent_detector.monitoring.services.ingest import BehaviorIngestError
 from agent_detector.monitoring.services.monitor import MonitorError
 
@@ -36,6 +37,7 @@ def telemetry_status(services: Services = Depends(_services)):
     ingest = services.ingest
     assert ingest is not None and services.monitor is not None
     sysmon = sysmon_available(SYSMON_CHANNEL)
+    tetragon = tetragon_available(TETRA_LOG)
     return {
         "host_platform": platform.system(),
         "monitor": services.monitor.status(),
@@ -43,6 +45,9 @@ def telemetry_status(services: Services = Depends(_services)):
         "channels": [
             {"id": "sysmon", "name": "Windows Sysmon", "available": sysmon.available,
              "detail": sysmon.reason, "platform": "Windows"},
+            {"id": "tetragon", "name": "eBPF (Tetragon)", "available": tetragon.available,
+             "detail": tetragon.reason or "进程/网络/文件事件，含容器身份",
+             "platform": "Linux"},
             {"id": "auditd", "name": "Linux auditd", "available": _audit_available(),
              "detail": _audit_detail(), "platform": "Linux"},
             {"id": "poll", "name": "采样降级模式", "available": True,

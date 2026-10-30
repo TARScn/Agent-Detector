@@ -71,15 +71,20 @@ def main(argv=None) -> int:
     monitor.add_argument("--interval", type=float, default=None)
 
     collect = commands.add_parser("collect", help="采集系统行为事实")
-    collect.add_argument("--mode", choices=["sysmon", "auditd", "poll"], default=None,
-                         help="默认：Windows 有 Sysmon 用 sysmon，Linux 用 auditd，否则 poll")
-    collect.add_argument("--log", type=Path, default=None, help="audit 日志路径")
+    collect.add_argument("--mode", choices=["sysmon", "auditd", "tetragon", "poll"],
+                         default=None,
+                         help="默认：Windows 有 Sysmon 用 sysmon，Linux 有 Tetragon "
+                              "导出用 tetragon，其次 auditd，否则 poll")
+    collect.add_argument("--log", type=Path, default=None,
+                         help="日志路径（auditd 日志或 Tetragon JSON 导出文件）")
     collect.add_argument("--duration", type=float, default=60.0)
     collect.add_argument("--interval", type=float, default=None)
     collect.add_argument("--from-start", action="store_true", help="从日志开头开始处理")
 
-    replay = commands.add_parser("replay", help="离线回放一份 audit 日志（任意平台）")
+    replay = commands.add_parser("replay", help="离线回放一份采集日志（任意平台）")
     replay.add_argument("log", type=Path)
+    replay.add_argument("--format", choices=["auditd", "tetragon"], default="auditd",
+                        help="日志格式：auditd 文本（默认）或 Tetragon JSON 行")
     replay.add_argument("--json", action="store_true")
 
     commands.add_parser("channels", help="查看各采集通道可用状态")
@@ -91,6 +96,10 @@ def main(argv=None) -> int:
     audit_rules.add_argument("--no-net", action="store_true")
     audit_rules.add_argument("--kill", action="store_true")
     audit_rules.add_argument("--persistent", action="store_true")
+
+    tetragon = commands.add_parser("tetragon", help="Tetragon 通道状态与部署命令")
+    tetragon.add_argument("--log", type=Path, default=None,
+                          help="JSON 导出文件路径（默认 /var/log/tetragon/events.json）")
 
     policy = commands.add_parser("policy", help="策略规则与决策自检")
     policy_commands = policy.add_subparsers(dest="policy_command", required=True)
@@ -132,6 +141,7 @@ def main(argv=None) -> int:
         "serve": _serve, "scan": _scan, "assets": _assets, "agents": _agents,
         "events": _events, "alerts": _alerts, "monitor": _monitor, "collect": _collect,
         "replay": _replay, "channels": _channels, "audit-rules": _audit_rules,
+        "tetragon": _tetragon,
         "policy": _policy, "hooks": _hooks, "purge": _purge,
     }
     return handlers[args.command](args, engine)
@@ -341,13 +351,14 @@ def _collect(args, engine) -> int:
 def _replay(args, engine) -> int:
     from agent_detector.monitoring.services.ingest import BehaviorIngestService
 
-    result = BehaviorIngestService(engine, mode="replay").run_replay(args.log)
+    result = BehaviorIngestService(engine, mode="replay").run_replay(
+        args.log, format=args.format)
     if args.json:
         print(json.dumps({key: value for key, value in result.items() if key != "items"},
                          ensure_ascii=False, indent=2))
         return EXIT_OK
-    print(f"replayed {result['log_path']}: {result['facts']} fact(s), "
-          f"{result['events']} event(s) stored")
+    print(f"replayed {result['log_path']} ({result['format']}): "
+          f"{result['facts']} fact(s), {result['events']} event(s) stored")
     for item in result["items"]:
         print(f"  {item['agent_label']} -> {item['operation']} "
               f"{item['target'] or ''} [pid {item['pid']}] risk={item['risk_level']}")
@@ -358,6 +369,7 @@ def _channels(args, engine) -> int:
     import platform
 
     from agent_detector.monitoring.collectors.host.sysmon import sysmon_available
+    from agent_detector.monitoring.collectors.ebpf.tetragon import tetragon_available
     from agent_detector.core.config import SYSMON_CHANNEL
 
     print(f"platform: {platform.system()} {platform.release()}")
@@ -365,9 +377,33 @@ def _channels(args, engine) -> int:
     print(f"sysmon  : {'available' if sysmon.available else 'unavailable'} "
           f"({sysmon.reason or sysmon.channel})")
     print(f"auditd  : {'available (Linux)' if platform.system() == 'Linux' else 'unavailable'}")
+    tetra = tetragon_available()
+    print(f"tetragon: {'available' if tetra.available else 'unavailable'} "
+          f"({tetra.reason or tetra.log_path})")
     print("poll    : available (无需权限，仅进程执行级)")
     print("netmon  : available (只读 socket 表与 DNS 缓存)")
     print("hook    : 需要为每个 Agent 安装 Hook，见 hooks status")
+    return EXIT_OK
+
+
+def _tetragon(args, engine) -> int:
+    from agent_detector.core.config import TETRA_LOG
+    from agent_detector.monitoring.collectors.ebpf.tetragon import (install_commands,
+                                                                    tetragon_available,
+                                                                    uninstall_commands)
+
+    log_path = str(args.log) if args.log else TETRA_LOG
+    status = tetragon_available(log_path)
+    if status.available:
+        print(f"tetragon: available ({log_path})")
+    else:
+        print(f"tetragon: unavailable — {status.reason}")
+    print("\n# 部署（systemd 单机方式；本工具只打印，不提权）")
+    for command in install_commands(log_path):
+        print(command)
+    print("\n# 卸载")
+    for command in uninstall_commands():
+        print(command)
     return EXIT_OK
 
 
