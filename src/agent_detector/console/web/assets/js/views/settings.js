@@ -114,7 +114,7 @@ export async function render(ctx) {
     el('li', {}, ['Named Pipe + 用户 SID 决策通道（现为 loopback HTTP + Token） ', todo('待开发')]),
     el('li', {}, ['策略可视化编辑与签名、企业托管下发 ', todo('待开发')]),
     el('li', {}, ['WSL2 内部采集 ', todo('待开发')]),
-    el('li', {}, ['eBPF 网络与文件 TracingPolicy（进程事件已上线）、ETW 通道 ', todo('部分完成')]),
+    el('li', {}, ['ETW 通道（Windows 原生替代 Sysmon）', todo('待开发')]),
     el('li', {}, ['告警通知、报表导出、多用户与权限 ', todo('待开发')]),
   ]), { flush: false }));
 

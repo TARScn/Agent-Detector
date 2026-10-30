@@ -5,8 +5,8 @@ observed), never inferences. process_exec → proc.exec, process_exit →
 proc.exit (lifecycle bookkeeping — the ingest service consumes it before the
 rule engine, it is not a stored behavior). TracingPolicy kprobe events map to
 net.connect (security_socket_connect sockaddr) and file.write
-(security_file_permission, the policy filters to MAY_WRITE); anything else
-returns None rather than guessing a kind.
+(security_file_permission, MAY_WRITE only); anything else returns None
+rather than guessing a kind.
 """
 from __future__ import annotations
 
