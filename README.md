@@ -11,8 +11,8 @@
 
 | 模式 | 数据来源 | 能做到 |
 | --- | --- | --- |
-| **Discovery** | 进程、安装记录、Agent 配置、MCP 配置 | 发现 Agent，给出稳定资产身份、带来源的版本、运行实例 |
-| **Monitor** | Sysmon / auditd / 进程采样 / 出站连接 / 原生 Hook | 观察进程、文件、网络与工具调用行为 |
+| **Discovery** | 进程、安装记录、Agent 配置、MCP 配置、Docker 容器 | 发现 Agent，给出稳定资产身份、带来源的版本、运行实例 |
+| **Monitor** | Sysmon / eBPF (Tetragon) / auditd / 进程采样 / 出站连接 / 原生 Hook | 观察进程、文件、网络与工具调用行为 |
 | **Protect** | Agent 原生 PreToolUse Hook | 在受支持 Agent 的**工具调用执行前** allow / ask / deny |
 
 > 监测到进程正在删除文件，不代表能在删除前阻止它。只有接入原生 Hook 的 Agent 才能被前置阻断，
@@ -82,10 +82,11 @@ agent-detector assets [--scan-id N]                  组件资产（含 MCP / �
 agent-detector events [--source X] [--risk high]     行为事件（Hook / Sysmon / auditd / 采样 / 网络）
 agent-detector alerts [--status open]                安全告警
 agent-detector monitor --duration 60                 出站 LLM 调用观察（零合作）
-agent-detector collect --mode sysmon --duration 60   系统行为采集（sysmon / auditd / poll）
-agent-detector replay tests/fixtures/audit/scenario.log   离线回放 audit 日志（任意平台）
+agent-detector collect --mode sysmon --duration 60   系统行为采集（sysmon / tetragon / auditd / poll）
+agent-detector replay <log> [--format tetragon]      离线回放 audit 日志或 Tetragon 导出（任意平台）
 agent-detector channels                              采集通道可用性体检
 agent-detector audit-rules --watch-dir /path         打印 auditd 规则与安装命令（不自动提权）
+agent-detector tetragon                              打印 Tetragon 通道状态与部署命令（不自动提权）
 agent-detector policy list | policy test --command …  策略清单与决策自查
 agent-detector hooks status|plan|install|uninstall|snippet
 agent-detector purge [--older-than-days N] [--all]   保留策略清理
@@ -124,8 +125,9 @@ POST /internal/v1/hooks/decide                  Hook 决策（内部控制接口
 `AGENT_DETECTOR_DB`（数据库路径）、`_HOST` / `_PORT`（监听地址，默认 127.0.0.1:8787）、
 `_HOOK_TOKEN` / `_HOOK_TOKEN_FILE`、`_HOOK_FAILURE_MODE`（block|allow）、`_HOOK_TIMEOUT`、`_POLICY_DIR`、
 `_AGENTS_FILE`、`_SYSMON_CHANNEL`、`_ALERT_RISK_LEVEL`、`_RULES_DIR`、`_BEHAVIOR_RULES_DIR`、
-`_AUDIT_LOG`、`_BEHAVIOR_*`（抑制窗口 / 速率 / 保留 / 路径策略 / 是否存 argv）等。
-完整列表见 `src/agent_detector/common/config.py`。
+`_AUDIT_LOG`、`_TETRA_LOG`（Tetragon JSON 导出文件，默认 `/var/log/tetragon/events.json`）、
+`_BEHAVIOR_*`（抑制窗口 / 速率 / 保留 / 路径策略 / 是否存 argv）等。
+完整列表见 `src/agent_detector/core/config.py`。
 
 ## 范围与安全限制
 
@@ -140,7 +142,9 @@ POST /internal/v1/hooks/decide                  Hook 决策（内部控制接口
 
 [architecture.md](docs/architecture.md) · [windows.md](docs/windows.md) · [hooks.md](docs/hooks.md) ·
 [policy.md](docs/policy.md) · [rules.md](docs/rules.md)（检测规则） · [behavior.md](docs/behavior.md)（网络调用观察） ·
-[syscall-monitoring.md](docs/syscall-monitoring.md)（系统行为监测）
+[syscall-monitoring.md](docs/syscall-monitoring.md)（系统行为监测） ·
+[ebpf-monitoring.md](docs/ebpf-monitoring.md)（eBPF/Tetragon 通道） ·
+[docker-discovery.md](docs/docker-discovery.md)（容器发现）
 
 ## 测试
 
