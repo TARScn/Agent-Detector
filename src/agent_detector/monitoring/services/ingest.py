@@ -55,7 +55,8 @@ from agent_detector.core.models import ProcessInfo
 from agent_detector.discovery.fingerprints.loader import load_rules
 from agent_detector.storage.models import BehaviorEventRow, utc_now_iso
 from agent_detector.interception.policy.engine import risk_at_least
-from agent_detector.storage import AlertRepository, AssetRepository
+from agent_detector.storage import (AgentInventoryRepository, AlertRepository,
+                                    AssetRepository)
 
 logger = logging.getLogger(__name__)
 
@@ -435,7 +436,8 @@ class BehaviorIngestService:
                                         name=fact.process_name, exe=fact.exe,
                                         argv=fact.argv)
             attribution = attributor.attribute(pid=fact.pid, ppid=fact.ppid,
-                                               process_name=fact.process_name)
+                                               process_name=fact.process_name,
+                                               container_id=fact.container_id)
             if (attribution.asset_id is None and not BEHAVIOR_INCLUDE_UNATTRIBUTED
                     and "unattributed" in attribution.evidence):
                 self.dropped_unattributed += 1
@@ -470,6 +472,7 @@ class BehaviorIngestService:
     def _attributor_context(self) -> AgentAttributor:
         pid_map: dict[int, str] = {}
         known: set[str] = set()
+        container_map: dict[str, tuple[str, str]] = {}
         try:
             with Session(self.engine) as session:
                 for snapshot in AssetRepository(session).latest_snapshots():
@@ -480,13 +483,23 @@ class BehaviorIngestService:
                             pid_map.setdefault(int(pid), asset_id)
                         except (TypeError, ValueError):
                             continue
+                # Container-origin assets (Docker channel): match eBPF events
+                # by container-ID prefix instead of pids (different namespaces).
+                inventory = AgentInventoryRepository(session)
+                for asset in inventory.list_assets():
+                    stored = (asset.get("container_id") or "").strip().lower()
+                    if stored:
+                        container_map[stored] = (asset["asset_id"], asset["name"])
+                        container_map.setdefault(stored[:12],
+                                                 (asset["asset_id"], asset["name"]))
         except Exception:
             logger.exception("asset attribution lookup failed")
         return AgentAttributor(hostname=platform.node() or "localhost", graph=self.graph,
                                pid_map=pid_map, known_asset_ids=known,
                                client_rules=self._client_rules,
                                signature_rules=self._signature_rules,
-                               home=Path.home())
+                               home=Path.home(),
+                               container_map=container_map)
 
     def _target_for(self, fact: BehaviorFact, derived: DerivedBehavior) -> str | None:
         if fact.kind == "file.move" and fact.path and fact.path_target:
@@ -584,6 +597,7 @@ class BehaviorIngestService:
                 "source": "sysmon" if source == "sysmon" else source,
                 "agent_label": attribution.agent_label or f"pid-{fact.pid}",
                 "asset_id": attribution.asset_id, "pid": fact.pid,
+                "container_id": fact.container_id,
                 "process_name": fact.process_name, "event_type": fact.kind,
                 "operation": derived.operation, "target": target,
                 "result": fact.result, "confidence": derived.confidence,

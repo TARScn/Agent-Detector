@@ -30,7 +30,8 @@ class AgentAttributor:
     def __init__(self, *, hostname: str, graph: ProcessGraph, pid_map: dict[int, str],
                  known_asset_ids: set[str], client_rules: Sequence[ClientRule] = (),
                  signature_rules: Sequence[SignatureRule] = (),
-                 home: Path | None = None, max_depth: int = 12):
+                 home: Path | None = None, max_depth: int = 12,
+                 container_map: dict[str, tuple[str, str]] | None = None):
         self.hostname = hostname
         self.graph = graph
         self.pid_map = pid_map
@@ -39,8 +40,22 @@ class AgentAttributor:
         self.signature_rules = tuple(signature_rules)
         self.home = home
         self.max_depth = max_depth
+        # container hex-ID prefix -> (asset_id, agent name), from the Docker
+        # discovery channel's container-origin assets
+        self.container_map = dict(container_map or {})
 
-    def attribute(self, *, pid: int, ppid: int | None, process_name: str) -> Attribution:
+    def attribute(self, *, pid: int, ppid: int | None, process_name: str,
+                  container_id: str | None = None) -> Attribution:
+        if container_id and self.container_map:
+            # Container processes report host-namespace PIDs (Tetragon runs on
+            # the host) while Docker discovery stores container-namespace PIDs,
+            # so instance-level pid matching is impossible by construction —
+            # container events match at the asset level only.
+            for prefix, (asset_id, name) in self.container_map.items():
+                if prefix and (container_id.startswith(prefix)
+                               or prefix.startswith(container_id)):
+                    return Attribution(name or process_name or f"pid-{pid}",
+                                       asset_id, ("container_id",), None)
         for index, node in enumerate(self.graph.ancestors_of(
                 pid, ppid=ppid, max_depth=self.max_depth)):
             asset_id = self.pid_map.get(node.pid)

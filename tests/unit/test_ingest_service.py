@@ -296,3 +296,32 @@ def test_tetragon_mode_defaults_to_export_log(tmp_path):
     assert service.mode == "tetragon" and service.source == "tetragon"
     assert service.log_path.as_posix().endswith("events.json")
     assert "tetragon" in service.status()["log_path"]
+
+
+def seed_container_asset(engine, *, container_id, asset_id="n8n--container01"):
+    from agent_detector.storage.models import AgentAssetRow
+
+    with Session(engine) as session:
+        session.add(AgentAssetRow(
+            asset_id=asset_id, agent_type="agent_platform", name="n8n",
+            states_json='["RUNNING"]', confidence=0.9,
+            container_id=container_id, origin="docker"))
+        session.commit()
+
+
+def test_tetragon_container_event_attributes_to_container_asset(tmp_path):
+    # Tetragon reports a 31-hex prefix of the full Docker ID; the Docker
+    # channel stores the full id on the asset row — prefix match wins over
+    # pid matching (container events carry host-namespace pids).
+    full_id = "b13f15ab2a169c85976efbd3a28b57f" + "a" * 33
+    engine = make_engine(tmp_path / "db.sqlite3")
+    seed_container_asset(engine, container_id=full_id)
+    service = make_service(engine, process_snapshot=lambda: [])
+    result = service.run_replay(TETRA_FIXTURE, format="tetragon")
+    assert result["events"] == 1  # host execs stay unattributed; container hits
+    event = stored_events(engine, source="tetragon")[0]
+    assert event["pid"] == 4200
+    assert event["asset_id"] == "n8n--container01"
+    assert event["agent_label"] == "n8n"
+    assert event["container_id"] == "b13f15ab2a169c85976efbd3a28b57f"
+    assert "container_id" in event["evidence"]
