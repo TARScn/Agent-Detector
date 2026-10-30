@@ -7,6 +7,8 @@ n8n 走声明式 container 段）。
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from agent_detector.discovery.fingerprints.loader import load_rules
@@ -14,7 +16,7 @@ from agent_detector.discovery.fingerprints.schema import FrameworkRule
 from agent_detector.discovery.sources import docker_agents, dockerapi
 from agent_detector.discovery.sources.dockerapi import (ContainerBrief, DockerUnavailable,
                                                         TopProcess)
-from test_dockerapi import FakeAPIClient, make_tar
+from test_dockerapi import FakeAPIClient, SleepingStream, make_tar
 
 LANGGRAPH_RULE = FrameworkRule.model_validate({
     "kind": "framework_rule", "id": "langgraph", "name": "LangGraph",
@@ -293,6 +295,148 @@ def test_n8n_stopped_container_keeps_platform_without_running():
 
 
 # ---------------------------------------------------------------------------
+# Dify（compose 多容器部署）：python_roots 版本 + compose 项目归并
+# 实勘（2026-10-29，langgenius/dify-api:1.18.0）：api/worker/beat 共用
+# dify-api 镜像（/app/api 布局 + storage 共享卷），agent_backend 无
+# pyproject 但有 storage 与 dify_agent 进程，web 不参与。
+# ---------------------------------------------------------------------------
+
+DIFY_API_CID = "0370b12cb850" + "a" * 52
+DIFY_WORKER_CID = "eceb77e3f44e" + "b" * 52
+DIFY_BEAT_CID = "a9a13c0c5604" + "c" * 52
+DIFY_BACKEND_CID = "08acd2b1c456" + "d" * 52
+DIFY_WEB_CID = "8b3ce5c1bcf8" + "e" * 52
+
+DIFY_PYPROJECT = ('[project]\nname = "dify-api"\nversion = "1.18.0"\n'
+                  'dependencies = ["flask>=3.1.3", "celery>=5.6.3"]\n')
+
+
+def dify_client(*, compose=True, state="running", names=None):
+    """五个实勘容器的最小布局；names 过滤用于单容器归并退化的用例。"""
+    spec = [
+        (DIFY_API_CID, "docker-api-1", "langgenius/dify-api:1.18.0", True,
+         [["32010", "1", "/app/api/.venv/bin/python /app/api/.venv/bin/gunicorn "
+           "--bind 0.0.0.0:5001 app:socketio_app"]]),
+        (DIFY_WORKER_CID, "docker-worker-1", "langgenius/dify-api:1.18.0", True,
+         [["31932", "1", "/app/api/.venv/bin/python /app/api/.venv/bin/celery "
+           "-A celery_entrypoint.celery worker"]]),
+        (DIFY_BEAT_CID, "docker-worker_beat-1", "langgenius/dify-api:1.18.0", True,
+         [["31701", "1", "/app/api/.venv/bin/python /app/api/.venv/bin/celery "
+           "-A app.celery beat"]]),
+        (DIFY_BACKEND_CID, "docker-agent_backend-1",
+         "langgenius/dify-agent-backend:1.18.0", False,
+         [["31846", "1", "/app/api/.venv/bin/python /app/api/.venv/bin/uvicorn "
+           "dify_agent.server.app:app --host 0.0.0.0"]]),
+        (DIFY_WEB_CID, "docker-web-1", "langgenius/dify-web:1.18.0", False,
+         [["31480", "1", "next-server (v16.4.2)"]]),
+    ]
+    containers, archives, inspects, tops = [], {}, {}, {}
+    for cid, name, image, has_pyproject, procs in spec:
+        if names is not None and name not in names:
+            continue
+        workdir = "/app/web" if name == "docker-web-1" else "/app/api"
+        containers.append({"Id": cid, "Names": [f"/{name}"], "Image": image,
+                           "State": state, "Command": "/bin/bash /entrypoint.sh",
+                           "Created": 0,
+                           "Labels": {"com.docker.compose.project": "docker"}
+                           if compose else {}})
+        inspects[cid] = {"State": {"Running": state == "running",
+                                   "StartedAt": STARTED_AT},
+                         "Config": {"WorkingDir": workdir}}
+        tops[cid] = {"Titles": ["PID", "PPID", "COMMAND"],
+                     "Processes": [list(p) for p in procs]}
+        if has_pyproject:
+            archives[(cid, "/app/api/pyproject.toml")] = make_tar(
+                {"/app/api/pyproject.toml": DIFY_PYPROJECT})
+        if name != "docker-web-1":
+            archives[(cid, "/app/api/storage")] = make_tar({"/app/api/storage/": None})
+    return FakeAPIClient(containers=containers, archives=archives, tops=tops,
+                         inspects=inspects)
+
+
+def test_dify_compose_containers_merge_into_one_asset():
+    outcome = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE, LANGGRAPH_RULE], "h", client_rules=CLIENT_RULES,
+        client=dify_client(), hints=HINTS)
+    assert outcome.stats["candidates"] == 5  # 镜像词 dify：五个容器全进深扫
+    assert outcome.bundles == []  # pyproject 无框架兴趣名：不造框架资产
+    (asset,) = outcome.assets
+    assert asset.name == "Dify" and asset.detector == "dify"
+    assert asset.asset_type.value == "AGENT_PLATFORM"
+    assert asset.asset_id.startswith("dify--")  # compose scope 的稳定 id
+    assert state_values(asset) == {"INSTALLED", "CONFIGURED", "RUNNING"}
+    assert asset.version.value == "1.18.0"
+    assert asset.version.source.value == "package-metadata"
+    assert asset.confidence == 0.95
+    # RUNNING 并集来自三个容器；beat 的 -A app.celery 是通用写法，不作 token
+    assert asset.running_pids == [32010, 31932, 31846]
+    link = outcome.container_links[asset.asset_id]
+    assert link["compose_project"] == "docker"
+    # 主容器 = 首个有安装证据的成员，生命周期复核以它为准
+    assert link["container_id"] == DIFY_API_CID
+    assert [m["short_id"] for m in link["containers"]] == [
+        DIFY_API_CID[:12], DIFY_WORKER_CID[:12], DIFY_BEAT_CID[:12],
+        DIFY_BACKEND_CID[:12]]
+    assert set(outcome.container_links) == {asset.asset_id}  # 成员 link 已归并
+
+
+def test_dify_web_container_stays_out_of_the_asset():
+    """web（Next.js）无 /app/api 证据、进程无独有 token：只作候选不参与资产。
+    仅剩一个成员时无需归并，保持每容器资产。"""
+    outcome = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE], "h", client_rules=CLIENT_RULES,
+        client=dify_client(names={"docker-api-1", "docker-web-1"}), hints=HINTS)
+    assert outcome.stats["candidates"] == 2  # web 也过了镜像词筛选
+    (asset,) = outcome.assets
+    assert asset.asset_id == docker_agents.build_asset_id(
+        "h", "dify", f"container:{DIFY_API_CID[:12]}")
+    assert "containers" not in outcome.container_links[asset.asset_id]
+
+
+def test_dify_without_compose_labels_stays_per_container():
+    """无 compose 标签（非 compose 部署）→ 不归并，每容器一资产。"""
+    outcome = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE], "h", client_rules=CLIENT_RULES,
+        client=dify_client(compose=False), hints=HINTS)
+    assert len(outcome.assets) == 4
+    assert all(a.detector == "dify" for a in outcome.assets)
+    api_asset = next(a for a in outcome.assets if a.running_pids == [32010])
+    assert outcome.container_links[api_asset.asset_id]["compose_project"] == ""
+
+
+def test_single_container_compose_product_keeps_container_scope():
+    """单容器 compose 项目：合并结果与原资产等价，保留每容器 asset_id。"""
+    outcome = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE], "h", client_rules=CLIENT_RULES,
+        client=dify_client(names={"docker-api-1"}), hints=HINTS)
+    (asset,) = outcome.assets
+    assert asset.asset_id == docker_agents.build_asset_id(
+        "h", "dify", f"container:{DIFY_API_CID[:12]}")
+
+
+def test_dify_stopped_stack_keeps_states_without_running():
+    outcome = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE], "h", client_rules=CLIENT_RULES,
+        client=dify_client(state="exited"), hints=HINTS)
+    (asset,) = outcome.assets
+    assert state_values(asset) == {"INSTALLED", "CONFIGURED"}
+    assert asset.running_pids == []
+    assert asset.version.value == "1.18.0"  # 停止容器仍可读 pyproject
+    link = outcome.container_links[asset.asset_id]
+    assert all(m["running_pids"] == [] for m in link["containers"])
+
+
+def test_pyproject_name_version_parses_project_and_poetry():
+    parse = docker_agents._pyproject_name_version
+    assert parse('[project]\nname = "dify-api"\nversion = "1.18.0"\n') == \
+        ("dify-api", "1.18.0")
+    assert parse('[tool.poetry]\nname = "legacy"\nversion = "0.1.0"\n') == \
+        ("legacy", "0.1.0")
+    assert parse("not toml [") == ("", "")
+    assert parse('[project]\nname = "noversion"\n') == ("noversion", "")
+
+
+# ---------------------------------------------------------------------------
 # 阶段隔离与降级
 # ---------------------------------------------------------------------------
 
@@ -316,3 +460,44 @@ def test_container_identification_failure_is_isolated(monkeypatch):
     assert outcome.stats["container_errors"]
     assert outcome.bundles == []
     assert outcome.containers_seen == [CID]  # 枚举仍然完整，供生命周期复核使用
+
+
+# ---------------------------------------------------------------------------
+# 看门狗：npipe 卡死不再拖死扫描，也不得误判生命周期
+# ---------------------------------------------------------------------------
+
+def watched(client, timeout=0.3):
+    client.timeout = timeout
+    client.stall_budget = 3
+    client.stalls = 0
+    return client
+
+
+def test_stalled_identification_is_not_deemed_deep_scanned():
+    """识别中途看门狗超时：该容器从 candidates_seen 摘除 + 通道标记 failed。
+
+    生命周期复核把"在候选集但无资产"判作"容器内已卸载"（硬删）——深扫
+    根本没完成时绝不能触发那条规则，只能本轮不作复核。
+    """
+    client = watched(container_client())
+    client.archives[(CID, "/usr/local/lib/python3.11/site-packages")] = \
+        SleepingStream(1.0)  # site-packages 目录流卡死：读已安装元数据时超时
+    outcome = docker_agents.scan_docker_agents(
+        [LANGGRAPH_RULE], "h", client=client, hints=HINTS, archive_time_cap=0.1)
+    assert outcome.stats["error"]
+    assert outcome.candidates_seen == []  # 未真正深扫
+    assert outcome.bundles == []
+    assert outcome.stats["container_errors"]
+    assert outcome.containers_seen == [CID]  # 枚举不受影响
+
+
+def test_stalled_top_marks_channel_failed(monkeypatch):
+    def slow_top(*args, **kwargs):
+        time.sleep(1.0)
+
+    monkeypatch.setattr(dockerapi, "_container_top_raw", slow_top)
+    outcome = docker_agents.scan_docker_agents(
+        [LANGGRAPH_RULE], "h", client=watched(container_client()), hints=HINTS)
+    assert outcome.stats["error"]
+    assert outcome.candidates_seen == []  # 筛选根本没跑成
+    assert outcome.stats["container_errors"]

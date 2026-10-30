@@ -16,10 +16,11 @@
   任何一级都读不到就返回 UNKNOWN，绝不猜测。
 
 客户端识别在容器内由通用容器 client 机制承担：client_rule 声明 ``container``
-段（npm 全局根 / 配置文件 / 进程 token / 镜像关键词），本模块按规则定向
-只读探测 —— 宿主与容器共用同一条产品规则（OpenClaw、n8n 均走此机制）。
-一个容器可以产出多个框架资产；同一框架出现在多个容器时是彼此独立的资产
-（scope 含容器短 ID），跨容器合并留待后续迭代。
+段（npm 全局根 / python 项目根 / 配置文件 / 进程 token / 镜像关键词），本模块
+按规则定向只读探测 —— 宿主与容器共用同一条产品规则（OpenClaw、n8n、Dify 均
+走此机制）。一个容器可以产出多个框架资产；同一框架出现在多个容器时是彼此
+独立的资产（scope 含容器短 ID）。声明 ``compose_scope`` 的产品（多容器部署，
+如 Dify）按 compose 项目归并为一个实体资产，避免清单出现多行同名产品。
 """
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ import hashlib
 import json
 import logging
 import re
+import tomllib
 from dataclasses import dataclass, field
 from importlib.resources import files as resource_files
 from pathlib import Path, PurePosixPath
@@ -48,7 +50,8 @@ from agent_detector.discovery.sources.deps import (components_from_lock_text,
                                                    components_from_pyproject_text,
                                                    components_from_requirements_text,
                                                    interest_names, normalize_name)
-from agent_detector.discovery.sources.dockerapi import ContainerBrief, DockerUnavailable, TopProcess
+from agent_detector.discovery.sources.dockerapi import (ContainerBrief, DockerStalled,
+                                                        DockerUnavailable, TopProcess)
 from agent_detector.discovery.sources.frameworks import ApplicationBundle, detect_frameworks
 
 logger = logging.getLogger(__name__)
@@ -126,7 +129,11 @@ def scan_docker_agents(framework_rules: list, hostname: str, *,
     ``client_rules`` carry the ``container`` sections that drive the generic
     container-client loop. Daemon/SDK problems raise nothing: they degrade
     into ``stats["error"]`` so the scan continues and the inventory's stale
-    verification knows the docker channel said nothing this round.
+    verification knows the docker channel said nothing this round. A stalled
+    operation (watchdog timeout — npipe reads cannot be interrupted) does the
+    same: the stalled container leaves ``candidates_seen`` untouched and the
+    round ends with ``stats["error"]`` set, so no container asset gets a
+    lifecycle verdict based on a deep scan that never really happened.
     """
     outcome = DockerScanOutcome()
     if client is None:
@@ -152,10 +159,15 @@ def scan_docker_agents(framework_rules: list, hostname: str, *,
 
     outcome.containers_seen = [brief.container_id for brief in containers]
     errors: list[dict] = []
+    stalled = False
     for brief in containers:
         try:
             top = (dockerapi.container_top(client, brief.container_id)
                    if brief.state == "running" else [])
+        except DockerStalled as exc:
+            stalled = True
+            errors.append({"container": brief.short_id, "error": str(exc)})
+            continue
         except Exception as exc:
             logger.warning("container %s: top failed: %s", brief.short_id, exc)
             top = []
@@ -170,6 +182,13 @@ def scan_docker_agents(framework_rules: list, hostname: str, *,
                 interest=interest, hints=hints,
                 read_max_bytes=read_max_bytes, archive_byte_cap=archive_byte_cap,
                 archive_time_cap=archive_time_cap)
+        except DockerStalled as exc:
+            # 深扫没有真正完成：从候选集摘掉，生命周期复核不得据此判
+            # "容器内已卸载"（那是硬删）；整条通道降级为本轮不作复核。
+            stalled = True
+            outcome.candidates_seen.remove(brief.container_id)
+            errors.append({"container": brief.short_id, "error": str(exc)})
+            continue
         except Exception as exc:  # per-container isolation, like a detector
             logger.warning("container %s identification failed: %s",
                            brief.short_id, exc)
@@ -178,12 +197,15 @@ def scan_docker_agents(framework_rules: list, hostname: str, *,
         outcome.bundles.extend(bundles)
         outcome.assets.extend(clients)
         outcome.container_links.update(links)
+    _merge_compose_scope(outcome.assets, outcome.container_links,
+                         client_rules, hostname)
     outcome.stats = {"containers_total": len(containers),
                      "candidates": len(outcome.candidates_seen),
                      "agents": (sum(len(bundle.frameworks) for bundle in outcome.bundles)
                                 + len(outcome.assets)),
                      "container_errors": errors,
-                     "error": None}
+                     "error": ("docker 通道出现失联，本轮容器资产不作生命周期复核"
+                               if stalled else None)}
     return outcome
 
 
@@ -355,6 +377,8 @@ def _identify_container(client, brief: ContainerBrief, top: list[TopProcess], *,
     link = {"container_id": brief.container_id, "short_id": brief.short_id,
             "image": brief.image, "state": brief.state,
             "started_at": started_at, "command": brief.command,
+            "compose_project": (brief.labels or {}).get(
+                "com.docker.compose.project", ""),
             "processes": {str(proc.pid): proc.cmdline for proc in top}}
     links: dict[str, dict] = {}
     for bundle in bundles:
@@ -559,6 +583,75 @@ def _container_evidence(brief: ContainerBrief, reasons: list[str], running: bool
         confidence=0.75)
 
 
+def _merge_compose_scope(assets: list[DetectedAsset], links: dict[str, dict],
+                         client_rules, hostname: str) -> None:
+    """compose_scope 规则：同一 compose 项目的多容器合并为一个实体资产。
+
+    n8n 是单容器产品，每容器一资产即实体；Dify 这类多容器部署若按容器
+    逐一建资产，清单会出现多行同名产品 —— 违背"一个 Agent 实体一行"的
+    口径。合并规则：scope = compose 项目名（com.docker.compose.project
+    标签；无标签不合并，退回每容器一资产）。成员的状态/证据/PID 取并集，
+    版本取首个已知成员，置信度取成员最大值，主容器取首个有安装证据的
+    成员 —— 资产行的 container_id 与生命周期复核都以它为准。成员容器的
+    进程与 StartedAt 保留在 link 的 ``containers`` 列表里，实例行仍按
+    容器逐一锚定。
+    """
+    scoped = {rule.id: rule for rule in client_rules
+              if getattr(getattr(rule, "container", None), "compose_scope", False)}
+    if not scoped:
+        return
+    groups: dict[tuple[str, str], list[DetectedAsset]] = {}
+    for asset in list(assets):
+        if asset.detector not in scoped:
+            continue
+        project = (links.get(asset.asset_id) or {}).get("compose_project") or ""
+        if project:
+            groups.setdefault((asset.detector, project), []).append(asset)
+    for (rule_id, project), members in groups.items():
+        if len(members) == 1:
+            continue  # 单容器部署：合并结果与原资产等价，保持原 asset_id
+        primary = next((a for a in members
+                        if any(e.kind is EvidenceKind.INSTALL_METADATA
+                               for e in a.evidence)), members[0])
+        merged = DetectedAsset(
+            asset_id=build_asset_id(hostname, rule_id, f"compose:{project}"),
+            name=primary.name, asset_type=primary.asset_type,
+            states=set().union(*(a.states for a in members)),
+            confidence=max(a.confidence for a in members),
+            version=next((a.version for a in members if a.version.known),
+                         VersionInfo.unknown()),
+            evidence=[e for a in members for e in a.evidence],
+            running_pids=[pid for a in members for pid in a.running_pids],
+            detector=rule_id,
+            config_paths=list(dict.fromkeys(p for a in members
+                                            for p in a.config_paths)))
+        merged_link = dict(links[primary.asset_id])
+        merged_link["compose_project"] = project
+        merged_link["containers"] = [
+            {**links[a.asset_id], "running_pids": list(a.running_pids)}
+            for a in members]
+        for asset in members:
+            assets.remove(asset)
+            links.pop(asset.asset_id, None)
+        assets.append(merged)
+        links[merged.asset_id] = merged_link
+        logger.info("container %s..: merged %d containers of compose project "
+                    "%r into %s", rule_id, len(members), project, merged.asset_id)
+
+
+def _pyproject_name_version(text: str) -> tuple[str, str]:
+    """(project name, version) from pyproject [project] / [tool.poetry]."""
+    try:
+        data = tomllib.loads(text)
+    except (UnicodeError, ValueError, tomllib.TOMLDecodeError):
+        return "", ""
+    project = data.get("project") or {}
+    poetry = (data.get("tool") or {}).get("poetry") or {}
+    name = str(project.get("name") or poetry.get("name") or "")
+    version = str(project.get("version") or poetry.get("version") or "")
+    return name, version
+
+
 def _detect_container_clients(client, brief: ContainerBrief, running: bool,
                               top: list[TopProcess], hostname: str,
                               client_rules, read_max_bytes: int
@@ -566,7 +659,9 @@ def _detect_container_clients(client, brief: ContainerBrief, running: bool,
     """通用容器 client 识别：遍历声明了 ``container`` 段的 client_rule。
 
     证据语义与宿主引擎同构，全部为容器内定向只读：
-    * ``<npm_root>/<package>/package.json`` → INSTALLED + 版本；
+    * ``<npm_root>/<package>/package.json``（npm 产品，如 n8n）或
+      ``<python_root>/pyproject.toml`` 的 [project] version（Python 产品，
+      如 Dify 的 /app/api）→ INSTALLED + 版本；
     * ``config_json``（JSON 顶层键名）/ ``config_existing``（存在性探测）
       → CONFIGURED；
     * 容器运行且 top 进程命中 ``process_tokens``（子串匹配，或首段可执行
@@ -584,6 +679,24 @@ def _detect_container_clients(client, brief: ContainerBrief, running: bool,
         states: set[AssetState] = set()
         version = ""
         config_paths: list[str] = []
+        for py_root in spec.python_roots:
+            pyproject_path = f"{py_root.rstrip('/')}/pyproject.toml"
+            raw = dockerapi.read_container_file(
+                client, brief.container_id, pyproject_path, read_max_bytes)
+            if not raw:
+                continue
+            py_name, py_version = _pyproject_name_version(
+                raw.decode("utf-8", "replace"))
+            if not py_version:
+                continue
+            version = py_version
+            states.add(AssetState.INSTALLED)
+            evidence.append(Evidence(
+                kind=EvidenceKind.INSTALL_METADATA,
+                summary=f"pyproject {py_name or package}（{py_root}）",
+                detail={"path": pyproject_path, "version": py_version},
+                confidence=0.9))
+            break
         for npm_root in spec.npm_roots:
             package_json_path = f"{npm_root.rstrip('/')}/{package}/package.json"
             raw = dockerapi.read_container_file(

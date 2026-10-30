@@ -120,6 +120,20 @@ agents:
       - AI Agent 节点基于 LangChain（@langchain/core），依赖口径并存识别框架资产。
       - 凭据与工作流存于 .n8n/database.sqlite，只探测存在性，永不读取。
 
+  - id: dify
+    name: Dify
+    vendor: LangGenius
+    aliases: [dify-ai, langgenius-dify]
+    discovery: P1
+    monitor: P1
+    protect: PLANNED
+    hook: null
+    docs: https://docs.dify.ai/
+    notes:
+      - 形态：docker compose 多容器部署（api/worker/web/sandbox 等），按 Compose 项目归并为一个资产。
+      - 版本来自容器内 /app/api/pyproject.toml 的 [project] version（package-metadata 口径）。
+      - 部署配置在 .env（读取黑名单，永不读取）；/app/api/storage 只探测存在性。
+
   - id: zcode
     name: ZCode
     vendor: Z.ai

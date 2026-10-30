@@ -16,7 +16,7 @@
 Docker API（只读：list / inspect / top / get_archive，绝不 docker exec）
     ↓
 枚举全部容器（运行中 + 已停止）
-    ↓  sources/dockerapi.py        传输层：四个只读调用 + 读门槛（allow/deny）
+    ↓  sources/dockerapi.py        传输层：四个只读调用 + 读门槛（allow/deny）+ 硬看门狗
     ↓  sources/docker_agents.py    候选筛选（宽松 OR：镜像/命令/进程/运行时）
     ↓
 候选容器深扫：
@@ -96,9 +96,22 @@ CLI（agent-detector scan / agents list）· Web API（/api/v1/agents）· 控�
 - **拒绝名单双保险**：含 `.env`、`secret`、`credential`、`passwd`、`shadow`、
   `token`、`id_rsa`、`.pem`、`.key`、`.git/`、`.ssh/` 等片段的路径一律不读、
   连存在性都不探测。宁可误伤（如 tokenizers 包的元数据被挡）也不冒密钥风险。
-- **读取封顶**：单文件默认 256KB（`DOCKER_READ_MAX_BYTES`）；目录归档流式
-  扫描受字节（默认 256MB）与时间（默认 60s）双封顶，兴趣包命中齐全即提前
-  断流（关闭流，daemon 随即停止生成 tar）。
+- **读取封顶**：单文件默认 256KB（`DOCKER_READ_MAX_BYTES`，stat 预检超限
+  直接跳过，不发起 GET）；目录归档的解析受字节预算（默认 2GB，
+  `DOCKER_ARCHIVE_BYTE_CAP`）约束——解析到预算即收手，其余**排干到 EOF**。
+  注意目录的 stat.size 只是 inode 大小（4096），拦不住大树；好在 npipe 上
+  归档总流量与预算无关（解析/排干只是同一条流的分拆），预算只决定元数据
+  覆盖率，不改变扫描成本。
+- **归档流不可半途而废（npipe 实测）**：Windows 命名管道上，提前放弃一个
+  正在生成的归档流（读一个块就断开、字节/时间封顶中途退出）会让 daemon 的
+  tar 生成协程永久阻塞、按容器楔死整条归档通道（任何客户端、任何新连接都
+  挂起，数分钟后才自愈）；`stream.close()` 只是把连接还回池，daemon 根本
+  察觉不到。因此存在性/大小探测一律走 `HEAD /archive`（不生成 tar，可放心
+  高频使用），GET 只发给 stat 确认过的目标且必须读完。
+- **硬看门狗**：npipe 的读超时不可靠（响应头等待可能永不返回）。每个 Docker
+  操作因此在独立守护线程里限时执行，超时即抛 `DockerStalled` 放弃该操作；
+  单个客户端连续失联 3 次后通道熔断。失联的容器从候选集摘除、整轮通道标记
+  failed，生命周期复核本轮不做任何判定——绝不把"没扫成"当"已卸载"。
 - **最小权限提示**：Docker API 等价于宿主 root。请确保运行扫描器的账号本身
   受控，不要把 docker socket/npipe 暴露给不可信进程；本工具只发起上表四个
   只读调用，但不改变 daemon 的权限面。
@@ -108,18 +121,19 @@ CLI（agent-detector scan / agents list）· Web API（/api/v1/agents）· 控�
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `AGENT_DETECTOR_DOCKER_ENABLED` | 1 | 总开关（CLI 另有 `--no-docker`） |
-| `AGENT_DETECTOR_DOCKER_TIMEOUT` | 20 | daemon 单次调用超时（秒，1–300） |
+| `AGENT_DETECTOR_DOCKER_TIMEOUT` | 20 | daemon 单次调用硬期限（秒，1–300；读超时不可靠，仅作兜底） |
 | `AGENT_DETECTOR_DOCKER_MAX_CONTAINERS` | 200 | 单次扫描容器数上限（≤5000） |
-| `AGENT_DETECTOR_DOCKER_READ_MAX_BYTES` | 262144 | 单文件读取上限（字节） |
-| `AGENT_DETECTOR_DOCKER_ARCHIVE_BYTE_CAP` | 268435456 | 目录归档流字节封顶 |
-| `AGENT_DETECTOR_DOCKER_ARCHIVE_TIME_CAP` | 60 | 目录归档流时间封顶（秒） |
+| `AGENT_DETECTOR_DOCKER_READ_MAX_BYTES` | 262144 | 单文件读取上限（字节；stat 预检超限直接跳过） |
+| `AGENT_DETECTOR_DOCKER_ARCHIVE_BYTE_CAP` | 2147483648 | 目录归档的解析预算（npipe 上总流量与预算无关，预算只决定"解析到哪、其余排干"） |
+| `AGENT_DETECTOR_DOCKER_ARCHIVE_TIME_CAP` | 60 | 目录归档排干的看门狗期限基数（秒） |
 
 ## 平台产品跨环境识别（container 段通用机制）
 
 client_rule 支持可选的 `container:` 段（schema.py `ContainerSpec`）：声明
-容器内 npm 全局根、包目录名、配置文件路径、进程 token 与镜像关键词。docker
-通道按规则做定向只读探测，**宿主与容器共用同一条产品规则**——OpenClaw、
-n8n 均走此机制（OpenClaw 的容器识别已从硬编码迁入其 YAML）。
+容器内 npm 全局根、python 项目根、包目录名、配置文件路径、进程 token 与
+镜像关键词。docker 通道按规则做定向只读探测，**宿主与容器共用同一条产品
+规则**——OpenClaw、n8n、Dify 均走此机制（OpenClaw 的容器识别已从硬编码
+迁入其 YAML）。
 
 以 n8n 为例的覆盖矩阵：
 
@@ -130,6 +144,20 @@ n8n 均走此机制（OpenClaw 的容器识别已从硬编码迁入其 YAML）�
 | Linux 宿主 npm -g | client_rule 引擎 | `/usr/local/lib/node_modules` 或 `/usr/lib/node_modules` | 同上 |
 | macOS / nvm / 自定义 prefix | client_rule 引擎 | `npm root -g` 活探测兜底 | 同上 |
 | n8n Cloud（SaaS） | 不适用 | 本机无资产 | —— |
+
+**多容器部署按 Compose 项目归并（2026-10-29，Dify）**：`container.compose_scope:
+true` 声明"一次部署 = 多个容器 = 一个实体"。Dify 的 api / worker /
+api_websocket / worker_beat 共用 `dify-api` 镜像（`/app/api` 布局），另有
+web / sandbox / plugin-daemon 等周边容器；全部容器带
+`com.docker.compose.project` 标签 → 归并为**一行** Dify 资产（scope =
+compose 项目名，asset_id 稳定于部署而非容器重建）。成员容器的状态/证据/
+PID 取并集，版本取首个已知成员（`/app/api/pyproject.toml` 的
+`[project] version`，`python_roots` 机制，实勘 1.18.0），主容器取首个有
+安装证据的成员（生命周期复核以它的存续为准）；实例行仍按成员容器逐一
+锚定各自的 StartedAt 与 container_id。进程 token 全部用实勘的独有命令行
+片段（`app:socketio_app` / `celery_entrypoint` / `dify_agent.server`）——
+`celery -A app.celery` 这类通用写法不进 token 表（随机 celery 应用的误报
+风险）。无 compose 标签的部署自动退回每容器一资产。
 
 依赖口径并存：产品包根（如 `.../node_modules/n8n`）注册为容器内已知项目根，
 对其做**兴趣驱动的定向读**（npm 安装路径即包名，逐个探测

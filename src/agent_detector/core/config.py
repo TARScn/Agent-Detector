@@ -30,9 +30,13 @@ DOCKER_MAX_CONTAINERS = max(0, min(int(os.getenv("AGENT_DETECTOR_DOCKER_MAX_CONT
                                                  "200")), 5000))
 DOCKER_READ_MAX_BYTES = max(1024, min(int(os.getenv("AGENT_DETECTOR_DOCKER_READ_MAX_BYTES",
                                                     str(262144))), 16 * 1024 * 1024))
+# Parse budget for a directory archive (site-packages enumeration). On npipe
+# the whole tar flows either way — parse cap vs drain is a zero-sum split —
+# so a generous budget costs nothing extra and keeps metadata complete for
+# big trees (a dify venv measures ~2GB). The watchdog bounds the total.
 DOCKER_ARCHIVE_BYTE_CAP = max(DOCKER_READ_MAX_BYTES,
                               min(int(os.getenv("AGENT_DETECTOR_DOCKER_ARCHIVE_BYTE_CAP",
-                                                str(256 * 1024 * 1024))),
+                                                str(2 * 1024 * 1024 * 1024))),
                                   4 * 1024 * 1024 * 1024))
 DOCKER_ARCHIVE_TIME_CAP_S = min(max(float(os.getenv("AGENT_DETECTOR_DOCKER_ARCHIVE_TIME_CAP",
                                                     "60")), 1.0), 600.0)

@@ -341,8 +341,13 @@ class InventoryBuilder:
         if entry is not None:
             notes.extend(entry.notes)
         if container:
+            # compose 归并资产：主容器只是代表，备注交代整个部署的规模
+            members = container.get("containers") or []
+            scope = f"，compose 项目 {container['compose_project']}" \
+                if container.get("compose_project") else ""
+            extra = f"，共 {len(members)} 个容器" if len(members) > 1 else ""
             notes.insert(0, f"容器资产：{container.get('image', '')}"
-                            f"（{container.get('state', '')}）")
+                            f"（{container.get('state', '')}{scope}{extra}）")
         capabilities = entry.capabilities() if entry else {
             "discovery": "P2", "monitor": "P2", "protect": "PLANNED"}
         rule = self._rule_by_id.get(asset.detector or "")
@@ -399,11 +404,24 @@ class InventoryBuilder:
     def _container_instances(self, asset: DetectedAsset, container: dict,
                              agent_type: str) -> list[AgentInstance]:
         """容器内实例：pid 是容器内 PID，身份锚定容器 StartedAt —— 容器重启
-        产生新 StartedAt，自然形成新实例；停止容器没有 running_pids，无实例行。"""
+        产生新 StartedAt，自然形成新实例；停止容器没有 running_pids，无实例行。
+        compose 归并资产（link 带 ``containers`` 列表）按成员容器逐一展开，
+        每个实例锚定自己容器的 StartedAt 与 container_id。"""
+        members = container.get("containers")
+        if members:
+            instances: list[AgentInstance] = []
+            for member in members:
+                instances.extend(
+                    self._container_instances(asset, member, agent_type))
+            return instances
         processes_seen = container.get("processes") or {}
         started_at = container.get("started_at") or None
-        instances: list[AgentInstance] = []
-        for pid in asset.running_pids:
+        instances = []
+        if "running_pids" in container:
+            pids = container["running_pids"]  # compose 成员：只属本容器
+        else:
+            pids = asset.running_pids
+        for pid in pids:
             cmdline = str(processes_seen.get(str(pid))
                           or container.get("command") or "")
             tokens = cmdline.split()

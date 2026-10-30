@@ -21,6 +21,7 @@ image_keywords:
   - anthropic
   - llm
   - n8n
+  - dify
 command_tokens:
   - langchain
   - langgraph

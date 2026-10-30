@@ -1,0 +1,89 @@
+# =============================================================================
+# Dify（LLM 应用开发 + Agent 编排平台）检测规则
+# =============================================================================
+# 本文件是纯声明式数据：引擎按这里的描述去探测，不在代码里写死任何产品特征。
+# 修改本文件后无需改代码，下一次扫描即生效。
+#
+# 已核实的产品事实（2026-10-29，来源：本机 Docker 官方 compose 部署实勘，
+# 镜像 langgenius/dify-api:1.18.0）：
+#   * 部署形态：docker compose 多容器 —— api / worker / api_websocket /
+#     worker_beat 共用 dify-api 镜像（/app/api 布局），另有 web（Next.js）、
+#     sandbox、plugin-daemon、agent-backend 等周边容器；全部容器共享
+#     com.docker.compose.project 标签 → 按 compose 项目归并为一个资产
+#     （container.compose_scope: true）。
+#   * 产品本体装在 /app/api：pyproject.toml 的 [project]
+#     name = "dify-api" / version 即实装版本（package-metadata 口径）；
+#     .venv 在 /app/api/.venv。worker_beat（celery beat）与 agent_backend
+#     （uvicorn dify_agent.server）无 pyproject / 共享存储卷，各凭进程或
+#     状态目录参与归并。
+#   * 进程特征（docker top 实测）：gunicorn "... app:socketio_app"、
+#     celery -A celery_entrypoint.celery、uvicorn dify_agent.server.app。
+#     celery beat 用的是通用的 -A app.celery —— 不作进程 token（随机
+#     celery 应用的误报风险），beat 容器只以文件证据参与。
+#   * AI 编排为自研实现，pyproject 无 langchain/langgraph 等框架兴趣名
+#     （已实测全文扫描）—— 正常产出单一 Dify 平台资产，无框架折叠。
+#
+# 证据与隐私约定（与 n8n.yaml 相同）：
+#   * 所有探测均为只读 —— 不执行被发现的程序，不读取文件内容；
+#   * 部署配置在 /app/api/.env（含密钥）——".env" 在读取黑名单里，
+#     连存在性探测都不会发生；/app/api/storage 只 stat 存在性，永不读取；
+#   * 进程命令行会经脱敏（token 类字符串打码）后截断存证。
+#
+# '~' 表示被扫描用户的 home 目录；confidence 为该证据的可信度（0~1）。
+# =============================================================================
+kind: client_rule
+id: dify               # 与 agents.yaml 矩阵条目对齐
+name: Dify
+asset_type: AGENT_PLATFORM
+revision: 1
+
+# -----------------------------------------------------------------------------
+# 安装证据（INSTALLED）
+# -----------------------------------------------------------------------------
+# 宿主形态是 docker compose 部署（容器即产品），宿主侧无 npm/pip 装包；
+# 源码 checkout 属开发形态，不在本轮识别范围 —— install 段留空。
+# 容器内版本见 container.python_roots。
+
+# -----------------------------------------------------------------------------
+# 配置证据（CONFIGURED）—— 只读存在性，永不读值
+# -----------------------------------------------------------------------------
+config:
+  existing_files: []
+
+# -----------------------------------------------------------------------------
+# 运行证据（RUNNING）—— 进程匹配
+# -----------------------------------------------------------------------------
+# 宿主侧无独有进程特征（gunicorn/celery 过于通用），不作宿主进程匹配。
+process: null
+
+# -----------------------------------------------------------------------------
+# 容器内布局（Docker 通道通用容器 client 机制读取；路径为容器内部绝对路径）
+# -----------------------------------------------------------------------------
+container:
+  # 产品本体：/app/api/pyproject.toml 的 [project] version 给出实装版本
+  python_roots:
+    - '/app/api'
+  # 状态目录（上传文件/数据集缓存），共享卷挂到 worker/agent_backend；
+  # 只 stat 存在性，永不读取内容
+  config_existing:
+    - '/app/api/storage'
+  # 进程 token 全部来自实勘的独有命令行片段；首段可执行名（python/uvicorn）
+  # 过于通用，不进 token 表
+  process_tokens:
+    - 'app:socketio_app'        # api / api_websocket（gunicorn 入口模块）
+    - 'celery_entrypoint'       # worker（dify 专属 celery 入口模块名）
+    - 'dify_agent.server'       # agent_backend（uvicorn 目标）
+  image_keywords:
+    - dify
+  # 一次部署 = 多个容器 = 一个 Agent 实体：按 compose 项目归并
+  compose_scope: true
+
+# -----------------------------------------------------------------------------
+# 置信度合成：base + 各状态权重之和，封顶 cap。状态可并存（文档 §2.3）
+# -----------------------------------------------------------------------------
+confidence:
+  base: 0.5
+  installed: 0.2
+  configured: 0.15
+  running: 0.25
+  cap: 0.95

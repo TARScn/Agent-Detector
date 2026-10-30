@@ -9,8 +9,8 @@ def test_packaged_rules_load_cleanly():
     loaded = load_rules()
     assert loaded.errors == []
     assert [r.id for r in loaded.client_rules] == ["claude-code", "codex-cli",
-                                                    "cursor", "hermes", "n8n",
-                                                    "openclaw", "opencode"]
+                                                    "cursor", "dify", "hermes",
+                                                    "n8n", "openclaw", "opencode"]
     names = {r.name for r in loaded.signature_rules}
     assert {"Ollama", "vLLM", "AgentScope"} <= names
     # 口径裁定 2026-10-26：依赖是资产的最终口径，进程只是发现的入口 ——

@@ -335,6 +335,10 @@ def test_self_built_inactive_when_directory_remains_but_not_running(tmp_path, mo
 
 from agent_detector.discovery.sources.docker_agents import DockerScanOutcome  # noqa: E402
 from test_docker_agents import (CID as DOCKER_CID,            # noqa: E402
+                                DIFY_API_CID,                 # noqa: E402
+                                DIFY_BACKEND_CID,             # noqa: E402
+                                DIFY_BEAT_CID,                # noqa: E402
+                                DIFY_WORKER_CID,              # noqa: E402
                                 LANGGRAPH_RULE as DOCKER_LANGGRAPH_RULE,
                                 container_client as docker_container_client)
 
@@ -358,6 +362,14 @@ def first_docker_outcome():
         client=docker_container_client())
 
 
+def dify_outcome():
+    """实勘 Dify compose 部署（5 容器）经真实 docker stage 归并成一个平台资产。"""
+    from agent_detector.discovery.sources import docker_agents
+    from test_docker_agents import CLIENT_RULES, dify_client
+    return docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE], "h", client_rules=CLIENT_RULES, client=dify_client())
+
+
 def test_run_scan_docker_channel_end_to_end(tmp_path, monkeypatch):
     result, engine = run_docker_scan(tmp_path, monkeypatch, first_docker_outcome())
     assert result["docker"]["candidates"] == 1
@@ -376,6 +388,28 @@ def test_run_scan_docker_channel_end_to_end(tmp_path, monkeypatch):
     assert instances[0]["container_id"] == DOCKER_CID
     assert apps and apps[0]["container_id"] == DOCKER_CID
     assert apps[0]["root_path"].startswith("container:")
+
+
+def test_compose_platform_asset_instances_per_container(tmp_path, monkeypatch):
+    """Dify 归并资产：一个 asset 行 + 每个成员容器各自的实例行（锚定各自的
+    StartedAt/container_id）；备注交代 compose 部署规模。"""
+    result, engine = run_docker_scan(tmp_path, monkeypatch, dify_outcome())
+    assert result["docker"]["agents"] == 1
+    summary = next(a for a in result["asset_summaries"] if a["detector"] == "dify")
+    with Session(engine) as session:
+        repo = AgentInventoryRepository(session)
+        asset = repo.get_asset(summary["asset_id"])
+        instances = repo.list_instances()
+    assert asset["origin"] == "docker" and asset["version"] == "1.18.0"
+    assert any("compose 项目 docker" in note for note in asset["notes"])
+    assert len(instances) == 3
+    assert {i["container_id"] for i in instances} == {
+        DIFY_API_CID, DIFY_WORKER_CID, DIFY_BACKEND_CID}
+    worker = next(i for i in instances if i["pid"] == 31932)
+    assert "celery_entrypoint" in worker["cmdline"]
+    assert all(i["status"] == "running" for i in instances)
+    # beat 容器无独有进程 token：有文件证据、无实例行
+    assert DIFY_BEAT_CID not in {i["container_id"] for i in instances}
 
 
 def test_docker_outage_never_verdicts_container_assets(tmp_path, monkeypatch):
