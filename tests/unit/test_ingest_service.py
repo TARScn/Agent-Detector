@@ -116,8 +116,8 @@ def test_rate_limit_caps_events_per_minute(tmp_path, monkeypatch):
     assert result["events"] == 3 and service.dropped_rate == 5
     tetra = make_service(engine)
     result = tetra.run_replay(TETRA_FIXTURE, format="tetragon")
-    # the two kprobe facts arrive after the three exec facts filled the window
-    assert result["events"] == 3 and tetra.dropped_rate == 2
+    # the kprobe facts arrive after the three exec facts filled the window
+    assert result["events"] == 3 and tetra.dropped_rate == 4
 
 
 def test_path_policy_basename_redacts_directories(tmp_path, monkeypatch):
@@ -238,8 +238,8 @@ def test_tetragon_replay_stores_attributed_events_and_skips_exits(tmp_path):
     seed_asset(engine)
     service = make_service(engine)
     result = service.run_replay(TETRA_FIXTURE, format="tetragon")
-    assert result["facts"] == 8   # 4 exec + 2 exit + connect + file-write facts
-    assert result["events"] == 5  # exits are lifecycle, container exec unattributed
+    assert result["facts"] == 10  # 4 exec + 2 exit + 2 connect + 2 write facts
+    assert result["events"] == 7  # exits are lifecycle, container exec unattributed
     assert service.exits_seen == 2
     assert service.dropped_unattributed == 1
 
@@ -255,12 +255,15 @@ def test_tetragon_replay_stores_attributed_events_and_skips_exits(tmp_path):
     assert script["evidence"][0] == "tetragon"
     assert script["flow_id"] == "tetragon-dGVzdGhvc3Q6MTAwMDA6NDEwMA=="
     assert script["observed_at"].startswith("2026-")
-    connect = next(event for event in events if event["operation"] == "NETWORK_CONNECT")
-    assert connect["endpoint"] == "93.184.216.34:80"
+    connect = next(event for event in events
+                   if event["operation"] == "NETWORK_CONNECT"
+                   and event["endpoint"] == "93.184.216.34:80")
     assert connect["pid"] == 4101
     assert "hook:security_socket_connect" in connect["evidence"]
-    modify = next(event for event in events if event["operation"] == "FILE_MODIFY")
-    assert modify["target"] == "/opt/agent/state.json"
+    modify = next(event for event in events
+                  if event["operation"] == "FILE_MODIFY"
+                  and event["target"] == "/opt/agent/state.json")
+    assert modify["pid"] == 4100
     ls_rows = sorted((event["pid"], event["target"]) for event in events
                      if event["operation"] == "COMMAND_EXEC")
     # pid is part of the suppression key: two ls processes stay distinct rows
@@ -274,7 +277,7 @@ def test_tetragon_replay_container_event_keeps_container_id(tmp_path, monkeypatc
     engine = make_engine(tmp_path / "db.sqlite3")
     service = make_service(engine)
     result = service.run_replay(TETRA_FIXTURE, format="tetragon")
-    assert result["events"] == 6
+    assert result["events"] == 8  # 4 execs + 2 connects + 2 writes, all recorded
     container = next(event for event in stored_events(engine, source="tetragon")
                      if event["pid"] == 4200)
     assert container["container_id"] == "b13f15ab2a169c85976efbd3a28b57f"

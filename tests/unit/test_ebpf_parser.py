@@ -62,8 +62,8 @@ def test_parses_exit_and_kprobe_events():
     assert connect.pid == 4101 and connect.exec_id
 
 
-def test_fixture_yields_nine_events_skipping_garbage_line():
-    assert len(load_events()) == 9
+def test_fixture_yields_twelve_events_skipping_garbage_line():
+    assert len(load_events()) == 12
 
 
 def test_garbage_and_foreign_json_return_none():

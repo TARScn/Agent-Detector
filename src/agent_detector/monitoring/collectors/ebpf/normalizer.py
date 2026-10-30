@@ -34,9 +34,8 @@ def fact_from_event(event: TetragonEvent) -> BehaviorFact | None:
 
 
 def _kprobe_fact(event: TetragonEvent) -> BehaviorFact | None:
-    args = _kprobe_args(event)
     if event.function_name in _CONNECT_FUNCTIONS:
-        endpoint = _sockaddr_endpoint(args)
+        endpoint = _sockaddr_endpoint(event)
         if endpoint is None:  # AF_UNIX / AF_NETLINK: local IPC, not recorded
             return None
         return _fact(event, kind="net.connect", result="success", endpoint=endpoint)
@@ -44,8 +43,8 @@ def _kprobe_fact(event: TetragonEvent) -> BehaviorFact | None:
         # The policy already filters to MAY_WRITE; checking the mask argument
         # keeps the fact honest even on unfiltered policies. Reads stay off by
         # default (MAY_READ=4), mirroring the auditd channel.
-        path = _file_path(args)
-        if path is None or not _write_mask(args):
+        path = _file_path(event)
+        if path is None or not _write_mask(event):
             return None
         return _fact(event, kind="file.write", result="success", path=path)
     return None
@@ -75,21 +74,29 @@ def _fact(event: TetragonEvent, *, kind: str, result: str,
         container_id=event.container_id, exec_id=event.exec_id)
 
 
-def _kprobe_args(event: TetragonEvent) -> list:
+def _iter_args(event: TetragonEvent):
+    """Yield (type, value) for kprobe args in either export shape.
+
+    The standalone JSON export flattens args into type-suffixed keys
+    ({"file_arg": {...}}, {"int_arg": 2}, {"sockaddr_arg": {...}}), while the
+    k8s CRD style wraps them as {"type": ..., "value": ...}.
+    """
     payload = event.raw.get("process_kprobe")
-    if not isinstance(payload, dict):
-        return []
-    args = payload.get("args")
-    return args if isinstance(args, list) else []
-
-
-def _sockaddr_endpoint(args: list) -> str | None:
-    """Decode a Tetragon sockaddr kprobe arg; only INET/INET6 become facts."""
-    for arg in args:
-        if not isinstance(arg, dict) or arg.get("type") != "sockaddr":
+    args = payload.get("args") if isinstance(payload, dict) else None
+    for arg in args if isinstance(args, list) else []:
+        if not isinstance(arg, dict):
             continue
-        value = arg.get("value")
-        if not isinstance(value, dict):
+        if "type" in arg:
+            yield str(arg["type"]), arg.get("value")
+        else:
+            for key, value in arg.items():
+                yield key.removesuffix("_arg"), value
+
+
+def _sockaddr_endpoint(event: TetragonEvent) -> str | None:
+    """Decode a sockaddr kprobe arg; only INET/INET6 become facts."""
+    for atype, value in _iter_args(event):
+        if atype != "sockaddr" or not isinstance(value, dict):
             continue
         sin4 = value.get("sin4") or value.get("sin")
         if isinstance(sin4, dict) and sin4.get("addr"):
@@ -97,22 +104,25 @@ def _sockaddr_endpoint(args: list) -> str | None:
         sin6 = value.get("sin6")
         if isinstance(sin6, dict) and sin6.get("addr"):
             return f"[{sin6['addr']}]:{sin6.get('port', 0)}"
+        family = str(value.get("family") or "")
+        addr = str(value.get("addr") or "")
+        if family == "AF_INET" and "." in addr and addr != "invalid IP":
+            return f"{addr}:{value.get('port', 0)}"
+        if family == "AF_INET6" and ":" in addr and addr != "invalid IP":
+            return f"[{addr}]:{value.get('port', 0)}"
     return None
 
 
-def _file_path(args: list) -> str | None:
-    for arg in args:
-        if not isinstance(arg, dict) or arg.get("type") != "file":
-            continue
-        value = arg.get("value")
-        if isinstance(value, dict) and value.get("path"):
+def _file_path(event: TetragonEvent) -> str | None:
+    for atype, value in _iter_args(event):
+        if atype == "file" and isinstance(value, dict) and value.get("path"):
             return str(value["path"])
     return None
 
 
-def _write_mask(args: list) -> bool:
-    for arg in args:
-        if isinstance(arg, dict) and arg.get("type") == "int" and arg.get("value") == 2:
+def _write_mask(event: TetragonEvent) -> bool:
+    for atype, value in _iter_args(event):
+        if atype == "int" and value == 2:
             return True
     return False
 
