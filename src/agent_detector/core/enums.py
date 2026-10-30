@@ -40,6 +40,7 @@ class EvidenceKind(str, Enum):
     HTTP_PROBE = "http_probe"
     NATIVE_HOOK = "native_hook"
     SYSMON = "sysmon"
+    CONTAINER_METADATA = "container_metadata"
 
 
 class VersionSource(str, Enum):
@@ -47,6 +48,7 @@ class VersionSource(str, Enum):
     INSTALLER_METADATA = "installer-metadata"
     LOCKED = "locked"
     DECLARED = "declared"
+    IMAGE_TAG = "image-tag"
     PROCESS_CLAIM = "process-claim"
     UNKNOWN = "unknown"
 

@@ -39,6 +39,11 @@ _ADDITIVE_COLUMNS["agent_assets"]["app_id"] = "VARCHAR(96)"
 # Post-scan verification lifecycle (re-install flips back to active on upsert)
 _ADDITIVE_COLUMNS["agent_assets"]["status"] = "VARCHAR(24) DEFAULT 'active'"
 _ADDITIVE_COLUMNS["applications"] = {"status": "VARCHAR(24) DEFAULT 'active'"}
+# Docker channel (Docker Core): container-origin assets and instances
+_ADDITIVE_COLUMNS["agent_assets"]["origin"] = "VARCHAR(16) DEFAULT 'host'"
+_ADDITIVE_COLUMNS["agent_assets"]["container_id"] = "VARCHAR(96)"
+_ADDITIVE_COLUMNS["agent_instances"] = {"origin": "VARCHAR(16) DEFAULT 'host'",
+                                        "container_id": "VARCHAR(96)"}
 
 
 def ensure_schema(engine: Engine) -> list[str]:

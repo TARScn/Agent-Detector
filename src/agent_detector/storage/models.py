@@ -137,6 +137,10 @@ class AgentAssetRow(Base):
     mcp_servers_json: Mapped[str] = mapped_column(Text, default="[]")
     llm_endpoints_json: Mapped[str] = mapped_column(Text, default="[]")
     app_id: Mapped[str | None] = mapped_column(String(96))
+    # Docker channel (Docker Core): where this asset lives. origin stays
+    # "host" for everything the classic channels found.
+    origin: Mapped[str] = mapped_column(String(16), default="host")
+    container_id: Mapped[str | None] = mapped_column(String(96))
     # Post-scan verification (design §6.3): active = seen in the latest scan,
     # inactive = self-built whose project dir still exists but no live process,
     # removed = re-verified gone (uninstalled / path deleted / sighting over).
@@ -206,6 +210,9 @@ class AgentInstanceRow(Base):
     cmdline: Mapped[str] = mapped_column(Text, default="")
     cwd: Mapped[str | None] = mapped_column(String(512))
     parent_chain_json: Mapped[str] = mapped_column(Text, default="[]")
+    # Docker channel: container-internal process of a container-origin asset.
+    origin: Mapped[str] = mapped_column(String(16), default="host")
+    container_id: Mapped[str | None] = mapped_column(String(96))
     status: Mapped[str] = mapped_column(String(24), default="running")
     evidence_json: Mapped[str] = mapped_column(Text, default="[]")
     started_at: Mapped[str | None] = mapped_column(String(48))

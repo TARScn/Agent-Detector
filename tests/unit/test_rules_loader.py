@@ -9,13 +9,16 @@ def test_packaged_rules_load_cleanly():
     loaded = load_rules()
     assert loaded.errors == []
     assert [r.id for r in loaded.client_rules] == ["claude-code", "codex-cli",
-                                                    "cursor", "hermes", "openclaw",
-                                                    "opencode"]
+                                                    "cursor", "dify", "hermes",
+                                                    "n8n", "openclaw", "opencode"]
     names = {r.name for r in loaded.signature_rules}
-    assert {"Ollama", "vLLM", "LangGraph", "CrewAI"} <= names
+    assert {"Ollama", "vLLM", "AgentScope"} <= names
+    # 口径裁定 2026-10-26：依赖是资产的最终口径，进程只是发现的入口 ——
+    # 有专属 framework_rule / client_rule 的产品不留在签名集（抢证据且拿不到版本）。
+    assert not {"LangChain", "LangGraph", "AutoGen", "CrewAI"} & names
     assert "Codex CLI" not in names  # moved to the codex-cli client rule
     assert "OpenClaw" not in names  # moved to the openclaw client rule
-    assert len(loaded.signature_rules) >= 11
+    assert len(loaded.signature_rules) >= 7
 
 
 def test_broken_rule_file_is_isolated(tmp_path):
@@ -30,7 +33,7 @@ def test_broken_rule_file_is_isolated(tmp_path):
     loaded = load_rules(extra_dir=rules_dir)
     assert len(loaded.errors) == 3
     assert not loaded.client_rules or loaded.client_rules[0].id == "claude-code"
-    assert len(loaded.signature_rules) >= 11  # packaged set still intact
+    assert len(loaded.signature_rules) >= 7  # packaged set still intact
 
 
 def test_external_dir_overrides_packaged_rule_by_id(tmp_path):

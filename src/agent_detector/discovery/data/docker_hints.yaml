@@ -1,0 +1,49 @@
+kind: docker_hint_set
+revision: 1
+# 候选筛选是宽松 OR（设计原则：宁多勿漏 —— python-app 这类镜像名完全可能
+# 在跑 LangGraph，容器名/镜像名都不可信）。命中任意 image_keywords /
+# command_tokens / runtime 判定的容器都会进入识别深扫；筛选只决定深度
+# 分析的成本，不做任何资产结论。
+image_keywords:
+  - agent
+  - agentic
+  - langchain
+  - langgraph
+  - crewai
+  - autogen
+  - openclaw
+  - claude
+  - codex
+  - cursor
+  - opencode
+  - hermes
+  - openai
+  - anthropic
+  - llm
+  - n8n
+  - dify
+command_tokens:
+  - langchain
+  - langgraph
+  - langgraph_cli
+  - crewai
+  - autogen
+  - openclaw
+# 镜像仓库末段（去 registry/tag）命中即视为对应运行时容器，整容器进入依赖扫描
+runtime_image_bases:
+  - python
+  - python3
+  - node
+  - nodejs
+# docker top 进程名首段命中即视为对应运行时
+runtime_process_names:
+  - python
+  - python3
+  - node
+  - nodejs
+  - npm
+  - npx
+  - bun
+  - deno
+  - uvicorn
+  - gunicorn

@@ -4,7 +4,10 @@
 # 对全部进程命令行做大小写不敏感的正则匹配。匹配上即产出候选资产：
 #   * 仅进程命中：RUNNING，置信度 0.65
 #   * 同时关联本机 LISTEN 端口：置信度 0.85
-# 有专属 client_rule 的产品（见 claude_code.yaml）不放在这里，避免两套逻辑抢证据。
+# 资产统计口径（2026-10-26 用户裁定）：**依赖是资产的最终口径，进程只是发现
+# 的入口**。因此有专属 client_rule 或 framework_rule 的产品一律不放在这里 ——
+# 宽松单词命中会与专属规则产生多个 asset_id 抢同一份证据，且签名匹配拿不到
+# 版本、依赖已卸载后仍会因路径/参数里的单词误报"运行中"。
 #
 # 注意：正则只匹配"可执行文件 / 模块 / 可识别 token"，
 # 不要写 'agent'、'python' 这类泛化词 —— 误报率会失控。
@@ -33,18 +36,9 @@ rules:
     pattern: '(?:\bdify\b|\bdify-api\b)'
 
   # ---- Agent 框架 ----
-  - name: LangGraph
-    asset_type: AGENT_RUNTIME
-    pattern: '\blanggraph\b'
-  - name: LangChain
-    asset_type: AGENT_RUNTIME
-    pattern: '\blangchain\b'
-  - name: AutoGen
-    asset_type: AGENT_RUNTIME
-    pattern: '\bautogen(?:_agentchat|_studio)?\b'
-  - name: CrewAI
-    asset_type: AGENT_RUNTIME
-    pattern: '\bcrewai\b'
+  # LangChain / LangGraph / AutoGen / CrewAI 已迁至各自的 framework_*.yaml
+  # （依赖识别，installed/locked/declared 出处 + 版本）。进程名 sighting 与
+  # 依赖资产抢证据，且"装了框架但没跑"时仍会误报运行中 —— 不回这里。
   - name: AgentScope
     asset_type: AGENT_RUNTIME
     pattern: '\bagentscope\b'
@@ -56,5 +50,5 @@ rules:
 
   # ---- 其他 Agent 客户端 ----
   # Codex CLI 已迁至专属规则 codex_cli.yaml、OpenClaw 已迁至 openclaw.yaml。
-  # 宽松单词命中会与专属规则产生多个 asset_id 抢同一份证据，且签名匹配
-  # 拿不到版本 —— 有专属规则的产品一律不回这里。
+  # 有专属规则的产品一律不回这里（见文件头口径说明）。
+

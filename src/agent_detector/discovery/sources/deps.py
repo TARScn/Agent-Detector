@@ -129,13 +129,18 @@ def _requirement_name(line: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _declared_components(project: ProjectInfo, interest: set[str]) -> list[ComponentInfo]:
+def components_from_pyproject_text(text: str, source: str,
+                                   interest: set[str]) -> list[ComponentInfo]:
+    """Declared components from pyproject.toml content (PEP 621 + poetry).
+
+    Text-level so the Docker channel can feed container-read manifests through
+    the exact same parsing as host projects (source is the display path).
+    """
     found: list[ComponentInfo] = []
-    pyproject = Path(project.root) / "pyproject.toml"
     try:
-        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError):
-        data = {}
+        data = tomllib.loads(text)
+    except (UnicodeError, ValueError, tomllib.TOMLDecodeError):
+        return found
     project_table = data.get("project")
     if isinstance(project_table, dict):
         for requirement in project_table.get("dependencies", []) or []:
@@ -145,7 +150,7 @@ def _declared_components(project: ProjectInfo, interest: set[str]) -> list[Compo
             if name and normalize_name(name) in interest:
                 found.append(ComponentInfo(name=normalize_name(name), version="UNKNOWN",
                                            version_source=VersionSource.DECLARED,
-                                           source_path=str(pyproject)))
+                                           source_path=source))
         optional = project_table.get("optional-dependencies")
         if isinstance(optional, dict):
             for group in optional.values():
@@ -158,7 +163,7 @@ def _declared_components(project: ProjectInfo, interest: set[str]) -> list[Compo
                     if name and normalize_name(name) in interest:
                         found.append(ComponentInfo(name=normalize_name(name), version="UNKNOWN",
                                                    version_source=VersionSource.DECLARED,
-                                                   source_path=str(pyproject)))
+                                                   source_path=source))
     poetry = data.get("tool", {}).get("poetry", {}).get("dependencies")
     if isinstance(poetry, dict):
         for name in poetry:
@@ -167,20 +172,64 @@ def _declared_components(project: ProjectInfo, interest: set[str]) -> list[Compo
             if normalize_name(str(name)) in interest:
                 found.append(ComponentInfo(name=normalize_name(str(name)), version="UNKNOWN",
                                            version_source=VersionSource.DECLARED,
-                                           source_path=str(pyproject)))
+                                           source_path=source))
+    return found
+
+
+def components_from_requirements_text(text: str, source: str,
+                                      interest: set[str]) -> list[ComponentInfo]:
+    """Declared components from requirements.txt content."""
+    found: list[ComponentInfo] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "-")):
+            continue
+        name = _requirement_name(stripped)
+        if name and normalize_name(name) in interest:
+            found.append(ComponentInfo(name=normalize_name(name), version="UNKNOWN",
+                                       version_source=VersionSource.DECLARED,
+                                       source_path=source))
+    return found
+
+
+def components_from_lock_text(text: str, source: str,
+                              interest: set[str]) -> list[ComponentInfo]:
+    """Locked components from uv.lock / poetry.lock content."""
+    found: list[ComponentInfo] = []
+    try:
+        data = tomllib.loads(text)
+    except (UnicodeError, ValueError, tomllib.TOMLDecodeError):
+        return found
+    for package in data.get("package", []):
+        if not isinstance(package, dict):
+            continue
+        name = package.get("name")
+        if not name:
+            continue
+        if normalize_name(str(name)) in interest:
+            found.append(ComponentInfo(name=normalize_name(str(name)),
+                                       version=str(package.get("version") or "UNKNOWN"),
+                                       version_source=VersionSource.LOCKED,
+                                       source_path=source))
+    return found
+
+
+def _declared_components(project: ProjectInfo, interest: set[str]) -> list[ComponentInfo]:
+    found: list[ComponentInfo] = []
+    pyproject = Path(project.root) / "pyproject.toml"
+    try:
+        text = pyproject.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        text = ""
+    if text:
+        found.extend(components_from_pyproject_text(text, str(pyproject), interest))
     requirements = Path(project.root) / "requirements.txt"
     try:
-        for line in requirements.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith(("#", "-")):
-                continue
-            name = _requirement_name(stripped)
-            if name and normalize_name(name) in interest:
-                found.append(ComponentInfo(name=normalize_name(name), version="UNKNOWN",
-                                           version_source=VersionSource.DECLARED,
-                                           source_path=str(requirements)))
+        text = requirements.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
-        pass
+        text = ""
+    if text:
+        found.extend(components_from_requirements_text(text, str(requirements), interest))
     return found
 
 
@@ -189,20 +238,10 @@ def _locked_components(project: ProjectInfo, interest: set[str]) -> list[Compone
     for lock_name in ("uv.lock", "poetry.lock"):
         lock_path = Path(project.root) / lock_name
         try:
-            data = tomllib.loads(lock_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError):
+            text = lock_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
             continue
-        for package in data.get("package", []):
-            if not isinstance(package, dict):
-                continue
-            name = package.get("name")
-            if not name:
-                continue
-            if normalize_name(str(name)) in interest:
-                found.append(ComponentInfo(name=normalize_name(str(name)),
-                                           version=str(package.get("version") or "UNKNOWN"),
-                                           version_source=VersionSource.LOCKED,
-                                           source_path=str(lock_path)))
+        found.extend(components_from_lock_text(text, str(lock_path), interest))
     return found
 
 

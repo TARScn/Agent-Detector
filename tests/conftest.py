@@ -37,3 +37,23 @@ def home(tmp_path):
     path = tmp_path / "home"
     path.mkdir()
     return path
+
+
+@pytest.fixture(autouse=True)
+def _docker_channel_off(monkeypatch):
+    """Unit tests never touch the real Docker daemon.
+
+    When a local daemon IS running, every ``run_scan`` would otherwise deep
+    scan the host's real containers (seconds per scan, dozens of scans per
+    suite). Tests that exercise the docker channel monkeypatch
+    ``scan_service.scan_docker_agents`` themselves — their patch is applied
+    after this one, so theirs wins.
+    """
+    from agent_detector.discovery.scanner import scan as scan_service
+    from agent_detector.discovery.sources.docker_agents import DockerScanOutcome
+
+    monkeypatch.setattr(
+        scan_service, "scan_docker_agents",
+        lambda rules, hostname, **kwargs: DockerScanOutcome(
+            stats={"containers_total": 0, "candidates": 0, "agents": 0,
+                   "error": "docker disabled in unit tests"}))

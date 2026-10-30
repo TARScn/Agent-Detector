@@ -4,6 +4,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from agent_detector.console.api.agent_view import (app_name_map, attach_container_relations,
+                                                   merge_agent_rows)
 from agent_detector.console.api.deps import Services, get_services
 from agent_detector.storage import (AgentInventoryRepository,
                                                  ApplicationRepository,
@@ -19,18 +21,17 @@ def _services() -> Services:
 @router.get("/agents")
 def list_agents(include_stopped: bool = False, include_removed: bool = False,
                 services: Services = Depends(_services)):
-    """Agent 资产清单：能力、保护状态与运行实例数。已复核移除的资产默认隐藏。"""
+    """Agent 资产清单：以 Agent 实体（产品/应用）为单位，框架折叠为依赖。"""
     with Session(services.engine) as session:
         repository = AgentInventoryRepository(session)
         instances = repository.list_instances(include_stopped=include_stopped)
         counts: dict[str, int] = {}
         for instance in instances:
             counts[instance["asset_id"]] = counts.get(instance["asset_id"], 0) + 1
-        items = []
-        for asset in repository.list_assets(include_removed=include_removed):
-            asset["instance_count"] = counts.get(asset["asset_id"], 0)
+        assets = repository.list_assets(include_removed=include_removed)
+        for asset in assets:
             asset["session_count"] = repository.count_sessions(asset["asset_id"])
-            items.append(asset)
+        items = merge_agent_rows(assets, app_name_map(session), counts)
     return {"items": items, "total": len(items),
             "matrix_errors": services.matrix.errors}
 
@@ -50,6 +51,7 @@ def agent_detail(asset_id: str, services: Services = Depends(_services)):
         if asset.get("app_id"):
             asset["application"] = ApplicationRepository(session).get_application(
                 asset["app_id"])
+        attach_container_relations(asset, session)
     return asset
 
 

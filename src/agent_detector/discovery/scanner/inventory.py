@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from sqlalchemy.orm import Session
 
@@ -31,6 +31,7 @@ from agent_detector.core.models import (AgentInstance, AgentInventoryItem, Detec
                                           HostFacts, ProjectInfo)
 from agent_detector.interception.hooks.installer import inspect as inspect_hook
 from agent_detector.interception.hooks.registry import get_adapter
+from agent_detector.core.security import redact
 from agent_detector.storage import AgentInventoryRepository, ApplicationRepository
 
 # Where our own hook entry is expected relative to a home directory; used to
@@ -98,34 +99,47 @@ class InventoryBuilder:
     def apply_scan(self, session: Session, detected: list[DetectedAsset],
                    facts: HostFacts, *,
                    app_links: dict[str, dict] | None = None,
-                   failed_detectors: tuple[str, ...] | set[str] = ()) -> list[dict]:
+                   failed_detectors: tuple[str, ...] | set[str] = (),
+                   docker_context: dict | None = None) -> list[dict]:
         """Upsert Agent assets/instances for one scan; returns the asset dicts.
 
         ``app_links`` maps a self-built framework asset id to its application
         ({app_id, app_name}); CLI-client assets never have one.
         ``failed_detectors`` are detector names that crashed this scan — assets
         they own are never marked removed, because their absence proves nothing.
+        ``docker_context`` carries the Docker channel's result ({failed,
+        containers_seen, candidates_seen, links}); ``links`` maps a container
+        asset id to its container ({container_id, image, state, started_at,
+        command, processes}).
         """
         repository = AgentInventoryRepository(session)
         self.refresh_mcp()
         processes = {proc.pid: proc for proc in facts.processes}
         app_links = app_links or {}
+        container_links = (docker_context or {}).get("links") or {}
         seen: list[dict] = []
         seen_asset_ids: set[str] = set()
         instances: list[AgentInstance] = []
         for asset in detected:
             is_client = asset.asset_type is AssetType.AGENT_CLIENT
+            # Agent 平台产品（n8n 等）与终端 client 同列表、同生命周期；
+            # 副作用：签名集里的平台 sighting（如 Dify）也从此进入列表，
+            # 进程消失后由 sighting-only 复核自动 removed。
+            is_platform = asset.asset_type is AssetType.AGENT_PLATFORM
             is_framework = (asset.asset_type is AssetType.AGENT_RUNTIME
                             and asset.detector in self._framework_ids)
-            if not is_client and not is_framework:
+            if not (is_client or is_platform or is_framework):
                 continue
             entry = self.matrix.for_type(self._agent_key(asset))
             agent_type = entry.id if entry else self._agent_key(asset)
             link = app_links.get(asset.asset_id) if is_framework else None
-            item = self._inventory_item(asset, agent_type, entry, link=link)
+            container = container_links.get(asset.asset_id)
+            item = self._inventory_item(asset, agent_type, entry, link=link,
+                                        container=container)
             repository.upsert_asset(item)
             seen_asset_ids.add(asset.asset_id)
-            instances.extend(self._instances(asset, processes, agent_type))
+            instances.extend(self._instances(asset, processes, agent_type,
+                                             container=container))
             seen.append({"asset_id": item.asset_id, "agent_type": agent_type,
                          "name": item.name, "protection_status": item.protection.value,
                          "hook_state": item.hook_state.value,
@@ -136,15 +150,16 @@ class InventoryBuilder:
         if instances or seen_asset_ids:
             repository.upsert_instances(instances, seen_asset_ids)
         self._verify_stale(session, repository, seen_asset_ids, app_links,
-                           failed_detectors)
+                           failed_detectors, docker_context=docker_context)
         return seen
 
     def _verify_stale(self, session: Session, repository: AgentInventoryRepository,
                       seen_asset_ids: set[str], app_links: dict[str, dict],
-                      failed_detectors: tuple[str, ...] | set[str]) -> None:
+                      failed_detectors: tuple[str, ...] | set[str],
+                      docker_context: dict | None = None) -> None:
         """Re-verify assets that did not show up in this scan (重扫复核).
 
-        Three verification rules, one per asset kind:
+        Four verification rules, one per asset kind:
 
         * 终端 agent (client rule): the scan already ran the rule's
           install/config probes, so absence from the results means the
@@ -160,8 +175,21 @@ class InventoryBuilder:
           an asset alive.
         * Sighting-only assets (signature hits, no app link): their whole
           existence claim was the process; gone → removed.
+        * 容器资产 (container_id set): the host-path rules above do not
+          apply — project roots are container-internal and unreachable
+          without the daemon. The Docker channel's own result is the
+          verdict: container gone → hard delete; deep-scanned this round
+          but the asset did not come back → the framework left the
+          container → hard delete (宿主"依赖已卸载"的容器等价); container
+          present but not deep-scanned → inactive (no verdict possible).
+          When the docker channel failed or was disabled, container assets
+          get no verdict at all — same guard as a crashed detector.
         """
         from agent_detector.discovery.sources.frameworks import rule_matches
+        docker = docker_context or {}
+        docker_failed = bool(docker.get("failed"))
+        containers_seen = set(docker.get("containers_seen") or ())
+        candidates_seen = set(docker.get("candidates_seen") or ())
         applications = ApplicationRepository(session)
         apps_by_id = {app["app_id"]: app
                       for app in applications.all_for_verification()}
@@ -171,6 +199,17 @@ class InventoryBuilder:
         unseen_framework: dict[str, list[dict]] = {}
         for row in repository.list_assets(include_removed=True):
             if row["asset_id"] in seen_asset_ids:
+                continue
+            if row.get("container_id"):
+                if docker_failed:
+                    continue  # docker channel silent: no verdict for containers
+                container_id = row["container_id"]
+                if container_id not in containers_seen:
+                    repository.delete_asset(row["asset_id"])  # 容器已删除
+                elif container_id in candidates_seen:
+                    repository.delete_asset(row["asset_id"])  # 深扫未见：容器内已卸载
+                else:
+                    repository.set_status(row["asset_id"], "inactive")  # 无法复核
                 continue
             if row["agent_type"].replace("-", "_") in failed:
                 continue  # its detector crashed: absence proves nothing
@@ -210,18 +249,32 @@ class InventoryBuilder:
             else:
                 applications.delete_application(app_id)  # venv 空壳
 
-        if not frameworks_failed:
-            for app_id, app in apps_by_id.items():
-                if app_id in seen_apps or app_id in unseen_framework:
-                    continue
-                if not Path(app["root_path"]).exists():
-                    applications.delete_application(app_id)
-                    continue
-                installed = self._installed_dependencies(app)
-                if installed is None or installed:
-                    applications.set_status(app_id, "inactive")
-                else:
-                    applications.delete_application(app_id)
+        for app_id, app in apps_by_id.items():
+            if app_id in seen_apps or app_id in unseen_framework:
+                continue
+            container_id = app.get("container_id")
+            if container_id:
+                # Container application with no asset rows re-seen: the asset
+                # verdicts above already handled the assets; here the
+                # application row follows the container, not the host path.
+                if not docker_failed:
+                    if container_id in containers_seen:
+                        # 容器在而框架资产未再现：可能仅剩 SDK 依赖，置 inactive；
+                        # 依赖彻底清空的容器由下一扫描的 upsert 语义自然重建或维持。
+                        applications.set_status(app_id, "inactive")
+                    else:
+                        applications.delete_application(app_id)  # 容器已删除
+                continue
+            if frameworks_failed:
+                continue
+            if not Path(app["root_path"]).exists():
+                applications.delete_application(app_id)
+                continue
+            installed = self._installed_dependencies(app)
+            if installed is None or installed:
+                applications.set_status(app_id, "inactive")
+            else:
+                applications.delete_application(app_id)
 
         # Verdicts are in: removed/inactive assets have no live process by
         # definition, so their instance rows must not stay "running" (they
@@ -262,12 +315,18 @@ class InventoryBuilder:
     def _agent_key(asset: DetectedAsset) -> str:
         """Rule id (`claude_code`) or slugified display name for signature hits."""
         key = asset.detector or ""
+        if key == "docker":
+            # Docker-channel client asset: the channel marker is not a rule
+            # id; the display-name slug ("OpenClaw" -> "openclaw") hits the
+            # capability matrix like a signature hit does.
+            return (asset.name or "").strip().lower().replace(" ", "_")
         if key and key != "signatures":
             return key
         return (asset.name or "").strip().lower().replace(" ", "_")
 
     def _inventory_item(self, asset: DetectedAsset, agent_type: str, entry,
-                        *, link: dict | None = None) -> AgentInventoryItem:
+                        *, link: dict | None = None,
+                        container: dict | None = None) -> AgentInventoryItem:
         adapter = get_adapter(agent_type)
         hook_state = HookState.UNSUPPORTED
         notes: list[str] = []
@@ -281,6 +340,14 @@ class InventoryBuilder:
             notes.append("未适配的 Agent：能力不做保证")
         if entry is not None:
             notes.extend(entry.notes)
+        if container:
+            # compose 归并资产：主容器只是代表，备注交代整个部署的规模
+            members = container.get("containers") or []
+            scope = f"，compose 项目 {container['compose_project']}" \
+                if container.get("compose_project") else ""
+            extra = f"，共 {len(members)} 个容器" if len(members) > 1 else ""
+            notes.insert(0, f"容器资产：{container.get('image', '')}"
+                            f"（{container.get('state', '')}{scope}{extra}）")
         capabilities = entry.capabilities() if entry else {
             "discovery": "P2", "monitor": "P2", "protect": "PLANNED"}
         rule = self._rule_by_id.get(asset.detector or "")
@@ -307,11 +374,16 @@ class InventoryBuilder:
                 self.mcp_servers, agent_type)),
             llm_endpoints=tuple(llm_endpoints),
             app_id=link.get("app_id") if link else None,
+            origin="docker" if container else "host",
+            container_id=container.get("container_id") if container else None,
             notes=tuple(dict.fromkeys(notes)),
             last_seen_at=_now())
 
     def _instances(self, asset: DetectedAsset, processes: dict,
-                   agent_type: str) -> list[AgentInstance]:
+                   agent_type: str, *,
+                   container: dict | None = None) -> list[AgentInstance]:
+        if container is not None:
+            return self._container_instances(asset, container, agent_type)
         instances: list[AgentInstance] = []
         for pid in asset.running_pids:
             proc = processes.get(pid)
@@ -327,6 +399,43 @@ class InventoryBuilder:
                 started_at=start, last_seen_at=_now(),
                 parent_chain=_chain(proc, processes),
                 evidence=("scan", "running_pids")))
+        return instances
+
+    def _container_instances(self, asset: DetectedAsset, container: dict,
+                             agent_type: str) -> list[AgentInstance]:
+        """容器内实例：pid 是容器内 PID，身份锚定容器 StartedAt —— 容器重启
+        产生新 StartedAt，自然形成新实例；停止容器没有 running_pids，无实例行。
+        compose 归并资产（link 带 ``containers`` 列表）按成员容器逐一展开，
+        每个实例锚定自己容器的 StartedAt 与 container_id。"""
+        members = container.get("containers")
+        if members:
+            instances: list[AgentInstance] = []
+            for member in members:
+                instances.extend(
+                    self._container_instances(asset, member, agent_type))
+            return instances
+        processes_seen = container.get("processes") or {}
+        started_at = container.get("started_at") or None
+        instances = []
+        if "running_pids" in container:
+            pids = container["running_pids"]  # compose 成员：只属本容器
+        else:
+            pids = asset.running_pids
+        for pid in pids:
+            cmdline = str(processes_seen.get(str(pid))
+                          or container.get("command") or "")
+            tokens = cmdline.split()
+            first = tokens[0] if tokens else ""
+            instances.append(AgentInstance(
+                instance_id=build_instance_id(asset.asset_id, pid, started_at),
+                asset_id=asset.asset_id, agent_type=agent_type, pid=pid,
+                process_name=PurePosixPath(first.replace("\\", "/")).name if first else "",
+                executable=asset.executable,
+                cmdline=redact(cmdline)[:400] if cmdline else "",
+                started_at=started_at, last_seen_at=_now(),
+                evidence=("scan", "container:top"),
+                origin="docker",
+                container_id=container.get("container_id")))
         return instances
 
 

@@ -94,6 +94,67 @@ def _facts():
                      sockets=())
 
 
+def test_agents_list_merges_frameworks_into_entities(client, services):
+    """口径 2026-10-26：清单以 Agent 实体为单位 —— 容器框架折叠进产品，
+    宿主多框架折叠进应用（统一应用名）；总览计数与清单一致。"""
+    from agent_detector.core.enums import AssetState, AssetType, VersionSource
+    from agent_detector.core.models import (AgentInventoryItem, ComponentInfo,
+                                            ProjectInfo, VersionInfo)
+    from agent_detector.storage import ApplicationRepository
+
+    def item(aid, name, agent_type, *, app_id=None, container_id=None,
+             origin="host", version="1.0"):
+        return AgentInventoryItem(
+            asset_id=aid, agent_type=agent_type, name=name,
+            version=VersionInfo(version, VersionSource.PACKAGE_METADATA, 0.9),
+            states=(AssetState.INSTALLED,), confidence=0.8,
+            app_id=app_id, origin=origin, container_id=container_id,
+            capabilities={"discovery": "P2", "monitor": "P2",
+                          "protect": "PLANNED"})
+
+    with Session(services.engine) as session:
+        repo = AgentInventoryRepository(session)
+        repo.upsert_asset(item("n8n--1", "n8n", "n8n", container_id="c1",
+                               origin="docker", version="2.44.7"))
+        repo.upsert_asset(item("langchain--2", "LangChain · n8n", "langchain",
+                               app_id="app--pkg", container_id="c1",
+                               origin="docker", version="1.2.8"))
+        repo.upsert_asset(item("langchain--3", "LangChain · demo", "langchain",
+                               app_id="app--demo", version="1.4.7"))
+        repo.upsert_asset(item("langgraph--4", "LangGraph · demo", "langgraph",
+                               app_id="app--demo", version="1.2.16"))
+        apps = ApplicationRepository(session)
+        apps.upsert(ProjectInfo(project_id="app--pkg", runtime="node",
+                                root="container:c1/usr/local/lib/node_modules/n8n",
+                                name="n8n", container_id="c1",
+                                resolver_status="resolved"),
+                    [ComponentInfo(name="@langchain/core", version="1.2.8",
+                                   version_source=VersionSource.PACKAGE_METADATA)],
+                    app_id="app--pkg")
+        apps.upsert(ProjectInfo(project_id="app--demo", runtime="python",
+                                root="D:/code/demo", name="agentTest_langchain",
+                                resolver_status="resolved"),
+                    [], app_id="app--demo")
+        session.commit()
+
+    items = client.get("/api/v1/agents").json()["items"]
+    by_id = {item["asset_id"]: item for item in items}
+    assert set(by_id) == {"n8n--1", "langchain--3"}  # 框架行折叠，4 行 → 2 行
+    n8n = by_id["n8n--1"]
+    assert n8n["dependencies"][0]["name"] == "LangChain"
+    assert n8n["dependencies"][0]["version"] == "1.2.8"
+    demo = by_id["langchain--3"]
+    assert demo["name"] == "agentTest_langchain"  # 统一应用名
+    assert [d["name"] for d in demo["dependencies"]] == ["LangChain", "LangGraph"]
+
+    detail = client.get("/api/v1/agents/n8n--1").json()
+    assert detail["dependencies"][0]["name"] == "LangChain"  # 包含关系
+    assert detail["application"]["components"][0]["name"] == "@langchain/core"
+
+    overview = client.get("/api/v1/overview").json()
+    assert overview["agents"]["total"] == len(items)  # 计数口径一致
+
+
 def test_scan_conflict_is_reported_as_409(client, services):
     from agent_detector.discovery.scanner import scan as scanner
 

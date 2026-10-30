@@ -173,6 +173,30 @@ class FrameworkRule(_Strict):
     confidence: ConfidenceSpec = Field(default_factory=ConfidenceSpec)
 
 
+class ContainerSpec(_Strict):
+    """How the same product is laid out inside a Docker container.
+
+    The Docker channel reads these with the read-only container client loop
+    (sources/docker_agents.py); paths are container-internal absolutes.
+    ``package`` names the directory under each ``npm_roots`` entry (defaults
+    to the rule id). ``image_keywords`` feed candidate screening.
+    ``python_roots`` are directories whose ``pyproject.toml`` declares the
+    product itself ([project] version = the installed version). When
+    ``compose_scope`` is set, all containers of one compose project merge
+    into a single asset (multi-container products like Dify) instead of one
+    asset per container.
+    """
+
+    package: str = ""
+    npm_roots: list[str] = Field(default_factory=list)
+    python_roots: list[str] = Field(default_factory=list)
+    config_json: list[JsonKeyProbe] = Field(default_factory=list)
+    config_existing: list[str] = Field(default_factory=list)
+    process_tokens: list[str] = Field(default_factory=list)
+    image_keywords: list[str] = Field(default_factory=list)
+    compose_scope: bool = False
+
+
 class ClientRule(_Strict):
     """Full detection rule for one agent client product."""
 
@@ -187,3 +211,4 @@ class ClientRule(_Strict):
     version: list[VersionStep] = Field(default_factory=list)
     process: ProcessSpec | None = None
     llm: LlmSpec | None = None
+    container: ContainerSpec | None = None
