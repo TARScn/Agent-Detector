@@ -62,3 +62,23 @@ def test_ingest_publishes_status_for_the_console(tmp_path, monkeypatch):
     # channel-open marks the event clock even before the first record arrives
     assert collector["last_event_at"] is not None
     assert 0 <= collector["last_event_age_seconds"] <= 5
+
+
+def test_inline_loop_reports_running(tmp_path, monkeypatch):
+    """`collect` drives run_once() without start()'s worker thread — the
+    published status must still report a live collector."""
+    log = tmp_path / "events.json"
+    log.write_text("", encoding="utf-8")
+    status_path = tmp_path / "collector-status.json"
+    monkeypatch.setattr(isvc, "COLLECTOR_STATUS_PATH", status_path)
+    service = BehaviorIngestService(
+        make_engine(tmp_path / "db.sqlite3"), mode="tetragon", log_path=log,
+        process_snapshot=lambda: [],
+        graph=ProcessGraph(live_lookup=lambda pid: None))
+    assert service.status()["running"] is False
+    service.inline_loop = True
+    assert service.status()["running"] is True
+    service.run_once()
+    payload = load_collector_status(path=status_path,
+                                    hostname=platform.node() or "localhost")
+    assert payload["collector"]["running"] is True

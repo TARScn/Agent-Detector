@@ -322,6 +322,9 @@ def _collect(args, engine) -> int:
     except BehaviorIngestError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
+    # Inline drive (no worker thread): the published health file must still
+    # report a live collector, not a stopped one.
+    service.inline_loop = True
     duration = max(1.0, args.duration)
     print(f"collecting system behavior for {duration:.0f}s "
           f"(mode {service.mode}, source {service.source}, interval {service.interval}s)...")

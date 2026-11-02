@@ -144,6 +144,10 @@ class BehaviorIngestService:
         # the registry snapshot file was last rewritten.
         self._last_event_epoch: float | None = None
         self._snapshot_epoch: float | None = None
+        # The `collect` CLI drives run_once() inline on its main thread
+        # instead of start()'s worker thread — `running` must still say yes
+        # or the published health file reports a live collector as stopped.
+        self.inline_loop = False
 
         self.started_at: str | None = None
         self.batches = 0
@@ -174,7 +178,7 @@ class BehaviorIngestService:
 
     def status(self) -> dict:
         return {
-            "running": self.running, "mode": self.mode,
+            "running": self.running or self.inline_loop, "mode": self.mode,
             "log_path": str(self.log_path) if self.mode in ("auditd", "tetragon", "replay") else None,
             "log_readable": self._log_readable(),
             "sysmon_channel": self.sysmon_channel if self.mode == "sysmon" else None,
