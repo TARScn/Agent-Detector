@@ -31,9 +31,11 @@ rules:
     pattern: '\bopen-webui\b|\bopen_webui\b'
 
   # ---- Agent 平台 ----
-  - name: Dify
-    asset_type: AGENT_PLATFORM
-    pattern: '(?:\bdify\b|\bdify-api\b)'
+  # Dify 不在这里：它有专属 client_rule（dify.yaml，宿主侧 process: null ——
+  # 宿主无独有进程特征）+ Docker 通道按 compose 项目归并为一个资产。
+  # 曾有的宽松 \bdify\b 签名在验证机上把 postgres 连接进程（进程标题含
+  # 数据库名 "dify"）、grep/tmux 命令行全部误报成 "Dify 运行中"，且每个
+  # 连接各生成一个 asset_id（2026-11-02 实测，已删）。
 
   # ---- Agent 框架 ----
   # LangChain / LangGraph / AutoGen / CrewAI 已迁至各自的 framework_*.yaml

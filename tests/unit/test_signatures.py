@@ -28,6 +28,22 @@ def test_plain_claude_word_not_reported_by_signatures():
     assert SignatureRuleDetector().detect(facts) == []
 
 
+def test_dify_word_not_reported_by_signatures():
+    """Dify belongs to its dedicated client rule (dify.yaml: host-side
+    process: null) plus the Docker channel's compose-project merge. The loose
+    word once matched postgres connection titles carrying the database name
+    ("postgres: postgres dify ... idle"), grep commands and tmux paths — one
+    spurious asset per connection process (VM incident, 2026-11-02)."""
+    facts = HostFacts("h", (
+        ProcessInfo(10, "postgres", ("postgres: postgres dify 172.20.0.12(36024) idle",)),
+        ProcessInfo(11, "grep", ("grep", "-A1", "-i", "dify")),
+        ProcessInfo(12, "tmux", ("tmux", "-S", "/home/dify/.local/share/tmux.sock",
+                                 "start-server")),
+        ProcessInfo(13, "docker", ("docker", "exec", "dify-worker-1", "ls", "/tmp")),
+    ), ())
+    assert SignatureRuleDetector().detect(facts) == []
+
+
 def test_same_exe_restart_keeps_stable_asset_id():
     def facts():
         return HostFacts("h", (ProcessInfo(7, "ollama", ("ollama", "serve")),), ())

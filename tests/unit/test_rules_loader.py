@@ -18,7 +18,10 @@ def test_packaged_rules_load_cleanly():
     assert not {"LangChain", "LangGraph", "AutoGen", "CrewAI"} & names
     assert "Codex CLI" not in names  # moved to the codex-cli client rule
     assert "OpenClaw" not in names  # moved to the openclaw client rule
-    assert len(loaded.signature_rules) >= 7
+    # Dify 2026-11-02 移除：宽松 \bdify\b 曾把 postgres 连接标题（数据库名）、
+    # grep/tmux 命令行全部误报成 Dify，且每个连接各生成一个 asset_id。
+    assert "Dify" not in names
+    assert len(loaded.signature_rules) >= 6
 
 
 def test_broken_rule_file_is_isolated(tmp_path):
@@ -33,7 +36,7 @@ def test_broken_rule_file_is_isolated(tmp_path):
     loaded = load_rules(extra_dir=rules_dir)
     assert len(loaded.errors) == 3
     assert not loaded.client_rules or loaded.client_rules[0].id == "claude-code"
-    assert len(loaded.signature_rules) >= 7  # packaged set still intact
+    assert len(loaded.signature_rules) >= 6  # packaged set still intact
 
 
 def test_external_dir_overrides_packaged_rule_by_id(tmp_path):
