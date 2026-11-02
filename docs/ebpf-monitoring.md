@@ -125,6 +125,10 @@ Web：行为页来源筛选新增 eBPF；通道状态卡显示 tetragon 可用�
 `Environment=AGENT_DETECTOR_BEHAVIOR_IGNORE_PROC=pg_isready,redis-cli` 过滤容器健康检查探针噪声。
 安装：复制到 `/etc/systemd/system/` 后 `systemctl daemon-reload && systemctl enable --now agent-detector-collector`。
 
+控制台（Web + API）用 [`configs/systemd/agent-detector-console.service`](../configs/systemd/agent-detector-console.service)：
+同一部署目录（读同一 `./data/agent_detector.sqlite3`），`serve --host 0.0.0.0 --port 8787`——默认绑 127.0.0.1，
+对外网开放需显式 `--host 0.0.0.0`（仅限受信内网：Hook 决策端点有 token 防护，但控制台本身无登录）。
+
 > **注意**：`collect` 以 CLI 当前工作目录解析默认 DB 路径（`./data/agent_detector.sqlite3`），
 > service 单元用 `WorkingDirectory` 固定；手动执行 `events` 等查询命令需 `cd` 到同一目录。
 

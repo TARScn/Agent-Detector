@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Detector console (web + API)
+After=network.target
+
+[Service]
+Type=simple
+User=xubuntu
+WorkingDirectory=/home/xubuntu/agent-detector
+# Same deploy dir as the collector: reads ./data/agent_detector.sqlite3.
+# Bound to all interfaces on explicit user request (LAN lab VM) to allow
+# viewing from the dev machine; the hook decision endpoint stays token-guarded.
+ExecStart=/home/xubuntu/agent-detector/.venv/bin/agent-detector serve --host 0.0.0.0 --port 8787
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
