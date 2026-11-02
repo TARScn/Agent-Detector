@@ -45,12 +45,17 @@ class FakeBehaviorService:
 def telemetry_client(services, monkeypatch):
     from fastapi.testclient import TestClient
 
+    import agent_detector.console.api.telemetry as tel
+
     from agent_detector.console.api.app import create_app
 
     services.monitor._dns = SimpleNamespace(snapshot=lambda: {}, entry_count=0,
                                             running=False, failed=False,
                                             start=lambda: None, close=lambda: None)
     monkeypatch.setattr("agent_detector.monitoring.services.monitor.collect_outbound", lambda: [])
+    # Hermetic by default: no real collector-status file on this machine may
+    # leak into endpoint assertions (tests that need one patch it themselves).
+    monkeypatch.setattr(tel, "load_collector_status", lambda **kwargs: None)
     services.ingest = FakeBehaviorService()
     return TestClient(create_app(serve_console=False))
 
@@ -77,6 +82,7 @@ def seeded(services):
 def test_channel_status_and_behavior_lifecycle(telemetry_client):
     status = telemetry_client.get("/api/v1/telemetry/status").json()
     assert status["behavior"]["running"] is False
+    assert status["behavior"]["source"] == "local"
     channels = {item["id"] for item in status["channels"]}
     assert {"sysmon", "auditd", "tetragon", "poll", "netmon", "native_hook"} == channels
 
@@ -86,6 +92,29 @@ def test_channel_status_and_behavior_lifecycle(telemetry_client):
     conflict = telemetry_client.post("/api/v1/telemetry/behavior/start", json={})
     assert conflict.status_code == 409
     assert telemetry_client.post("/api/v1/telemetry/behavior/stop").json()["running"] is False
+
+
+def test_status_prefers_collector_file_when_local_idle(telemetry_client, monkeypatch):
+    """The console's own ingest stays idle under the systemd deployment: the
+    endpoint must surface the real collector's published counters instead of
+    the idle twin, marked source=collector."""
+    import agent_detector.console.api.telemetry as tel
+
+    monkeypatch.setattr(tel, "load_collector_status", lambda **kwargs: {
+        "collector": {"running": True, "mode": "tetragon", "records_read": 99},
+        "written_at": "2026-11-02T00:00:00+00:00", "age_seconds": 3.0})
+    behavior = telemetry_client.get("/api/v1/telemetry/status").json()["behavior"]
+    assert behavior["source"] == "collector"
+    assert behavior["running"] is True
+    assert behavior["records_read"] == 99
+    assert behavior["status_age_seconds"] == 3.0
+
+
+def test_status_marks_local_source_without_collector_file(telemetry_client):
+    """No fresh collector file (collector down or file gone): report the local
+    idle twin, but label it honestly so the UI can show a stale state."""
+    behavior = telemetry_client.get("/api/v1/telemetry/status").json()["behavior"]
+    assert behavior["source"] == "local" and behavior["running"] is False
 
 
 def test_monitor_lifecycle(telemetry_client):

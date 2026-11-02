@@ -90,6 +90,16 @@ PROC_SNAPSHOT_PATH = Path(os.getenv("AGENT_DETECTOR_PROC_SNAPSHOT",
                                     str(DB_PATH.parent / "process-snapshot.json")))
 PROC_SNAPSHOT_MAX_AGE = min(max(int(os.getenv(
     "AGENT_DETECTOR_PROC_SNAPSHOT_MAX_AGE", "120")), 1), 3600)
+# Cross-process collector health: the running ingest service rewrites this
+# file with its live counters (records, last event time, recalibrations) so
+# the console — a separate process whose own ingest instance stays idle under
+# the systemd deployment — can show the real collector state. Same
+# shared-file contract as the snapshot above; the gate is a multiple of the
+# one-minute write cadence.
+COLLECTOR_STATUS_PATH = Path(os.getenv("AGENT_DETECTOR_COLLECTOR_STATUS",
+                                       str(DB_PATH.parent / "collector-status.json")))
+COLLECTOR_STATUS_MAX_AGE = min(max(int(os.getenv(
+    "AGENT_DETECTOR_COLLECTOR_STATUS_MAX_AGE", "180")), 30), 3600)
 
 # ---------------------------------------------------------------------------
 # V0.2: control plane, hook bridge and policy (design sections 5, 6, 8)

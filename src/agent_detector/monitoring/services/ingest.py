@@ -47,12 +47,15 @@ from agent_detector.core.config import (ALERT_RISK_LEVEL, BEHAVIOR_AUDIT_KEYS,
                                           BEHAVIOR_MAX_EVENTS_PER_MINUTE,
                                           BEHAVIOR_PATH_POLICY, BEHAVIOR_POLL_INTERVAL,
                                           BEHAVIOR_RETENTION_DAYS, BEHAVIOR_STORE_ARGV,
-                                          BEHAVIOR_SUPPRESS_SECONDS, PROCESS_RESEED_SECONDS,
+                                          BEHAVIOR_SUPPRESS_SECONDS,
+                                          COLLECTOR_STATUS_PATH,
+                                          PROCESS_RESEED_SECONDS,
                                           PROC_SNAPSHOT_PATH, SYSMON_CHANNEL,
                                           TETRA_LOG)
 from agent_detector.core.security import redact
 from agent_detector.monitoring.collectors.host.process import collect_processes
 from agent_detector.monitoring.collectors.host.registry_snapshot import write_process_snapshot
+from agent_detector.monitoring.services.collector_status import write_collector_status
 from agent_detector.core.enums import RiskLevel
 from agent_detector.core.models import ProcessInfo
 from agent_detector.discovery.fingerprints.loader import load_rules
@@ -135,6 +138,12 @@ class BehaviorIngestService:
         self._last_purge = 0.0
         self._last_record_monotonic: float | None = None
         self._last_snapshot_monotonic: float | None = None
+        self._last_status_monotonic: float | None = None
+        # Wall-clock twins for the status surface: when the last batch read a
+        # record (channel-open time until the first record arrives) and when
+        # the registry snapshot file was last rewritten.
+        self._last_event_epoch: float | None = None
+        self._snapshot_epoch: float | None = None
 
         self.started_at: str | None = None
         self.batches = 0
@@ -182,6 +191,10 @@ class BehaviorIngestService:
             "records_read": self.records_read, "facts": self.facts_seen,
             "exits_seen": self.exits_seen, "ignored_proc": self.ignored_proc,
             "recalibrations": self.recalibrations,
+            "last_event_at": self._last_event_epoch,
+            "last_event_age_seconds": (round(time.time() - self._last_event_epoch)
+                                       if self._last_event_epoch is not None else None),
+            "snapshot_written_at": self._snapshot_epoch,
             "events": self.events_stored, "suppressed": self.suppressed,
             "dropped_no_rule": self.dropped_no_rule,
             "dropped_unattributed": self.dropped_unattributed,
@@ -269,6 +282,7 @@ class BehaviorIngestService:
                     raise BehaviorIngestError(self._tetra_hint(exc)) from exc
                 self._reader = TailReader(self.log_path, from_start=self._from_start)
                 self._last_record_monotonic = time.monotonic()
+                self._last_event_epoch = time.time()
                 self._seed_graph()
             return
         if self._reader is None:
@@ -279,6 +293,7 @@ class BehaviorIngestService:
                 raise BehaviorIngestError(self._log_hint(exc)) from exc
             self._reader = TailReader(self.log_path, from_start=self._from_start)
             self._last_record_monotonic = time.monotonic()
+            self._last_event_epoch = time.time()
             self._seed_graph()
 
     def _log_hint(self, exc: OSError) -> str:
@@ -327,12 +342,28 @@ class BehaviorIngestService:
             self.facts_seen += len(facts)
         if self.records_read > raw_before:
             self._last_record_monotonic = time.monotonic()
+            self._last_event_epoch = time.time()
         self._maybe_recalibrate()
         stored = self._process_facts(facts)
         self.batches += 1
         self._maybe_write_snapshot()
+        self._maybe_write_status()
         self._maybe_purge(time.monotonic())
         return stored
+
+    def _maybe_write_status(self) -> None:
+        """Publish live counters for the console process: under the systemd
+        deployment the console never runs its own ingest, so its /telemetry
+        view would only show an idle twin of this service. Throttled to one
+        write per minute like the snapshot; the reader applies its own
+        freshness gate. Runs even when the graph is empty — a silent
+        collector is exactly what the operator needs to see."""
+        now = time.monotonic()
+        if (self._last_status_monotonic is not None
+                and now - self._last_status_monotonic < 60):
+            return
+        self._last_status_monotonic = now
+        write_collector_status(self.status(), path=COLLECTOR_STATUS_PATH)
 
     def _maybe_write_snapshot(self) -> None:
         """Share the registry with standalone scans: the snapshot file is the
@@ -345,6 +376,7 @@ class BehaviorIngestService:
                 and now - self._last_snapshot_monotonic < 60):
             return
         self._last_snapshot_monotonic = now
+        self._snapshot_epoch = time.time()
         write_process_snapshot(platform.node() or "localhost",
                                self.graph.snapshot_processes(),
                                path=PROC_SNAPSHOT_PATH)

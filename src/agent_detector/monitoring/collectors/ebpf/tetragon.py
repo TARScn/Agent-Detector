@@ -7,6 +7,7 @@ human to run — it never elevates privileges or touches the kernel itself.
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,17 +22,31 @@ class TetragonAvailability:
     available: bool
     reason: str
     log_path: str
+    # Seconds since the export file was last touched — a proxy for source
+    # freshness: a readable export that stopped growing means Tetragon itself
+    # stopped (the file alone never proves the daemon is alive).
+    last_write_age_seconds: int | None = None
 
     def to_dict(self) -> dict:
         return {"available": self.available, "reason": self.reason,
-                "log_path": self.log_path}
+                "log_path": self.log_path,
+                "last_write_age_seconds": self.last_write_age_seconds}
+
+
+def _write_age(path: Path) -> int | None:
+    try:
+        return max(0, round(time.time() - path.stat().st_mtime))
+    except OSError:
+        return None
 
 
 def tetragon_available(log_path=None) -> TetragonAvailability:
     """The channel is usable when the JSON export exists and is readable.
 
     The collector tails the file, so readability is exactly the capability it
-    needs — no gRPC, no kernel handle, no daemon query.
+    needs — no gRPC, no kernel handle, no daemon query. ``last_write_age_seconds``
+    is the honest liveness hint: the file existing says nothing about whether
+    events still flow.
     """
     path = Path(log_path) if log_path else Path(TETRA_LOG)
     if sys.platform != "linux":
@@ -41,11 +56,12 @@ def tetragon_available(log_path=None) -> TetragonAvailability:
             False, "导出文件不存在：Tetragon 未安装或未配置 --export-filename", str(path))
     try:
         with path.open("r", encoding="utf-8", errors="replace"):
-            return TetragonAvailability(True, "", str(path))
+            return TetragonAvailability(True, "", str(path),
+                                        last_write_age_seconds=_write_age(path))
     except OSError as exc:
         return TetragonAvailability(
             False, f"导出文件不可读：{exc}（export-file-perm 默认 600，需 root 或调整权限）",
-            str(path))
+            str(path), last_write_age_seconds=_write_age(path))
 
 
 def install_commands(log_path=None) -> list[str]:

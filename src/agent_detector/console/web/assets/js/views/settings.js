@@ -193,22 +193,42 @@ export async function render(ctx) {
 
   function paintCollectors(host, payload) {
     const behavior = payload.behavior || {};
+    const fromCollector = behavior.source === 'collector';
+    const eventAge = behavior.last_event_age_seconds;
+    const statusAge = behavior.status_age_seconds;
+    const warnings = [];
+    if (fromCollector && statusAge != null && statusAge > 180) {
+      warnings.push(note('采集器状态已过期：常驻采集器（agent-detector-collector）可能已停止', 'warning'));
+    }
+    if (eventAge != null && eventAge > 1800) {
+      warnings.push(note(`事件通道已静默 ${eventAge}s：静默期间的行为事件可能缺失`, 'warning'));
+    }
+    const title = fromCollector
+      ? `采集器状态（常驻采集器，${statusAge ?? '?'}s 前）`
+      : '采集器状态';
     host.replaceChildren(el('div', { class: 'grid grid-2' }, [
-      card('采集器状态', keyValues([
+      card(title, [...warnings, keyValues([
         ['模式', behavior.mode],
         ['运行中', behavior.running ? '是' : '否'],
         ['采集批次', String(behavior.batches ?? 0)],
+        ['已读记录', String(behavior.records_read ?? 0)],
         ['已存事件', String(behavior.events ?? 0)],
+        ['最近事件', eventAge != null ? `${eventAge}s 前` : '—'],
+        ['重校准次数', String(behavior.recalibrations ?? 0)],
+        ['进程图节点', String(behavior.graph_nodes ?? 0)],
         ['Sysmon 通道', behavior.sysmon_channel || '—'],
         ['间隔', `${behavior.interval}s`],
         ['抑制窗口', `${behavior.suppress_seconds}s`],
         ['保留天数', `${behavior.retention_days} 天`],
-      ]), { actions: [
-        behavior.running
-          ? button('停止采集', { size: 'small', onClick: () => control('behavior/stop') })
-          : button('启动采集', { size: 'small', kind: 'primary', onClick: () => control('behavior/start',
-            { mode: behavior.mode }) }),
-      ] }),
+        behavior.last_error ? ['最近错误', behavior.last_error] : null,
+      ].filter(Boolean))], {
+        actions: fromCollector ? undefined : [
+          behavior.running
+            ? button('停止采集', { size: 'small', onClick: () => control('behavior/stop') })
+            : button('启动采集', { size: 'small', kind: 'primary', onClick: () => control('behavior/start',
+              { mode: behavior.mode }) }),
+        ],
+      }),
       card('auditd 规则生成器（Linux）', auditGenerator()),
     ]));
   }
