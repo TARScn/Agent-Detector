@@ -102,8 +102,19 @@ dependencies:
 
 匹配语义：对"进程 → 项目解析 → 依赖元数据"得到的组件清单做包名匹配
 （dist-info METADATA / lock / pyproject 依赖声明），不做进程名正则。
-依赖命中只证明框架**环境**（INSTALLED）；RUNNING 由进程-项目关联单独给出
+`runtimes` 是硬过滤——项目 runtime 不在规则声明内则不匹配（Docker 通道
+给 npm 包根造的是 node 项目，python-only 规则不再误配；runtime 未知
+（如已停止容器）对所有规则保持兼容）。证据分级：组件仅来自声明类出处
+（`declared`/`locked`，未经 dist-info 确认）时框架资产状态为 CONFIGURED
+而非 INSTALLED——"声明过"不等于"装上了"；任一组件有已安装元数据才回
+INSTALLED。依赖命中只证明框架**环境**；RUNNING 由进程-项目关联单独给出
 （frameworks.py 的多框架诚实规则：RUNNING 只归应用资产）。
+
+跨来源归并（scan.py `correlate_assets`）：HTTP 主动探测按
+`listen-port:{port}` 建资产，Docker 通道按 `compose:`/`container:` 建——
+同一部署两者 asset_id 必然不同。同主机、规范化产品名相同（`Dify`/`dify`
+同键）时，探测资产折叠进基础设施资产（证据与端口并入）；无对应方的探测
+资产保留独立行。
 
 > **签名通道已退役（2026-11-02）**：原 `signature_set`（通用命令行正则
 > 廉价初筛）整通道删除。它拿不到版本、会在参数/路径/进程标题撞上同名单词

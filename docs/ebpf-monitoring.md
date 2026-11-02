@@ -144,13 +144,15 @@ GET  /api/assets/{asset_id}/events?source=tetragon
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
 | `AGENT_DETECTOR_TETRA_LOG` | `/var/log/tetragon/events.json` | Tetragon JSON 导出文件路径 |
-| `AGENT_DETECTOR_PROCESS_RESEED_SECONDS` | `900` | 事件丢失启发式：tail 静默超过该秒数 → 从一次 /proc 快照重校准进程注册表（合并语义，事件侧 exec_id 保留），`status()` 暴露 `recalibrations` 计数；0 关闭 |
-| `AGENT_DETECTOR_PROC_SNAPSHOT` | `./data/process-snapshot.json` | 跨进程注册表快照文件：collector 原子改写（≤1 次/分钟），独立扫描在新鲜度内优先采用（`process_source=registry`），缺失/过期/异主机回退 psutil |
+| `AGENT_DETECTOR_PROCESS_RESEED_SECONDS` | `900` | 事件丢失启发式：tail 静默超过该秒数 → 从一次 /proc 快照**全量重校准**进程注册表（合并语义，事件侧 exec_id 保留；`prune_absent` 把活体扫描已看不到的 pid 逐出并墓碑——丢失 exit 事件的幽灵进程不再残留），`status()` 暴露 `recalibrations` 计数；0 关闭 |
+| `AGENT_DETECTOR_PROC_SNAPSHOT` | `./data/process-snapshot.json` | 跨进程注册表快照文件：collector 原子改写（≤1 次/分钟，chmod 0600，argv 过 `redact()` 并截断），独立扫描在新鲜度内优先采用（`process_source=registry`），缺失/过期/异主机回退 psutil。行内含 `cwd`（registry 源扫描靠它解析 `-m`/server 入口进程）与 `container_id` |
 | `AGENT_DETECTOR_PROC_SNAPSHOT_MAX_AGE` | `120` | 快照新鲜度上限（秒） |
+| `AGENT_DETECTOR_COLLECTOR_STATUS` | `./data/collector-status.json` | collector 健康文件：ingest 每分钟原子发布 `status()` 全量计数（records_read/last_event_at/recalibrations/graph_nodes…，chmod 0600）。console 是独立进程、自己的 ingest 实例恒为空闲——`/telemetry/status` 在本地实例未运行时改读此文件（新鲜度+异主机闸门），`behavior.source` 标明 `"collector"` 或 `"local"` |
+| `AGENT_DETECTOR_COLLECTOR_STATUS_MAX_AGE` | `180` | 健康文件新鲜度上限（秒），过期即视为采集器失联 |
 | `AGENT_DETECTOR_BEHAVIOR_IGNORE_PROC` | 空 | 忽略的进程名列表（逗号分隔，精确匹配）。容器健康检查探针（pg_isready、redis-cli 等）每几秒重新 exec 一次、pid 每次都新，抑制窗口（按设计含 pid）无法去重——把这些进程的事实计入 `ignored_proc` 计数并整体丢弃 |
 | `AGENT_DETECTOR_BEHAVIOR_*` | 同 auditd 通道 | 抑制/速率/保留/路径/argv 策略共用 |
 
-进程注册表（ProcessGraph）语义：身份 = `(pid, create_time/start_time)`，事实携带 Tetragon `exec_id`（内核侧映像身份，同 pid 可多次 exec）；start 距离超过 2s 容差即判定 PID 复用、整节点替换；exit 墓碑 `(pid, exec_id)` 拦截迟到事实复活死进程；归属对 actor 做身份闸门——快照 pid 与事实身份矛盾时不再采信（防 stale 快照误归属）。
+进程注册表（ProcessGraph）语义：身份 = `(pid, create_time/start_time)`，事实携带 Tetragon `exec_id`（内核侧映像身份，同 pid 可多次 exec）；start 距离超过 2s 容差即判定 PID 复用、整节点替换；exit 墓碑 `(pid, exec_id)` 拦截迟到事实复活死进程（重校准逐出同样记墓碑）。归属对 actor 做 `node(verify=True)` 活体核对——psutil 刷新走**合并**（同实例保留 exec_id/container_id/cwd，仅生命周期字段更新；pid 复用才整节点替换），不会剥离事件侧身份；快照 pid 与事实身份矛盾时不再采信（防 stale 快照误归属）。`cwd` 仅来自 psutil 快照（exec 事件不带），贯穿 graph→快照文件→扫描链路。通道健康：`tetragon_available` 除文件存在/可读外报告导出文件 `last_write_age_seconds`——文件停止增长即 Tetragon 本体停了，"读得到"不等于"事件还在流"。
 
 ## 验收记录（P0–P3，2026-10-30，验证机 192.168.106.131）
 

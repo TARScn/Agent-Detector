@@ -126,7 +126,9 @@ POST /internal/v1/hooks/decide                  Hook 决策（内部控制接口
 `_HOOK_TOKEN` / `_HOOK_TOKEN_FILE`、`_HOOK_FAILURE_MODE`（block|allow）、`_HOOK_TIMEOUT`、`_POLICY_DIR`、
 `_AGENTS_FILE`、`_SYSMON_CHANNEL`、`_ALERT_RISK_LEVEL`、`_RULES_DIR`、`_BEHAVIOR_RULES_DIR`、
 `_AUDIT_LOG`、`_TETRA_LOG`（Tetragon JSON 导出文件，默认 `/var/log/tetragon/events.json`）、
-`_PROCESS_RESEED_SECONDS`（事件丢失重校准）、`_PROC_SNAPSHOT` / `_PROC_SNAPSHOT_MAX_AGE`（进程注册表快照，独立扫描优先采用）、
+`_PROCESS_RESEED_SECONDS`（事件丢失全量重校准，逐出幽灵进程）、
+`_PROC_SNAPSHOT` / `_PROC_SNAPSHOT_MAX_AGE`（进程注册表快照，独立扫描优先采用；0600 权限、argv 脱敏）、
+`_COLLECTOR_STATUS` / `_COLLECTOR_STATUS_MAX_AGE`（采集器健康文件，console 跨进程读取真实计数）、
 `_BEHAVIOR_*`（抑制窗口 / 速率 / 保留 / 路径策略 / 是否存 argv / 忽略进程名 `IGNORE_PROC`）等。
 完整列表见 `src/agent_detector/core/config.py`。
 
