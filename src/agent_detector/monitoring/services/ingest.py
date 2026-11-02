@@ -510,7 +510,9 @@ class BehaviorIngestService:
                 continue
             attribution = attributor.attribute(pid=fact.pid, ppid=fact.ppid,
                                                process_name=fact.process_name,
-                                               container_id=fact.container_id)
+                                               container_id=fact.container_id,
+                                               start_time=fact.start_time,
+                                               exec_id=fact.exec_id)
             if (attribution.asset_id is None and not BEHAVIOR_INCLUDE_UNATTRIBUTED
                     and "unattributed" in attribution.evidence):
                 self.dropped_unattributed += 1

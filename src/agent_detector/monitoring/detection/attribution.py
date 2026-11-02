@@ -43,7 +43,9 @@ class AgentAttributor:
         self.container_map = dict(container_map or {})
 
     def attribute(self, *, pid: int, ppid: int | None, process_name: str,
-                  container_id: str | None = None) -> Attribution:
+                  container_id: str | None = None,
+                  start_time: float | None = None,
+                  exec_id: str | None = None) -> Attribution:
         if container_id and self.container_map:
             # Container processes report host-namespace PIDs (Tetragon runs on
             # the host) while Docker discovery stores container-namespace PIDs,
@@ -56,6 +58,13 @@ class AgentAttributor:
                                        asset_id, ("container_id",), None)
         for index, node in enumerate(self.graph.ancestors_of(
                 pid, ppid=ppid, max_depth=self.max_depth)):
+            if index == 0 and self.graph.verify(node.pid, start_time=start_time,
+                                                exec_id=exec_id) is False:
+                # Identity gate (verified against the registry): the fact's
+                # start instant / exec_id contradicts the live node, i.e. this
+                # pid was reused — nothing about the live process (nor the
+                # snapshot asset pinned to that pid) applies to the fact.
+                continue
             asset_id = self.pid_map.get(node.pid)
             if asset_id:
                 label = node.name or process_name or f"pid-{node.pid}"

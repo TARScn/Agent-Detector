@@ -105,3 +105,20 @@ def test_ingest_publishes_snapshot_for_scans(tmp_path, monkeypatch):
 def service_hostname() -> str:
     import platform
     return platform.node() or "localhost"
+
+
+def test_cgroup_container_id_extraction(tmp_path):
+    from agent_detector.monitoring.collectors.host.process import (
+        _cgroup_container_id, _container_of)
+
+    full = "c" * 64
+    assert _cgroup_container_id(f"0::/system.slice/docker-{full}.scope\n") == full
+    assert _cgroup_container_id(f"11:cpu,cpuset:/containerd/{full}") == full
+    assert _cgroup_container_id("0::/user.slice/user-1000.slice/\n") is None
+    assert _cgroup_container_id("") is None
+
+    proc = tmp_path / "proc" / "1234"
+    proc.mkdir(parents=True)
+    (proc / "cgroup").write_text(f"0::/docker/{full}\n", encoding="utf-8")
+    assert _container_of(1234, proc_root=str(tmp_path / "proc")) == full
+    assert _container_of(9999, proc_root=str(tmp_path / "proc")) is None

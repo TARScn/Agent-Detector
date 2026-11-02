@@ -214,8 +214,11 @@ def resolve_projects(facts: HostFacts, *,
     budget = MAX_PROJECT_PROBES if max_projects is None else max_projects
     if budget <= 0:
         return []
+    # Container-tagged processes (host /proc cgroup) resolve through the
+    # Docker channel's container deep-scan, never as host projects — their
+    # paths live inside container filesystems.
     candidates = [proc for proc in sorted(facts.processes, key=lambda p: p.pid)
-                  if runtime_of(proc) == "python"][:budget]
+                  if runtime_of(proc) == "python" and not proc.container_id][:budget]
 
     grouped: dict[str, tuple[Path, list[ProcessInfo], str, str | None]] = {}
     for proc in candidates:

@@ -248,6 +248,11 @@ class ClientRuleDetector:
             return []
         matched: list[tuple[ProcessInfo, str]] = []
         for proc in facts.processes:
+            if proc.container_id:
+                # Container process (host /proc cgroup tag): the Docker
+                # channel owns it — a host-side match would mint a duplicate
+                # host asset next to the container asset.
+                continue
             reason = match_client_process(self.rule, proc, self._excludes)
             if reason is None:
                 continue

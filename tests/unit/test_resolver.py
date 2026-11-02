@@ -142,6 +142,22 @@ def test_venv_detected_from_any_group_member_or_argv0(tmp_path):
     assert Path(projects[0].environment_path).resolve() == (root / ".venv").resolve()
 
 
+def test_container_tagged_processes_are_not_host_projects(tmp_path):
+    """Container processes (host /proc cgroup tag) resolve through the Docker
+    channel's container deep-scan — the host resolver must not mint host
+    projects for them (paths live inside container filesystems)."""
+    root = make_project(tmp_path, "in-container")
+    exe = str(root / ".venv" / "bin" / "python")
+    host_proc = python_proc(140, exe, str(root), "-m", "uvicorn", "a:app")
+    tagged = ProcessInfo(pid=141, name="python", cmdline=(exe, "-m", "uvicorn",
+                                                          "b:app"),
+                         create_time=1700.0, ppid=4, exe=exe, cwd=str(root),
+                         container_id="c" * 64)
+    projects = resolve_projects(HostFacts("h", (host_proc, tagged), ()))
+    assert len(projects) == 1
+    assert projects[0].pids == (140,)
+
+
 def test_budget_caps_candidate_projects(tmp_path):
     roots = [make_project(tmp_path, f"p{i}", with_venv=False) for i in range(3)]
     exe = str(tmp_path / "python.exe")

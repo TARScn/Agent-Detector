@@ -43,6 +43,29 @@ def test_actor_itself_in_pid_map_is_tagged_self():
     assert result.ancestor_pid == 100
 
 
+def test_reused_actor_pid_rejects_snapshot_match():
+    """Identity gate: the fact's start instant contradicts the registry node
+    (pid reused since the snapshot) — the snapshot asset pinned to that pid
+    must not claim the fact, and nothing about the live process applies."""
+    graph = offline_graph(ProcessInfo(pid=70, name="node", cmdline=("node", "cli.js"),
+                                      create_time=50.0, ppid=1))
+    attributor = AgentAttributor(hostname="host", graph=graph,
+                                 pid_map={70: "stale--asset"},
+                                 known_asset_ids={"stale--asset"})
+    rejected = attributor.attribute(pid=70, ppid=1, process_name="node",
+                                    start_time=100.0)
+    assert rejected.asset_id is None
+    assert rejected.evidence == ("unattributed",)
+    # verified identity: the match stands
+    verified = attributor.attribute(pid=70, ppid=1, process_name="node",
+                                    start_time=51.0)
+    assert verified.asset_id == "stale--asset"
+    assert verified.evidence == ("self_asset_pid",)
+    # no identity info on either side: legacy trust (Windows channels)
+    legacy = attributor.attribute(pid=70, ppid=1, process_name="node")
+    assert legacy.asset_id == "stale--asset"
+
+
 def test_fingerprint_match_links_existing_candidate_asset(tmp_path):
     home = tmp_path / "home"
     home.mkdir()

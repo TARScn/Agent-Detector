@@ -1,5 +1,8 @@
 """Cross-platform process and listening-socket collection via psutil (plan section 3.1)."""
+import os
 import platform
+import re
+from pathlib import Path
 
 import psutil
 
@@ -7,11 +10,29 @@ from agent_detector.core.models import HostFacts, ListeningSocket, ProcessInfo
 from agent_detector.monitoring.collectors.host.registry_snapshot import load_process_snapshot
 
 _CMDLINE_ARGS_LIMIT = 100
+_CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}")
 
 
 def _clean(text: str) -> str:
     """Drop lone surrogates so results stay JSON / UTF-8 serializable."""
     return text.encode("utf-8", "replace").decode("utf-8")
+
+
+def _cgroup_container_id(text: str) -> str | None:
+    """First 64-hex token in a /proc/<pid>/cgroup body — docker, containerd
+    and k8s all embed the full container id in the cgroup path. Host-process
+    cgroups (system slices, user sessions) carry none."""
+    match = _CONTAINER_ID_RE.search(text)
+    return match.group(0) if match else None
+
+
+def _container_of(pid: int, proc_root: str = "/proc") -> str | None:
+    try:
+        text = (Path(proc_root) / str(pid) / "cgroup").read_text(
+            encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+    return _cgroup_container_id(text)
 
 
 def collect_processes(*, with_cmdline: bool = True,
@@ -33,6 +54,7 @@ def collect_processes(*, with_cmdline: bool = True,
     if with_cmdline:
         attrs.insert(2, "cmdline")
         attrs.append("exe")
+    proc_root = "/proc" if os.path.isdir("/proc") else None
     for proc in psutil.process_iter(attrs=attrs):
         try:
             info = proc.info
@@ -48,10 +70,11 @@ def collect_processes(*, with_cmdline: bool = True,
                     cwd = _clean(proc.cwd() or "")
                 except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
                     cwd = None
+            container_id = _container_of(info["pid"]) if proc_root else None
             result.append(ProcessInfo(pid=info["pid"], name=name, cmdline=cmdline,
                                       create_time=info.get("create_time"),
                                       ppid=info.get("ppid"), exe=executable,
-                                      cwd=cwd or None))
+                                      cwd=cwd or None, container_id=container_id))
         except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
             continue
     return result

@@ -74,7 +74,8 @@ def load_process_snapshot(*, path: Path = PROC_SNAPSHOT_PATH,
 def _process_row(proc: ProcessInfo) -> dict:
     return {"pid": proc.pid, "name": proc.name,
             "cmdline": list(proc.cmdline), "create_time": proc.create_time,
-            "ppid": proc.ppid, "exe": proc.exe, "cwd": proc.cwd}
+            "ppid": proc.ppid, "exe": proc.exe, "cwd": proc.cwd,
+            "container_id": proc.container_id}
 
 
 def _process_from_row(row) -> ProcessInfo | None:
@@ -89,7 +90,9 @@ def _process_from_row(row) -> ProcessInfo | None:
                                                          (int, float)) else None,
         ppid=row.get("ppid") if isinstance(row.get("ppid"), int) else None,
         exe=row.get("exe") if isinstance(row.get("exe"), str) else None,
-        cwd=row.get("cwd") if isinstance(row.get("cwd"), str) else None)
+        cwd=row.get("cwd") if isinstance(row.get("cwd"), str) else None,
+        container_id=(row.get("container_id")
+                      if isinstance(row.get("container_id"), str) else None))
 
 
 def _now_iso() -> str:

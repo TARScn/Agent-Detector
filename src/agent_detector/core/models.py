@@ -15,6 +15,10 @@ class ProcessInfo:
     ppid: int | None = None
     exe: str | None = None
     cwd: str | None = None
+    # Linux only: the container id parsed from /proc/<pid>/cgroup — lets the
+    # host sweep tell container processes apart (the Docker channel owns
+    # them) before any detector mints a duplicate host asset. None elsewhere.
+    container_id: str | None = None
 
 
 @dataclass(frozen=True)
