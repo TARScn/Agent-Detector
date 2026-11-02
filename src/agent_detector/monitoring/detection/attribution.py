@@ -13,9 +13,9 @@ from typing import Sequence
 
 from agent_detector.monitoring.detection.process_graph import ProcNode, ProcessGraph
 from agent_detector.core.models import ProcessInfo
-from agent_detector.discovery.fingerprints.match import match_client_process, match_signature_process
-from agent_detector.discovery.fingerprints.schema import ClientRule, SignatureRule
-from agent_detector.core.identity import build_asset_id, normalize_path, slugify
+from agent_detector.discovery.fingerprints.match import match_client_process
+from agent_detector.discovery.fingerprints.schema import ClientRule
+from agent_detector.core.identity import build_asset_id, normalize_path
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,6 @@ class Attribution:
 class AgentAttributor:
     def __init__(self, *, hostname: str, graph: ProcessGraph, pid_map: dict[int, str],
                  known_asset_ids: set[str], client_rules: Sequence[ClientRule] = (),
-                 signature_rules: Sequence[SignatureRule] = (),
                  home: Path | None = None, max_depth: int = 12,
                  container_map: dict[str, tuple[str, str]] | None = None):
         self.hostname = hostname
@@ -37,7 +36,6 @@ class AgentAttributor:
         self.pid_map = pid_map
         self.known_asset_ids = known_asset_ids
         self.client_rules = tuple(client_rules)
-        self.signature_rules = tuple(signature_rules)
         self.home = home
         self.max_depth = max_depth
         # container hex-ID prefix -> (asset_id, agent name), from the Docker
@@ -82,13 +80,6 @@ class AgentAttributor:
                 return Attribution(rule.name, self._known_asset(candidate),
                                    ("process_fingerprint", f"rule:{rule.id}",
                                     f"match:{reason}"), node.pid)
-        for rule in self.signature_rules:
-            if match_signature_process(rule, proc):
-                exe = proc.cmdline[0] if proc.cmdline else proc.name
-                candidate = build_asset_id(self.hostname, slugify(rule.name),
-                                           f"process:{normalize_path(exe)}")
-                return Attribution(rule.name, self._known_asset(candidate),
-                                   ("process_fingerprint", "signature"), node.pid)
         return None
 
     def _known_asset(self, candidate: str | None) -> str | None:

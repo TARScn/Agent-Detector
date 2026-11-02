@@ -180,7 +180,7 @@ def test_removed_asset_instances_are_stopped(tmp_path, monkeypatch):
                         lambda: HostFacts("h", (), ()))
     engine = make_engine(tmp_path / "db.sqlite3")
     asset = make_asset("sig--1")
-    asset.running_pids = [4242]  # signature-style sighting with a live process
+    asset.running_pids = [4242]  # process sighting with a live process
     scan_service.run_scan(engine, detectors=[GoodDetector(asset)])
     with Session(engine) as session:
         assert len(AgentInventoryRepository(session).list_instances()) == 1

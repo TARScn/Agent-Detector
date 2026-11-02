@@ -12,17 +12,14 @@ from pathlib import Path
 
 from agent_detector.discovery.sources.filesystem import inspect_path, read_package_version
 from agent_detector.core.security import redact
-from agent_detector.core.enums import AssetState, EvidenceKind, VersionSource
+from agent_detector.core.enums import AssetState, EvidenceKind
 from agent_detector.core.models import (DetectedAsset, Evidence, HostFacts, ProcessInfo,
                                           VersionInfo)
-from agent_detector.discovery.fingerprints.match import (compile_excludes, match_client_process,
-                                               match_signature_process, process_text)
-from agent_detector.discovery.fingerprints.schema import ClientRule, SignatureRule
-from agent_detector.core.identity import build_asset_id, normalize_path, slugify
+from agent_detector.discovery.fingerprints.match import (compile_excludes, match_client_process)
+from agent_detector.discovery.fingerprints.schema import ClientRule
+from agent_detector.core.identity import build_asset_id, normalize_path
 
 _CMDLINE_TEXT_LIMIT = 400
-_VERSION_CLAIM_RE = re.compile(
-    r"(?<!\w)(?:--version[= ]|version[= ]|\bv)(\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?)", re.I)
 _SEMVER_RE = re.compile(r"(?<![\d.])(\d+)\.(\d+)\.(\d+)(?![\d])")
 
 
@@ -263,52 +260,3 @@ class ClientRuleDetector:
                  "cmdline": redact(" ".join(proc.cmdline))[:_CMDLINE_TEXT_LIMIT],
                  "match": reason}, self.rule.process.confidence))
         return matched
-
-
-class SignatureRuleDetector:
-    """Generic command-line signatures; one process scan for the whole set."""
-
-    def __init__(self, rules: list[SignatureRule] | None = None):
-        if rules is None:
-            from agent_detector.discovery.fingerprints.loader import load_rules
-            rules = load_rules().signature_rules
-        self.rules = rules
-        self.name = "signatures"
-
-    def detect(self, facts: HostFacts) -> list[DetectedAsset]:
-        ports_by_pid: dict[int, list[int]] = {}
-        for sock in facts.sockets:
-            if sock.pid is not None:
-                ports_by_pid.setdefault(sock.pid, []).append(sock.port)
-        assets: list[DetectedAsset] = []
-        for proc in facts.processes:
-            text = process_text(proc)
-            for rule in self.rules:
-                if not match_signature_process(rule, proc):
-                    continue
-                assets.append(self._asset(facts, rule, proc, text,
-                                          ports_by_pid.get(proc.pid, [])))
-        return assets
-
-    def _asset(self, facts: HostFacts, rule: SignatureRule, proc: ProcessInfo,
-               text: str, ports: list[int]) -> DetectedAsset:
-        claim = _VERSION_CLAIM_RE.search(text)
-        version = (VersionInfo(claim.group(1), VersionSource.PROCESS_CLAIM, 0.3)
-                   if claim else VersionInfo.unknown())
-        evidence = [Evidence(EvidenceKind.PROCESS,
-                             f"process {proc.pid} matches {rule.name}",
-                             {"pid": proc.pid, "name": proc.name,
-                              "cmdline": redact(text)[:4000]}, 0.65)]
-        evidence += [Evidence(EvidenceKind.LISTENING_SOCKET,
-                              f"pid {proc.pid} listens on {port}",
-                              {"pid": proc.pid, "port": port}, 0.85)
-                     for port in ports]
-        exe = proc.cmdline[0] if proc.cmdline else proc.name
-        asset_id = build_asset_id(facts.hostname, slugify(rule.name),
-                                  f"process:{normalize_path(exe)}")
-        return DetectedAsset(
-            asset_id=asset_id, name=rule.name, asset_type=rule.asset_type,
-            states={AssetState.RUNNING},
-            confidence=0.85 if ports else 0.65,
-            version=version, evidence=evidence,
-            running_pids=[proc.pid], listening_ports=ports, detector=self.name)

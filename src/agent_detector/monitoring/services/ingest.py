@@ -118,7 +118,6 @@ class BehaviorIngestService:
         self.loaded_rules = loaded
         fingerprint_rules = load_rules()
         self._client_rules = fingerprint_rules.client_rules
-        self._signature_rules = fingerprint_rules.signature_rules
         self._rule_errors = list(loaded.errors) + list(fingerprint_rules.errors)
 
         self._parser = AuditLogParser()
@@ -517,7 +516,6 @@ class BehaviorIngestService:
         return AgentAttributor(hostname=platform.node() or "localhost", graph=self.graph,
                                pid_map=pid_map, known_asset_ids=known,
                                client_rules=self._client_rules,
-                               signature_rules=self._signature_rules,
                                home=Path.home(),
                                container_map=container_map)
 

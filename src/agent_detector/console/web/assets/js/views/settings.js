@@ -86,7 +86,7 @@ export async function render(ctx) {
       ], system.detection_rules.client_rules || []),
       el('div', { style: { marginTop: '10px' } }, [
         el('p', { class: 'muted', style: { color: 'var(--text-muted)', fontSize: '12px' },
-          text: `另有 ${system.detection_rules.signature_rules} 条签名规则；新增目标只需加 YAML。` }),
+          text: `另有 ${system.detection_rules.framework_rules || 0} 条自建框架识别规则（依赖元数据口径）；新增目标只需加 YAML。` }),
         system.detection_rules.errors?.length
           ? note(`规则文件存在错误：${JSON.stringify(system.detection_rules.errors)}`, 'danger', 'warning')
           : null,

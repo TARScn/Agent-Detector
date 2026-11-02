@@ -2,8 +2,8 @@ from agent_detector.monitoring.detection.attribution import AgentAttributor
 from agent_detector.monitoring.detection.process_graph import ProcessGraph
 from agent_detector.core.enums import AssetType
 from agent_detector.core.models import ProcessInfo
-from agent_detector.discovery.fingerprints.schema import ClientRule, ProcessSpec, SignatureRule
-from agent_detector.core.identity import build_asset_id, normalize_path, slugify
+from agent_detector.discovery.fingerprints.schema import ClientRule, ProcessSpec
+from agent_detector.core.identity import build_asset_id, normalize_path
 
 
 def offline_graph(*processes):
@@ -78,21 +78,6 @@ def test_fingerprint_match_without_stored_asset_keeps_asset_id_empty(tmp_path):
     result = attributor.attribute(pid=50, ppid=1, process_name="demo-agent")
     assert result.agent_label == "Demo Agent" and result.asset_id is None
     assert result.evidence[0] == "process_fingerprint"
-
-
-def test_signature_rule_match_derives_process_asset_id():
-    rule = SignatureRule(name="Demo CLI", asset_type=AssetType.AGENT_CLIENT,
-                         pattern=r"demo-cli")
-    proc = ProcessInfo(pid=70, name="node",
-                       cmdline=("node", "/usr/lib/demo-cli/bin/cli.js"),
-                       create_time=3.0, ppid=1)
-    candidate = build_asset_id("host", slugify("Demo CLI"),
-                               f"process:{normalize_path('node')}")
-    attributor = AgentAttributor(hostname="host", graph=offline_graph(proc), pid_map={},
-                                 known_asset_ids={candidate}, signature_rules=[rule])
-    result = attributor.attribute(pid=70, ppid=1, process_name="node")
-    assert result.agent_label == "Demo CLI" and result.asset_id == candidate
-    assert result.evidence == ("process_fingerprint", "signature")
 
 
 def test_unmatched_process_is_unattributed():
