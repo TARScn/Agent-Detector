@@ -1,0 +1,32 @@
+# =============================================================================
+# Langflow（AI 应用）检测规则 —— kind: framework_rule
+# =============================================================================
+# Langflow 是 pip 安装型应用：`uv/pip install langflow` 产出的裸 venv 没有
+# pyproject.toml 等项目标记，resolver 的标记回溯找不到根（2026-11-02 VM 实测
+# 漏报的根因）。配合 resolver 的 bare-venv 晋升，这条规则靠 venv dist-info 里
+# 的 langflow / langflow-base 包名精确命名应用，而不是笼统记成 LangChain。
+#
+# 证据与隐私约定与其它 framework_rule 相同：只读依赖元数据（dist-info
+# METADATA），依赖命中只证明"框架环境"（INSTALLED），运行状态由进程-项目
+# 归属单独给出（frameworks.py 的多框架诚实规则：Langflow venv 同时含
+# langchain/langgraph，RUNNING 留给应用资产，框架资产保持 INSTALLED）。
+# =============================================================================
+kind: framework_rule
+id: langflow
+name: Langflow
+vendor: Langflow
+revision: 1
+runtimes: [python]
+
+dependencies:
+  any:
+    - langflow
+    - langflow-base
+
+# 置信度合成与 client_rule 同款：base + 各状态权重，封顶 cap。
+confidence:
+  base: 0.45
+  installed: 0.3
+  configured: 0.1
+  running: 0.25
+  cap: 0.9

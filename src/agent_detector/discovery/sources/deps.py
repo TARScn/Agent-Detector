@@ -249,21 +249,25 @@ def scan_project_dependencies(projects: list[ProjectInfo],
                               interest: set[str]) -> dict[str, list[ComponentInfo]]:
     """AI-relevant components per project_id, best provenance per package.
 
-    Only ``resolved`` projects carry a real root; unresolved ones are scanned
-    too (their root is a cwd hint) but routinely come back empty.
+    Resolved projects read all three provenances. Unresolved projects with a
+    real environment (the resolver's bare-venv promotion: the process runs
+    from a venv with pyvenv.cfg) still get their *installed* dist-info
+    metadata — that evidence is exactly as real as for a resolved project;
+    only the declared/locked manifests need a marker-bearing root.
     """
     result: dict[str, list[ComponentInfo]] = {}
     for project in projects:
-        if project.resolver_status != "resolved":
+        if project.resolver_status != "resolved" and not project.environment_path:
             result[project.project_id] = []
             continue
         best: dict[str, ComponentInfo] = {}
         rank = {VersionSource.PACKAGE_METADATA: 3,
                 VersionSource.LOCKED: 2,
                 VersionSource.DECLARED: 1}
-        observed = (_installed_components(project, interest)
-                    + _locked_components(project, interest)
-                    + _declared_components(project, interest))
+        observed = _installed_components(project, interest)
+        if project.resolver_status == "resolved":
+            observed = (observed + _locked_components(project, interest)
+                        + _declared_components(project, interest))
         for component in observed:
             current = best.get(component.name)
             if current is None or rank.get(component.version_source, 0) > rank.get(

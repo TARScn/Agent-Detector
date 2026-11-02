@@ -75,6 +75,33 @@ def _has_marker(directory: Path) -> bool:
         return False
 
 
+def _venv_app_root(proc: ProcessInfo) -> Path | None:
+    """App directory for a bare-venv install: the venv's parent directory.
+
+    uv/pip application installs ("uv pip install langflow" into ~/app/.venv)
+    leave no project markers, so ``_find_root`` fails even though the process
+    demonstrably runs *from* a venv. The venv's parent anchors identity more
+    stably than cwd (a systemd WorkingDirectory and the install dir agree),
+    and the venv's site-packages carries real dist-info metadata for the deps
+    scanner. Requires ``pyvenv.cfg`` so random directories named "venv" on a
+    system interpreter's path never promote.
+    """
+    sources = [proc.exe, proc.cmdline[0] if proc.cmdline else None]
+    for candidate in sources:
+        if not candidate:
+            continue
+        try:
+            current = Path(candidate).resolve()
+        except OSError:
+            continue
+        for parent in current.parents:
+            if parent.name.lower() not in _VENV_DIR_NAMES:
+                continue
+            if (parent / "pyvenv.cfg").is_file():
+                return parent.parent
+    return None
+
+
 def _find_root(start: Path) -> Path | None:
     """Nearest ancestor (≤ _MAX_ROOT_WALK levels up) holding a project marker."""
     current = start
@@ -199,6 +226,10 @@ def resolve_projects(facts: HostFacts, *,
             root = _find_root(start)
             if root is not None:
                 break
+        if root is None:
+            # Bare-venv app install: no markers anywhere, but the process runs
+            # from a real venv — anchor the project on the venv's parent.
+            root = _venv_app_root(proc)
         anchor = root if root is not None else starts[-1]
         key = normalize_path(anchor)
         if key in grouped:

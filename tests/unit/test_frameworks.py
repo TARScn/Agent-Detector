@@ -10,6 +10,7 @@ from __future__ import annotations
 from agent_detector.discovery.sources.frameworks import detect_frameworks
 from agent_detector.discovery.fingerprints.schema import FrameworkRule
 from agent_detector.core.enums import AssetState, AssetType, VersionSource
+from agent_detector.core.identity import build_asset_id
 from agent_detector.core.models import ComponentInfo, ProcessInfo, ProjectInfo
 
 LANGCHAIN_RULE = FrameworkRule.model_validate({
@@ -19,6 +20,10 @@ LANGCHAIN_RULE = FrameworkRule.model_validate({
 LANGGRAPH_RULE = FrameworkRule.model_validate({
     "kind": "framework_rule", "id": "langgraph", "name": "LangGraph",
     "dependencies": {"any": ["langgraph"]},
+})
+LANGFLOW_RULE = FrameworkRule.model_validate({
+    "kind": "framework_rule", "id": "langflow", "name": "Langflow",
+    "dependencies": {"any": ["langflow", "langflow-base"]},
 })
 
 
@@ -100,6 +105,35 @@ def test_unresolved_projects_are_never_assets():
     bundles = detect_frameworks([project], {"p5": [component("langchain-core")]},
                                 [LANGCHAIN_RULE], "host-1")
     assert bundles == []
+
+
+def test_unresolved_bare_venv_project_yields_bundle(tmp_path):
+    """Bare-venv app install (the resolver's venv promotion): identity anchors
+    on the venv parent and installed dist-info is real evidence, so an
+    unresolved project WITH an environment still produces a bundle. The
+    multi-framework honesty rule applies unchanged: RUNNING rides the app
+    asset, framework assets stay INSTALLED."""
+    root = str(tmp_path / "langflow")
+    project = ProjectInfo(project_id="proj-lf", root=root, name="langflow",
+                          runtime="python", pids=(501,),
+                          executable=f"{root}/.venv/bin/python",
+                          environment_path=f"{root}/.venv",
+                          entry="run", entry_kind="cwd",
+                          resolver_status="unresolved")
+    bundles = detect_frameworks([project],
+                                {"proj-lf": [component("langflow", "1.13.0"),
+                                             component("langchain-core")]},
+                                [LANGCHAIN_RULE, LANGFLOW_RULE], "host-1",
+                                processes_by_pid=PROCS)
+    assert len(bundles) == 1
+    app = bundles[0].asset
+    assert app.name == "langflow" and app.states == {AssetState.RUNNING}
+    assert app.running_pids == [501]
+    assert app.asset_id == build_asset_id("host-1", "langflow", f"project:{root}")
+    frameworks = {f.detector: f for f in bundles[0].frameworks}
+    assert set(frameworks) == {"langchain", "langflow"}
+    assert all(f.states == {AssetState.INSTALLED} for f in frameworks.values())
+    assert frameworks["langflow"].version.value == "1.13.0"
 
 
 def test_app_evidence_carries_process_and_dependency_metadata():

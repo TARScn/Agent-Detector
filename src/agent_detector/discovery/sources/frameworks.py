@@ -114,8 +114,8 @@ def detect_frameworks(projects: list[ProjectInfo],
     bundles: list[ApplicationBundle] = []
 
     for project in projects:
-        if project.resolver_status != "resolved":
-            continue  # no stable identity without a root; still counted in scan stats
+        if project.resolver_status != "resolved" and not project.environment_path:
+            continue  # no stable identity (no markers, no venv); counted in stats
         components = components_by_project.get(project.project_id, [])
         if not components:
             continue  # no AI-relevant dependency -> no claim at all

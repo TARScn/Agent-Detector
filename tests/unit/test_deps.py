@@ -113,6 +113,26 @@ def test_unresolved_project_yields_no_components(tmp_path):
     assert result["proj-x"] == []
 
 
+def test_unresolved_bare_venv_project_reads_dist_info_only(tmp_path):
+    """Bare-venv app install (uv/pip): resolver_status stays "unresolved" (no
+    project markers), but the venv's dist-info is real installed metadata.
+    Declared/locked manifests stay unread — they need a marker-bearing root."""
+    root = tmp_path / "langflow"
+    root.mkdir()
+    project = ProjectInfo(project_id="proj-lf", root=str(root), name="langflow",
+                          runtime="python", pids=(1,),
+                          executable=str(root / ".venv" / "bin" / "python"),
+                          environment_path=str(root / ".venv"),
+                          resolver_status="unresolved")
+    site = root / ".venv" / "lib" / "python3.14" / "site-packages"
+    write_dist_info(site, "langflow", "1.13.0")
+    (root / "requirements.txt").write_text("langchain\n", encoding="utf-8")
+    result = scan_project_dependencies([project], INTEREST | {"langflow"})
+    components = result["proj-lf"]
+    assert [(c.name, c.version) for c in components] == [("langflow", "1.13.0")]
+    assert components[0].version_source is VersionSource.PACKAGE_METADATA
+
+
 def test_packaged_llm_sdk_list_loads():
     sdks = load_llm_sdks()
     assert "openai" in sdks

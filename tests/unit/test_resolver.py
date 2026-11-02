@@ -75,6 +75,41 @@ def test_unresolved_project_is_kept_not_dropped(tmp_path):
     assert projects[0].resolver_status == "unresolved"
 
 
+def test_bare_venv_install_promotes_venv_parent(tmp_path):
+    """uv/pip application install ("uv pip install langflow" into app/.venv):
+    no project markers anywhere, but the process demonstrably runs from a real
+    venv — anchor the project on the venv's parent (stable identity, unlike
+    cwd) and keep the honest "unresolved" status."""
+    app = tmp_path / "langflow"
+    venv = app / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    exe = str(venv / "bin" / "python")
+    facts = HostFacts("h", (python_proc(130, exe, str(app), "run",
+                                        "--host", "0.0.0.0"),), ())
+    projects = resolve_projects(facts)
+    assert len(projects) == 1
+    project = projects[0]
+    assert Path(project.root).resolve() == app.resolve()
+    assert project.name == "langflow"  # directory name: no pyproject to read
+    assert project.resolver_status == "unresolved"
+    assert Path(project.environment_path).resolve() == venv.resolve()
+
+
+def test_venv_named_directory_without_pyvenv_cfg_never_promotes(tmp_path):
+    """A directory merely named "venv" on the interpreter's path without
+    pyvenv.cfg is not a venv — keep the cwd-anchored unresolved shape."""
+    tools = tmp_path / "tools" / "venv" / "bin"
+    tools.mkdir(parents=True)
+    lab = tmp_path / "lab"
+    lab.mkdir()
+    facts = HostFacts("h", (python_proc(131, str(tools / "python"), str(lab),
+                                        "run.py"),), ())
+    projects = resolve_projects(facts)
+    assert projects[0].resolver_status == "unresolved"
+    assert Path(projects[0].root).resolve() == lab.resolve()
+
+
 def test_processes_grouped_by_root(tmp_path):
     root = make_project(tmp_path, "multi")
     venv_exe = str(root / ".venv" / "bin" / "python")
