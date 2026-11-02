@@ -118,6 +118,16 @@ agent-detector purge --all --source tetragon   # 清空演示数据
 
 Web：行为页来源筛选新增 eBPF；通道状态卡显示 tetragon 可用性（`/api/v1/telemetry/status` 的 `channels[]`）。
 
+## 常驻部署（systemd）
+
+验证机采用 [`configs/systemd/agent-detector-collector.service`](../configs/systemd/agent-detector-collector.service)：
+24 小时采集窗口 + `Restart=always`（每日重启重新播种进程图），以普通用户运行（导出文件 0644 无需 root），
+`Environment=AGENT_DETECTOR_BEHAVIOR_IGNORE_PROC=pg_isready,redis-cli` 过滤容器健康检查探针噪声。
+安装：复制到 `/etc/systemd/system/` 后 `systemctl daemon-reload && systemctl enable --now agent-detector-collector`。
+
+> **注意**：`collect` 以 CLI 当前工作目录解析默认 DB 路径（`./data/agent_detector.sqlite3`），
+> service 单元用 `WorkingDirectory` 固定；手动执行 `events` 等查询命令需 `cd` 到同一目录。
+
 ```
 GET  /api/v1/capabilities                    # monitor.channels 含 tetragon
 GET  /api/v1/telemetry/status
