@@ -501,6 +501,17 @@ class BehaviorIngestService:
                         container_map[stored] = (asset["asset_id"], asset["name"])
                         container_map.setdefault(stored[:12],
                                                  (asset["asset_id"], asset["name"]))
+                    # Compose-merged assets carry one container_id per running
+                    # INSTANCE (api/worker/sandbox/...): map every instance's
+                    # container to the one asset so any container of the
+                    # project attributes (the asset row stores the primary only).
+                    for instance in inventory.list_instances(asset["asset_id"]):
+                        cid = (instance.get("container_id") or "").strip().lower()
+                        if not cid:
+                            continue
+                        container_map[cid] = (asset["asset_id"], asset["name"])
+                        container_map.setdefault(cid[:12],
+                                                 (asset["asset_id"], asset["name"]))
         except Exception:
             logger.exception("asset attribution lookup failed")
         return AgentAttributor(hostname=platform.node() or "localhost", graph=self.graph,

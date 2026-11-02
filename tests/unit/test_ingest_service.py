@@ -367,3 +367,34 @@ def test_tetragon_container_event_attributes_to_container_asset(tmp_path):
     assert event["agent_label"] == "n8n"
     assert event["container_id"] == "b13f15ab2a169c85976efbd3a28b57f"
     assert "container_id" in event["evidence"]
+
+
+def seed_container_instance(engine, *, asset_id, instance_id, container_id,
+                            pid=4300, status="running"):
+    from agent_detector.storage.models import AgentInstanceRow
+
+    with Session(engine) as session:
+        session.add(AgentInstanceRow(
+            instance_id=instance_id, asset_id=asset_id, agent_type="agent_platform",
+            pid=pid, process_name="python", cmdline="python",
+            container_id=container_id, origin="docker", status=status))
+        session.commit()
+
+
+def test_tetragon_event_attributes_via_instance_container(tmp_path):
+    """Compose-merged assets carry one container_id per running instance while
+    the asset row stores only the primary — an eBPF event from any sibling
+    container of the project must attribute to the one asset."""
+    primary = "c" * 64  # asset row's own container (different project member)
+    sibling = "b13f15ab2a169c85976efbd3a28b57f" + "0" * 33  # fixture container
+    engine = make_engine(tmp_path / "db.sqlite3")
+    seed_container_asset(engine, container_id=primary)
+    seed_container_instance(engine, asset_id="n8n--container01",
+                            instance_id="inst-sibling", container_id=sibling)
+    service = make_service(engine, process_snapshot=lambda: [])
+    result = service.run_replay(TETRA_FIXTURE, format="tetragon")
+    assert result["events"] == 1
+    event = stored_events(engine, source="tetragon")[0]
+    assert event["asset_id"] == "n8n--container01"
+    assert event["agent_label"] == "n8n"
+    assert "container_id" in event["evidence"]
