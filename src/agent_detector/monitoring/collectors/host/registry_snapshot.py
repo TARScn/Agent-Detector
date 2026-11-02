@@ -6,6 +6,11 @@ registry (event-fed by Tetragon/Sysmon, backfilled from /proc); a standalone
 live registry — and falls back to psutil whenever the file is missing, stale,
 corrupt, or from another host. Same shared-file contract as hook.token /
 sysmon.bookmark: a sibling of the DB, path overridable by env.
+
+Sensitivity: the payload carries working directories and (redacted) command
+lines — operator-local material at the same level as the DB itself. argv is
+passed through ``redact()`` and length-capped at serialization time, and the
+file is chmod 0600 on POSIX (best effort; Windows ACLs ignore mode bits).
 """
 from __future__ import annotations
 
@@ -18,17 +23,21 @@ from typing import Iterable
 
 from agent_detector.core.config import PROC_SNAPSHOT_MAX_AGE, PROC_SNAPSHOT_PATH
 from agent_detector.core.models import ProcessInfo
+from agent_detector.core.security import redact
 
 logger = logging.getLogger(__name__)
 
 _SCHEMA = 1
+_ARG_LEN_LIMIT = 512
+_ARG_COUNT_LIMIT = 64  # the resolver needs interpreter + entry markers, not tails
 
 
 def write_process_snapshot(hostname: str, processes: Iterable[ProcessInfo],
                            *, path: Path = PROC_SNAPSHOT_PATH) -> None:
     """Atomically replace the snapshot file (tmp + os.replace: readers never
-    see a half-written file). Best-effort: a failed write must never take the
-    collector down."""
+    see a half-written file). The tmp file is chmod 0600 before the replace so
+    the live path never wears loose permissions. Best-effort: a failed write
+    must never take the collector down."""
     rows = [_process_row(proc) for proc in processes]
     payload = {"schema": _SCHEMA,
                "written_at": _now_iso(),
@@ -38,6 +47,10 @@ def write_process_snapshot(hostname: str, processes: Iterable[ProcessInfo],
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass  # Windows ACLs ignore POSIX mode bits
         os.replace(tmp, path)
     except OSError:
         logger.exception("process snapshot write failed: %s", path)
@@ -72,8 +85,16 @@ def load_process_snapshot(*, path: Path = PROC_SNAPSHOT_PATH,
 
 
 def _process_row(proc: ProcessInfo) -> dict:
+    """Serialization with credential hygiene: command lines are the classic
+    secrets-on-argv surface (the DB stores argv only behind an opt-in flag and
+    redacted — this file must not be more permissive than the DB). redact()
+    masks known token shapes per element; length caps keep long argument
+    tails out while the interpreter and entry markers survive for the
+    resolver."""
+    cmdline = [redact(str(arg))[:_ARG_LEN_LIMIT]
+               for arg in proc.cmdline[:_ARG_COUNT_LIMIT]]
     return {"pid": proc.pid, "name": proc.name,
-            "cmdline": list(proc.cmdline), "create_time": proc.create_time,
+            "cmdline": cmdline, "create_time": proc.create_time,
             "ppid": proc.ppid, "exe": proc.exe, "cwd": proc.cwd,
             "container_id": proc.container_id}
 

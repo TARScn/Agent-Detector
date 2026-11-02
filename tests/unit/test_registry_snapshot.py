@@ -140,6 +140,31 @@ def test_registry_chain_keeps_cwd_for_module_entries(tmp_path):
     assert Path(projects[0].root).resolve() == root.resolve()
 
 
+def test_cmdline_is_redacted_and_capped_in_the_file(tmp_path):
+    """The snapshot persists cmdlines to disk — argv is the classic secrets-
+    on-command-line surface, and the DB only stores argv behind an opt-in
+    redacted flag. Token shapes must be masked and long tails capped, while
+    interpreter + entry markers survive for the resolver."""
+    import os
+
+    proc = ProcessInfo(pid=7, name="python3",
+                       cmdline=("python3", "serve.py",
+                                "sk-ant-verysecrettoken123456",
+                                "x" * 1000),
+                       create_time=7.0, ppid=1)
+    path = tmp_path / "process-snapshot.json"
+    write_process_snapshot("h", [proc], path=path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    args = raw["processes"][0]["cmdline"]
+    assert args[:2] == ["python3", "serve.py"]  # resolver entry markers intact
+    assert args[2] == "sk-***"
+    assert len(args[3]) == 512
+    loaded = load_process_snapshot(path=path, max_age=120, hostname="h")
+    assert loaded is not None and loaded[0].pid == 7
+    if os.name != "nt":  # Windows ACLs ignore POSIX mode bits
+        assert (path.stat().st_mode & 0o777) == 0o600
+
+
 def test_cgroup_container_id_extraction(tmp_path):
     from agent_detector.monitoring.collectors.host.process import (
         _cgroup_container_id, _container_of)
