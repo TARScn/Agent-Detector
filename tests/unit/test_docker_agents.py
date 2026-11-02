@@ -24,6 +24,7 @@ LANGGRAPH_RULE = FrameworkRule.model_validate({
 })
 LANGCHAIN_RULE = FrameworkRule.model_validate({
     "kind": "framework_rule", "id": "langchain", "name": "LangChain",
+    "runtimes": ["python", "node"],  # mirrors the shipped framework_langchain.yaml
     "dependencies": {"any": ["langchain", "langchain-core", "@langchain/core"]},
 })
 

@@ -40,6 +40,19 @@ def component(name: str, version: str = "1.0.0") -> ComponentInfo:
                          source_path=f"/x/{name}/METADATA")
 
 
+def declared_component(name: str, source: VersionSource,
+                       version: str = "1.0.0") -> ComponentInfo:
+    return ComponentInfo(name=name, version=version, version_source=source,
+                         source_path=f"/x/{name}/pyproject.toml")
+
+
+NODE_LANGCHAIN_RULE = FrameworkRule.model_validate({
+    "kind": "framework_rule", "id": "langchain-node", "name": "LangChain",
+    "runtimes": ["python", "node"],
+    "dependencies": {"any": ["langchain", "langchain-core"]},
+})
+
+
 PROCS = {501: ProcessInfo(pid=501, name="python", cmdline=("python", "-m", "uvicorn"),
                           exe="/x/.venv/bin/python", cwd="/x")}
 
@@ -144,3 +157,60 @@ def test_app_evidence_carries_process_and_dependency_metadata():
     assert process_evidence and process_evidence[0].detail["pid"] == 501
     dep_evidence = [e for e in bundle.asset.evidence if e.kind.value == "dependency_metadata"]
     assert dep_evidence and dep_evidence[0].detail["name"] == "langchain-core"
+
+
+def test_declared_only_dependency_stays_configured():
+    """A pyproject/lockfile entry is a declaration, not an installation: the
+    framework environment claim must not say INSTALLED until installed-package
+    metadata (dist-info) confirms it. RUNNING still rides the single-framework
+    case — the process link is its own evidence."""
+    project = make_project("p7", "declared-app", "/d")
+    declared = declared_component("langchain-core", VersionSource.DECLARED)
+    bundles = detect_frameworks([project], {"p7": [declared]},
+                                [LANGCHAIN_RULE], "host-1", processes_by_pid=PROCS)
+    framework = bundles[0].frameworks[0]
+    assert framework.states == {AssetState.CONFIGURED, AssetState.RUNNING}
+    assert framework.version.source is VersionSource.DECLARED
+
+
+def test_locked_only_dependency_stays_configured_too():
+    project = make_project("p8", "locked-app", "/l")
+    locked = declared_component("langchain-core", VersionSource.LOCKED)
+    bundles = detect_frameworks([project], {"p8": [locked]},
+                                [LANGCHAIN_RULE], "host-1", processes_by_pid=PROCS)
+    framework = bundles[0].frameworks[0]
+    assert framework.states == {AssetState.CONFIGURED, AssetState.RUNNING}
+
+
+def test_mixed_hit_with_confirmed_metadata_stays_installed():
+    """One confirmed dist-info hit in the rule's dependency set is enough for
+    INSTALLED — the environment demonstrably exists on disk."""
+    project = make_project("p9", "mixed-app", "/m")
+    mixed = [declared_component("langchain-core", VersionSource.DECLARED),
+             component("langchain")]
+    bundles = detect_frameworks([project], {"p9": mixed},
+                                [LANGCHAIN_RULE], "host-1", processes_by_pid=PROCS)
+    assert bundles[0].frameworks[0].states == {AssetState.INSTALLED, AssetState.RUNNING}
+
+
+def test_python_only_rules_do_not_match_node_projects():
+    """rule.runtimes gates matching: the Docker channel mints node projects
+    from npm package roots — a python-only rule must not fire there. The app
+    asset itself is unaffected (its AI-relevance gate is rule-independent)."""
+    project = ProjectInfo(project_id="p10", root="/n", name="npm-app",
+                          runtime="node", pids=(502,), executable="/n/node",
+                          environment_path="/n/node_modules",
+                          entry="index.js", entry_kind="cwd")
+    bundles = detect_frameworks([project], {"p10": [component("langchain-core")]},
+                                [LANGCHAIN_RULE], "host-1")
+    assert len(bundles) == 1 and bundles[0].frameworks == []
+
+
+def test_runtime_compatible_rule_matches_node_project():
+    project = ProjectInfo(project_id="p11", root="/o", name="npm-app",
+                          runtime="node", pids=(503,), executable="/o/node",
+                          environment_path="/o/node_modules",
+                          entry="index.js", entry_kind="cwd")
+    bundles = detect_frameworks([project], {"p11": [component("langchain-core")]},
+                                [NODE_LANGCHAIN_RULE], "host-1")
+    assert [f.detector for f in bundles[0].frameworks] == ["langchain-node"]

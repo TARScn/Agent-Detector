@@ -1,12 +1,14 @@
 """Framework identity per resolved project, from dependency metadata only.
 
-Design §6: dependency hits prove a framework *environment* (INSTALLED), and
-only the process→project link upgrades that to RUNNING — never process-name
-matching, which self-built agents defeat by design. Honesty rule for one
-project hosting several frameworks (design §6.3): the RUNNING state and the
-process instances stay with the application asset alone; framework assets
-keep INSTALLED unless the app has exactly one framework, because we cannot
-tell which framework a given process actually exercises.
+Design §6: dependency hits prove a framework *environment* — INSTALLED once
+installed-package metadata (dist-info) confirms it, CONFIGURED while the
+dependency is known only from pyproject/lockfile declarations — and only the
+process→project link upgrades that to RUNNING, never process-name matching,
+which self-built agents defeat by design. Honesty rule for one project
+hosting several frameworks (design §6.3): the RUNNING state and the process
+instances stay with the application asset alone; framework assets keep their
+environment state unless the app has exactly one framework, because we
+cannot tell which framework a given process actually exercises.
 
 The application asset itself requires AI-relevant components to exist at all
 (design §9: a plain FastAPI service must not confirm an Agent). Projects
@@ -31,6 +33,11 @@ _VERSION_CONFIDENCE = {VersionSource.PACKAGE_METADATA: 0.9,
                        VersionSource.DECLARED: 0.6}
 
 _MAX_PROCESS_EVIDENCE = 4
+
+# Dependency sources that only *declare* intent — a pyproject/lockfile entry
+# was never confirmed on disk. Anything else (package metadata, installer
+# metadata, …) counts as an installed environment.
+_DECLARED_ONLY = frozenset({VersionSource.DECLARED, VersionSource.LOCKED})
 
 
 @dataclass
@@ -120,7 +127,13 @@ def detect_frameworks(projects: list[ProjectInfo],
         if not components:
             continue  # no AI-relevant dependency -> no claim at all
         names = {component.name for component in components}
-        matched = [rule for rule in rules if rule_matches(rule, names)]
+        # rule.runtimes gates matching: the Docker channel mints node projects
+        # from npm package roots, and a python-only rule must not fire there.
+        # An "unknown" runtime (stopped container, no process to sniff) stays
+        # compatible with every rule — it says nothing to exclude on.
+        matched = [rule for rule in rules if rule_matches(rule, names)
+                   and (project.runtime in rule.runtimes
+                        or project.runtime == "unknown")]
 
         ports = sorted({port for pid in project.pids for port in ports_by_pid.get(pid, [])})
         app_id = build_asset_id(hostname, slugify(project.name), f"project:{project.root}")
@@ -152,14 +165,20 @@ def detect_frameworks(projects: list[ProjectInfo],
             hit = [component for component in components if component.name in rule_deps]
             best = max(hit, key=lambda c: _VERSION_CONFIDENCE.get(c.version_source, 0.3),
                        default=None)
-            states = {AssetState.INSTALLED}
+            # Evidence honesty: a hit known only from declared metadata was
+            # never confirmed on disk — the environment claim stays CONFIGURED
+            # until installed-package metadata backs it.
+            confirmed = [c for c in hit if c.version_source not in _DECLARED_ONLY]
+            installed = bool(confirmed)
+            states = {AssetState.INSTALLED if installed else AssetState.CONFIGURED}
             running_pids: list[int] = []
             if single:
                 states.add(AssetState.RUNNING)
                 running_pids = list(project.pids)
             spec = rule.confidence
-            confidence = spec.base + (spec.installed if hit else 0.0) + \
-                (spec.running if single else 0.0)
+            confidence = spec.base + (spec.installed if installed else 0.0) + \
+                         (spec.configured if hit and not installed else 0.0) + \
+                         (spec.running if single else 0.0)
             framework_assets.append(DetectedAsset(
                 asset_id=build_asset_id(hostname, rule.id, f"project:{project.root}"),
                 name=rule.name, asset_type=AssetType.AGENT_RUNTIME,
