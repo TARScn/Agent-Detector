@@ -14,6 +14,7 @@ process stays visible in scan stats rather than being silently dropped.
 from __future__ import annotations
 
 import hashlib
+import os
 import tomllib
 from pathlib import Path
 
@@ -90,10 +91,10 @@ def _venv_app_root(proc: ProcessInfo) -> Path | None:
     for candidate in sources:
         if not candidate:
             continue
-        try:
-            current = Path(candidate).resolve()
-        except OSError:
-            continue
+        # NB: abspath, NOT resolve() — on POSIX the venv's bin/python is a
+        # symlink to the base interpreter, and resolving it erases the .venv
+        # path segment this function is looking for (observed on the VM).
+        current = Path(os.path.abspath(candidate))
         for parent in current.parents:
             if parent.name.lower() not in _VENV_DIR_NAMES:
                 continue
@@ -129,19 +130,28 @@ def _project_name(root: Path) -> str:
 
 
 def _venv_of(exe: str | None, root: Path) -> str | None:
-    """The venv directory when the interpreter path lives under the project root."""
+    """The venv directory when the interpreter path lives under the project root.
+
+    Literal (abspath) spellings are compared, not resolved(): on POSIX the
+    venv's bin/python is a symlink to the base interpreter, and resolving it
+    erases the .venv path segment this function must find (observed on the
+    validation VM). A resolved-spelling match stays as a fallback for paths
+    that traverse symlinked mounts.
+    """
     if not exe:
         return None
     try:
-        current = Path(exe).resolve()
+        current = Path(os.path.abspath(exe))
+        root_literal = Path(os.path.abspath(str(root)))
         root_resolved = root.resolve()
     except OSError:
         return None
-    if root_resolved not in current.parents:
+    roots = {root_literal, root_resolved}
+    if not any(candidate in current.parents for candidate in roots):
         return None
     for parent in current.parents:
-        if parent == root_resolved:
-            return None
+        if parent in roots:
+            return None  # venv must sit strictly between the exe and the root
         if parent.name.lower() in _VENV_DIR_NAMES:
             return str(parent)
     return None
