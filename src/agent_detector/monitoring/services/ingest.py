@@ -366,7 +366,10 @@ class BehaviorIngestService:
             return
         self._last_record_monotonic = now  # never spin once per batch
         try:
-            self.graph.seed(self._snapshot_provider())
+            # Full recalibration: pids the live sweep no longer sees are
+            # evicted (a lost exit event must not leave a ghost in the
+            # registry — or in the snapshot file scans consume).
+            self.graph.seed(self._snapshot_provider(), prune_absent=True)
             self.recalibrations += 1
             logger.warning("%s tail silent for %ss — process registry "
                            "recalibrated from live snapshot", self.mode,

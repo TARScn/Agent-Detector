@@ -229,6 +229,35 @@ def test_silent_tail_triggers_registry_recalibration(tmp_path, monkeypatch):
     assert service.recalibrations == 1
 
 
+def test_recalibration_prunes_ghost_processes(tmp_path, monkeypatch):
+    """Full recalibration evicts pids the live sweep no longer sees: an exit
+    event lost before the silence window must not leave a dead process in the
+    registry (or in the snapshot file scans consume)."""
+    monkeypatch.setattr(isvc, "PROCESS_RESEED_SECONDS", 1)
+    log = tmp_path / "events.json"
+    log.write_text("", encoding="utf-8")
+
+    def snapshot():
+        return [ProcessInfo(pid=9999, name="backfill", cmdline=("backfill",),
+                            create_time=1.0, ppid=1)]
+
+    engine = make_engine(tmp_path / "db.sqlite3")
+    service = BehaviorIngestService(engine, mode="tetragon", log_path=log,
+                                    process_snapshot=snapshot,
+                                    graph=ProcessGraph(live_lookup=lambda pid: None))
+    # pre-existing node whose exit event was lost before the silence
+    service.graph.observe_exec(pid=4242, ppid=1, name="ghost", exec_id="img-x")
+    service.run_once()
+    service._last_record_monotonic = time.monotonic() - 5
+    service.run_once()
+    assert service.recalibrations == 1
+    assert service.graph.node(4242) is None  # ghost pruned
+    assert service.graph.node(9999) is not None
+    # a late kprobe fact for the pruned instance is gated off exactly like in
+    # production (_process_facts checks retired() before the registry update)
+    assert service.graph.retired(4242, exec_id="img-x") is True
+
+
 def test_path_policy_basename_redacts_directories(tmp_path, monkeypatch):
     monkeypatch.setattr(isvc, "BEHAVIOR_PATH_POLICY", "basename")
     engine = make_engine(tmp_path / "db.sqlite3")

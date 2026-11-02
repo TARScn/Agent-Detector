@@ -203,6 +203,32 @@ def test_exit_with_different_exec_id_does_not_evict():
     assert graph.node(71) is None
 
 
+def test_recalibration_evicts_pids_the_sweep_no_longer_sees():
+    """A lost exit event leaves a ghost in the registry (and in the snapshot
+    file scans consume). Full recalibration evicts what the fresh sweep
+    cannot see and tombstones it — a late kprobe fact for the dead instance
+    must not resurrect it. The startup seed never prunes."""
+    graph = ProcessGraph(live_lookup=lambda pid: None)
+    graph.observe_exec(pid=70, ppid=1, name="ghost", exec_id="img-a")
+    graph.seed([ProcessInfo(pid=71, name="live", cmdline=("live",),
+                            create_time=71.0, ppid=1)], prune_absent=True)
+    assert graph.node(70) is None  # ghost evicted
+    assert graph.node(71).name == "live"
+    assert graph.retired(70, exec_id="img-a") is True  # late fact blocked
+
+
+def test_plain_seed_keeps_absent_pids():
+    """Startup/backfill semantics stay permissive: seed without prune_absent
+    never drops nodes (replay seeds once, then event facts fill the graph —
+    the live host no longer runs those processes by design)."""
+    graph = ProcessGraph(live_lookup=lambda pid: None)
+    graph.observe_exec(pid=70, ppid=1, name="worker", exec_id="img-a")
+    graph.seed([ProcessInfo(pid=71, name="live", cmdline=("live",),
+                            create_time=71.0, ppid=1)])
+    assert graph.node(70).name == "worker"
+    assert graph.node(71).name == "live"
+
+
 def test_ancestor_chain_respects_depth_cap_and_cycles():
     graph = offline_graph(*[ProcessInfo(pid=pid, name=f"p{pid}",
                                         create_time=float(pid), ppid=pid - 1)

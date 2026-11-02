@@ -89,17 +89,33 @@ class ProcessGraph:
         self._live = live_lookup or live_process
         self._max_nodes = max_nodes
 
-    def seed(self, processes: Iterable[ProcessInfo]) -> int:
+    def seed(self, processes: Iterable[ProcessInfo],
+             *, prune_absent: bool = False) -> int:
         """Backfill from a live snapshot. Merge semantics: a pid whose stored
         start instant matches the snapshot keeps its event-fed fields
         (exec_id, container_id, argv) — recalibration must not wipe identity
         the events established. A disagreement is PID reuse: the fresh
-        snapshot instance replaces the node."""
+        snapshot instance replaces the node.
+
+        ``prune_absent`` turns the seed into a full recalibration: pids the
+        live sweep no longer sees are evicted (an exit event can be lost, and
+        without this the dead instance lingers in the registry — and in the
+        snapshot file scans consume). Evicted nodes with an exec_id are
+        tombstoned so late facts cannot resurrect them. Startup seeds keep
+        the default: an empty registry has nothing to prune, and replay
+        backfills events the live host no longer runs."""
+        seen: set[int] = set()
         count = 0
         for proc in processes:
             existing = self._nodes.get(proc.pid)
             self._nodes[proc.pid] = self._merge_seed(existing, _node_from(proc))
+            seen.add(proc.pid)
             count += 1
+        if prune_absent:
+            for pid in [pid for pid in self._nodes if pid not in seen]:
+                gone = self._nodes.pop(pid)
+                if gone.exec_id:
+                    self._record_tombstone(pid, gone.exec_id)
         self._prune()
         return count
 
@@ -167,11 +183,14 @@ class ProcessGraph:
             return False
         removed = self._nodes.pop(pid, None) is not None
         if removed and exec_id:
-            self._tombstones[pid] = exec_id
-            if len(self._tombstones) > self._max_nodes:
-                for stale in list(self._tombstones)[:self._max_nodes // 2]:
-                    del self._tombstones[stale]
+            self._record_tombstone(pid, exec_id)
         return removed
+
+    def _record_tombstone(self, pid: int, exec_id: str) -> None:
+        self._tombstones[pid] = exec_id
+        if len(self._tombstones) > self._max_nodes:
+            for stale in list(self._tombstones)[:self._max_nodes // 2]:
+                del self._tombstones[stale]
 
     def retired(self, pid: int, exec_id: str | None = None) -> bool:
         """True when this fact belongs to a recently exited instance — its
