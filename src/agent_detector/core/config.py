@@ -75,6 +75,13 @@ BEHAVIOR_POLL_INTERVAL = min(max(float(os.getenv("AGENT_DETECTOR_BEHAVIOR_POLL_I
 # (--export-filename / /etc/tetragon/tetragon.conf.d/export-filename). The
 # collector only ever tails this file; it never talks to the kernel itself.
 TETRA_LOG = os.getenv("AGENT_DETECTOR_TETRA_LOG", "/var/log/tetragon/events.json")
+# Event-loss heuristic: when a tail channel (tetragon/auditd) has produced no
+# raw lines for this many seconds, the source is presumed down or dropping —
+# the process registry is recalibrated from one live snapshot (merge
+# semantics, event-fed exec_ids survive). 0 disables. A genuinely idle host
+# triggers a recalibration too, which costs one snapshot and changes nothing.
+PROCESS_RESEED_SECONDS = min(max(int(os.getenv(
+    "AGENT_DETECTOR_PROCESS_RESEED_SECONDS", "900")), 0), 86400)
 
 # ---------------------------------------------------------------------------
 # V0.2: control plane, hook bridge and policy (design sections 5, 6, 8)

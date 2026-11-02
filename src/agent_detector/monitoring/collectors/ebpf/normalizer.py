@@ -71,7 +71,8 @@ def _fact(event: TetragonEvent, *, kind: str, result: str,
         exe=event.exe, argv=event.argv if kind == "proc.exec" else (),
         result=result, endpoint=endpoint, path=path,
         evidence=tuple(evidence),
-        container_id=event.container_id, exec_id=event.exec_id)
+        container_id=event.container_id, exec_id=event.exec_id,
+        start_time=event.start_time)
 
 
 def _iter_args(event: TetragonEvent):

@@ -47,7 +47,8 @@ from agent_detector.core.config import (ALERT_RISK_LEVEL, BEHAVIOR_AUDIT_KEYS,
                                           BEHAVIOR_MAX_EVENTS_PER_MINUTE,
                                           BEHAVIOR_PATH_POLICY, BEHAVIOR_POLL_INTERVAL,
                                           BEHAVIOR_RETENTION_DAYS, BEHAVIOR_STORE_ARGV,
-                                          BEHAVIOR_SUPPRESS_SECONDS, SYSMON_CHANNEL,
+                                          BEHAVIOR_SUPPRESS_SECONDS, PROCESS_RESEED_SECONDS,
+                                          SYSMON_CHANNEL,
                                           TETRA_LOG)
 from agent_detector.core.security import redact
 from agent_detector.monitoring.collectors.host.process import collect_processes
@@ -131,6 +132,7 @@ class BehaviorIngestService:
         self._last_seen: dict[tuple[str, str, str, int], float] = {}
         self._recent: list[float] = []
         self._last_purge = 0.0
+        self._last_record_monotonic: float | None = None
 
         self.started_at: str | None = None
         self.batches = 0
@@ -138,6 +140,7 @@ class BehaviorIngestService:
         self.facts_seen = 0
         self.exits_seen = 0
         self.ignored_proc = 0
+        self.recalibrations = 0
         self.events_stored = 0
         self.suppressed = 0
         self.dropped_no_rule = 0
@@ -176,6 +179,7 @@ class BehaviorIngestService:
             "started_at": self.started_at, "batches": self.batches,
             "records_read": self.records_read, "facts": self.facts_seen,
             "exits_seen": self.exits_seen, "ignored_proc": self.ignored_proc,
+            "recalibrations": self.recalibrations,
             "events": self.events_stored, "suppressed": self.suppressed,
             "dropped_no_rule": self.dropped_no_rule,
             "dropped_unattributed": self.dropped_unattributed,
@@ -262,6 +266,7 @@ class BehaviorIngestService:
                 except OSError as exc:
                     raise BehaviorIngestError(self._tetra_hint(exc)) from exc
                 self._reader = TailReader(self.log_path, from_start=self._from_start)
+                self._last_record_monotonic = time.monotonic()
                 self._seed_graph()
             return
         if self._reader is None:
@@ -271,6 +276,7 @@ class BehaviorIngestService:
             except OSError as exc:
                 raise BehaviorIngestError(self._log_hint(exc)) from exc
             self._reader = TailReader(self.log_path, from_start=self._from_start)
+            self._last_record_monotonic = time.monotonic()
             self._seed_graph()
 
     def _log_hint(self, exc: OSError) -> str:
@@ -313,13 +319,42 @@ class BehaviorIngestService:
     def run_once(self) -> list[dict]:
         """One batch; returns the events stored in this round."""
         self._ensure_ready()
+        raw_before = self.records_read
         facts = self._collect_facts()
         if facts:
             self.facts_seen += len(facts)
+        if self.records_read > raw_before:
+            self._last_record_monotonic = time.monotonic()
+        self._maybe_recalibrate()
         stored = self._process_facts(facts)
         self.batches += 1
         self._maybe_purge(time.monotonic())
         return stored
+
+    def _maybe_recalibrate(self) -> None:
+        """Heuristic event-loss recovery: a tail channel (tetragon/auditd)
+        silent for PROCESS_RESEED_SECONDS is presumed down or dropping — the
+        process registry is recalibrated from one live snapshot so attribution
+        keeps working while events are missing. seed() merge semantics keep
+        the event-fed identity of processes still alive. A genuinely idle host
+        triggers this too; the cost is one snapshot and nothing changes."""
+        if PROCESS_RESEED_SECONDS <= 0 or self.mode not in ("tetragon", "auditd"):
+            return
+        now = time.monotonic()
+        if self._last_record_monotonic is None:
+            self._last_record_monotonic = now
+            return
+        if now - self._last_record_monotonic < PROCESS_RESEED_SECONDS:
+            return
+        self._last_record_monotonic = now  # never spin once per batch
+        try:
+            self.graph.seed(self._snapshot_provider())
+            self.recalibrations += 1
+            logger.warning("%s tail silent for %ss — process registry "
+                           "recalibrated from live snapshot", self.mode,
+                           PROCESS_RESEED_SECONDS)
+        except Exception:
+            logger.exception("process registry recalibration failed")
 
     def run_replay(self, path, format: str = "auditd") -> dict:
         """One-shot processing of a saved export file (works on any platform).
@@ -424,25 +459,37 @@ class BehaviorIngestService:
         now = time.monotonic()
         for fact in facts:
             if fact.kind == "proc.exit":
-                # Lifecycle bookkeeping: keep the graph honest about dead pids,
-                # never a stored behavior or a risk signal on its own.
+                # Lifecycle bookkeeping: keep the registry honest about dead
+                # pids, never a stored behavior or a risk signal on its own.
                 self.exits_seen += 1
-                self.graph.observe_exit(fact.pid)
+                self.graph.observe_exit(fact.pid, exec_id=fact.exec_id)
                 continue
+            # Registry update comes before rules, ignore lists and everything
+            # else: process lifecycle is independent of behavior matching, and
+            # attribution needs the ancestry even when nothing gets stored.
+            # Non-exec facts also refresh the acting process's identity — a
+            # process that started before the collector may be seen first
+            # through a kprobe; the merge semantics only enrich, never clobber.
+            # A fact for a just-exited instance (late kprobe after exit) must
+            # not resurrect it — the tombstone skips the update, and only the
+            # update: the behavior itself is still matched and stored.
+            if not self.graph.retired(fact.pid, exec_id=fact.exec_id):
+                self.graph.observe_exec(pid=fact.pid, ppid=fact.ppid,
+                                        name=fact.process_name, exe=fact.exe,
+                                        argv=fact.argv,
+                                        create_time=fact.start_time,
+                                        exec_id=fact.exec_id,
+                                        container_id=fact.container_id)
             if fact.process_name.lower() in self._ignore_procs:
                 # Operator-scoped ignore list (BEHAVIOR_IGNORE_PROCS): the
-                # observation is real but out of scope — drop it before the
-                # rule engine, the graph and attribution (all fact kinds).
+                # process stays in the registry, but its behavior is out of
+                # scope — no rules, attribution or storage for its facts.
                 self.ignored_proc += 1
                 continue
             derived = match_fact(fact, rules)
             if derived is None:
                 self.dropped_no_rule += 1
                 continue
-            if fact.kind == "proc.exec":
-                self.graph.observe_exec(pid=fact.pid, ppid=fact.ppid,
-                                        name=fact.process_name, exe=fact.exe,
-                                        argv=fact.argv)
             attribution = attributor.attribute(pid=fact.pid, ppid=fact.ppid,
                                                process_name=fact.process_name,
                                                container_id=fact.container_id)

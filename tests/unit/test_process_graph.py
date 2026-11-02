@@ -61,6 +61,88 @@ def test_observe_exec_updates_image_but_keeps_create_time():
     assert node.create_time == 3.0
 
 
+def test_observe_exec_start_time_mismatch_replaces_instance():
+    """A fact whose start instant disagrees with the stored node is a reused
+    pid: the fresh instance replaces the node, nothing stale survives."""
+    graph = offline_graph(ProcessInfo(pid=42, name="old", cmdline=("old",),
+                                      create_time=3.0, ppid=7))
+    graph.observe_exec(pid=42, ppid=1, name="new", exec_id="new-image",
+                       create_time=300.0)
+    node = graph.node(42)
+    assert node.name == "new" and node.ppid == 1
+    assert node.create_time == 300.0 and node.exec_id == "new-image"
+    # matching start time keeps the instance (image update only)
+    graph.observe_exec(pid=42, ppid=1, name="newer", create_time=300.5)
+    assert graph.node(42).name == "newer" and graph.node(42).create_time == 300.5
+
+
+def test_seed_merge_keeps_event_fed_identity():
+    """Recalibration reseeds from a live snapshot: the same instance keeps its
+    event-fed exec_id/container_id; a different start instant is pid reuse and
+    the snapshot replaces the node."""
+    graph = ProcessGraph(live_lookup=lambda pid: None)
+    graph.observe_exec(pid=60, ppid=1, name="python3", exec_id="img-1",
+                       container_id="cafe123", create_time=50.0)
+    count = graph.seed([ProcessInfo(pid=60, name="python3", cmdline=("python3",),
+                                    create_time=50.4, ppid=1),
+                        ProcessInfo(pid=61, name="reused", cmdline=("reused",),
+                                    create_time=51.0, ppid=1)])
+    assert count == 2
+    node = graph.node(60)
+    assert node.exec_id == "img-1" and node.container_id == "cafe123"
+    assert node.create_time == 50.4  # lifecycle refreshed from the live view
+    # pid 61 was never seen by events: plain snapshot node
+    assert graph.node(61).exec_id is None
+
+
+def test_seed_replaces_reused_pid_from_snapshot():
+    graph = ProcessGraph(live_lookup=lambda pid: None)
+    graph.observe_exec(pid=60, ppid=1, name="python3", exec_id="img-1",
+                       create_time=50.0)
+    graph.seed([ProcessInfo(pid=60, name="next-tenant", cmdline=("next",),
+                            create_time=500.0, ppid=2)])
+    node = graph.node(60)
+    assert node.name == "next-tenant" and node.exec_id is None
+    assert node.create_time == 500.0 and node.ppid == 2
+
+
+def test_verify_identity_match_and_mismatch():
+    graph = offline_graph(ProcessInfo(pid=42, name="bash", cmdline=("bash",),
+                                      create_time=3.0, ppid=7))
+    assert graph.verify(42, start_time=4.0) is True  # inside tolerance
+    assert graph.verify(42, start_time=40.0) is False  # reused pid
+    assert graph.verify(42) is None  # nothing to compare
+    assert graph.verify(43, start_time=3.0) is None  # node unknown
+    graph.observe_exec(pid=42, ppid=7, name="sh", exec_id="img-9")
+    assert graph.verify(42, exec_id="img-9") is True
+    assert graph.verify(42, exec_id="img-8") is False
+
+
+def test_exit_tombstones_late_facts_for_the_dead_instance():
+    """Kprobe facts for a process can arrive after its exit fact — the
+    tombstone must make the registry skip them, then clear for a new exec."""
+    graph = ProcessGraph(live_lookup=lambda pid: None)
+    graph.observe_exec(pid=70, ppid=1, name="curl", exec_id="img-a")
+    assert graph.observe_exit(70, exec_id="img-a") is True
+    assert graph.retired(70, exec_id="img-a") is True
+    assert graph.retired(70) is False  # unidentifiable fact: permissive
+    assert graph.node(70) is None
+    graph.observe_exec(pid=70, ppid=1, name="curl2")  # new exec on the pid
+    assert graph.node(70).name == "curl2"
+    assert graph.retired(70, exec_id="img-a") is False
+
+
+def test_exit_with_different_exec_id_does_not_evict():
+    """A late exit for a recycled pid (old exec_id) must not kill the live
+    instance the registry already knows."""
+    graph = ProcessGraph(live_lookup=lambda pid: None)
+    graph.observe_exec(pid=71, ppid=1, name="live-proc", exec_id="img-live")
+    assert graph.observe_exit(71, exec_id="img-old") is False
+    assert graph.node(71).name == "live-proc"
+    assert graph.observe_exit(71, exec_id="img-live") is True
+    assert graph.node(71) is None
+
+
 def test_ancestor_chain_respects_depth_cap_and_cycles():
     graph = offline_graph(*[ProcessInfo(pid=pid, name=f"p{pid}",
                                         create_time=float(pid), ppid=pid - 1)
