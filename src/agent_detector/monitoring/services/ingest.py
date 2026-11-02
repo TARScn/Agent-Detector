@@ -43,6 +43,7 @@ from agent_detector.monitoring.detection.risk import grade as grade_risk
 from agent_detector.core.config import (ALERT_RISK_LEVEL, BEHAVIOR_AUDIT_KEYS,
                                           BEHAVIOR_AUDIT_LOG,
                                           BEHAVIOR_INCLUDE_UNATTRIBUTED,
+                                          BEHAVIOR_IGNORE_PROCS,
                                           BEHAVIOR_MAX_EVENTS_PER_MINUTE,
                                           BEHAVIOR_PATH_POLICY, BEHAVIOR_POLL_INTERVAL,
                                           BEHAVIOR_RETENTION_DAYS, BEHAVIOR_STORE_ARGV,
@@ -105,6 +106,7 @@ class BehaviorIngestService:
                                  else BEHAVIOR_AUDIT_LOG)
         self.sysmon_channel = SYSMON_CHANNEL
         self.keys = tuple(keys) if keys else BEHAVIOR_AUDIT_KEYS
+        self._ignore_procs = frozenset(BEHAVIOR_IGNORE_PROCS)
         self.interval = interval or BEHAVIOR_POLL_INTERVAL
         self.suppress_seconds = (BEHAVIOR_SUPPRESS_SECONDS if suppress_seconds is None
                                  else max(int(suppress_seconds), 0))
@@ -136,6 +138,7 @@ class BehaviorIngestService:
         self.records_read = 0
         self.facts_seen = 0
         self.exits_seen = 0
+        self.ignored_proc = 0
         self.events_stored = 0
         self.suppressed = 0
         self.dropped_no_rule = 0
@@ -173,7 +176,7 @@ class BehaviorIngestService:
             "retention_days": BEHAVIOR_RETENTION_DAYS,
             "started_at": self.started_at, "batches": self.batches,
             "records_read": self.records_read, "facts": self.facts_seen,
-            "exits_seen": self.exits_seen,
+            "exits_seen": self.exits_seen, "ignored_proc": self.ignored_proc,
             "events": self.events_stored, "suppressed": self.suppressed,
             "dropped_no_rule": self.dropped_no_rule,
             "dropped_unattributed": self.dropped_unattributed,
@@ -426,6 +429,12 @@ class BehaviorIngestService:
                 # never a stored behavior or a risk signal on its own.
                 self.exits_seen += 1
                 self.graph.observe_exit(fact.pid)
+                continue
+            if fact.process_name.lower() in self._ignore_procs:
+                # Operator-scoped ignore list (BEHAVIOR_IGNORE_PROCS): the
+                # observation is real but out of scope — drop it before the
+                # rule engine, the graph and attribution (all fact kinds).
+                self.ignored_proc += 1
                 continue
             derived = match_fact(fact, rules)
             if derived is None:

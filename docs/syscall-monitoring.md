@@ -162,6 +162,7 @@ GET  /api/assets/{asset_id}/events        # 资产维度的行为事件（产品
 | `AGENT_DETECTOR_BEHAVIOR_MAX_EVENTS_PER_MINUTE` | `600` | 入库速率上限（0=不限） |
 | `AGENT_DETECTOR_BEHAVIOR_PATH_POLICY` | `full` | `full` 原样 / `basename` 脱敏 |
 | `AGENT_DETECTOR_BEHAVIOR_STORE_ARGV` | `0` | 是否在证据中存脱敏后的 argv |
+| `AGENT_DETECTOR_BEHAVIOR_IGNORE_PROC` | 空 | 忽略的进程名列表（逗号分隔）：这些进程的事实计入 `ignored_proc` 并丢弃。用于容器健康检查探针（pg_isready 等）——每次 exec 都是全新 pid，抑制窗口无法去重 |
 | `AGENT_DETECTOR_BEHAVIOR_POLL_INTERVAL` | `2.0` | 采样模式间隔秒（0.5–60） |
 | `AGENT_DETECTOR_BEHAVIOR_RULES_DIR` | — | 外部行为规则目录（`behaviors.yaml` / `llm_apis.yaml`，有效则整体覆盖包内规则） |
 

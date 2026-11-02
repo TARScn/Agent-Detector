@@ -130,6 +130,7 @@ GET  /api/assets/{asset_id}/events?source=tetragon
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
 | `AGENT_DETECTOR_TETRA_LOG` | `/var/log/tetragon/events.json` | Tetragon JSON 导出文件路径 |
+| `AGENT_DETECTOR_BEHAVIOR_IGNORE_PROC` | 空 | 忽略的进程名列表（逗号分隔，精确匹配）。容器健康检查探针（pg_isready、redis-cli 等）每几秒重新 exec 一次、pid 每次都新，抑制窗口（按设计含 pid）无法去重——把这些进程的事实计入 `ignored_proc` 计数并整体丢弃 |
 | `AGENT_DETECTOR_BEHAVIOR_*` | 同 auditd 通道 | 抑制/速率/保留/路径/argv 策略共用 |
 
 ## 验收记录（P0–P3，2026-10-30，验证机 192.168.106.131）

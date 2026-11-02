@@ -123,6 +123,30 @@ def test_rate_limit_caps_events_per_minute(tmp_path, monkeypatch):
     assert result["events"] == 3 and tetra.dropped_rate == 4
 
 
+def test_ignore_proc_drops_healthcheck_noise(tmp_path, monkeypatch):
+    from agent_detector.core.facts import BehaviorFact
+
+    monkeypatch.setattr(isvc, "BEHAVIOR_IGNORE_PROCS", ("pg_isready",))
+    engine = make_engine(tmp_path / "db.sqlite3")
+    seed_asset(engine)
+    service = make_service(engine)
+    service.graph.seed([AGENT_PROC])  # direct _process_facts call: seed manually
+    noise = BehaviorFact(kind="proc.exec", ts=1000.0, serial="n1", pid=500,
+                         ppid=1, process_name="pg_isready",
+                         exe="/usr/local/bin/pg_isready",
+                         argv=("/usr/local/bin/pg_isready", "-h", "db"),
+                         result="started")
+    assert service._process_facts([noise]) == []
+    assert service.ignored_proc == 1 and service.events_stored == 0
+    kept = BehaviorFact(kind="proc.exec", ts=1000.0, serial="n2", pid=501,
+                        ppid=4100, process_name="python3",
+                        exe="/usr/bin/python3",
+                        argv=("/usr/bin/python3", "train.py"), result="started")
+    rows = service._process_facts([kept])
+    assert service.ignored_proc == 1  # the counter only moves for ignored names
+    assert [row["operation"] for row in rows] == ["SCRIPT_EXEC"]
+
+
 def test_path_policy_basename_redacts_directories(tmp_path, monkeypatch):
     monkeypatch.setattr(isvc, "BEHAVIOR_PATH_POLICY", "basename")
     engine = make_engine(tmp_path / "db.sqlite3")

@@ -62,6 +62,13 @@ BEHAVIOR_MAX_EVENTS_PER_MINUTE = min(max(int(os.getenv(
 BEHAVIOR_PATH_POLICY = _env_choice("AGENT_DETECTOR_BEHAVIOR_PATH_POLICY",
                                    ("full", "basename"), "full")
 BEHAVIOR_STORE_ARGV = _env_flag("AGENT_DETECTOR_BEHAVIOR_STORE_ARGV")
+# Operator-scoped ignore list: comma-separated process names (case-insensitive)
+# whose facts are out of scope — counted and dropped before rules/attribution.
+# Motivated by container healthcheck probes (pg_isready, redis-cli, ...): they
+# re-exec every few seconds with a fresh pid, so the suppression window (which
+# keys on pid by design) would otherwise store an exec+connect pair per run.
+BEHAVIOR_IGNORE_PROCS = tuple(name.strip().lower() for name in os.getenv(
+    "AGENT_DETECTOR_BEHAVIOR_IGNORE_PROC", "").split(",") if name.strip())
 BEHAVIOR_POLL_INTERVAL = min(max(float(os.getenv("AGENT_DETECTOR_BEHAVIOR_POLL_INTERVAL",
                                                  "2.0")), 0.5), 60.0)
 # eBPF channel (Tetragon): the JSON export file the tetragon service writes
