@@ -144,8 +144,13 @@ GET  /api/assets/{asset_id}/events?source=tetragon
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
 | `AGENT_DETECTOR_TETRA_LOG` | `/var/log/tetragon/events.json` | Tetragon JSON 导出文件路径 |
+| `AGENT_DETECTOR_PROCESS_RESEED_SECONDS` | `900` | 事件丢失启发式：tail 静默超过该秒数 → 从一次 /proc 快照重校准进程注册表（合并语义，事件侧 exec_id 保留），`status()` 暴露 `recalibrations` 计数；0 关闭 |
+| `AGENT_DETECTOR_PROC_SNAPSHOT` | `./data/process-snapshot.json` | 跨进程注册表快照文件：collector 原子改写（≤1 次/分钟），独立扫描在新鲜度内优先采用（`process_source=registry`），缺失/过期/异主机回退 psutil |
+| `AGENT_DETECTOR_PROC_SNAPSHOT_MAX_AGE` | `120` | 快照新鲜度上限（秒） |
 | `AGENT_DETECTOR_BEHAVIOR_IGNORE_PROC` | 空 | 忽略的进程名列表（逗号分隔，精确匹配）。容器健康检查探针（pg_isready、redis-cli 等）每几秒重新 exec 一次、pid 每次都新，抑制窗口（按设计含 pid）无法去重——把这些进程的事实计入 `ignored_proc` 计数并整体丢弃 |
 | `AGENT_DETECTOR_BEHAVIOR_*` | 同 auditd 通道 | 抑制/速率/保留/路径/argv 策略共用 |
+
+进程注册表（ProcessGraph）语义：身份 = `(pid, create_time/start_time)`，事实携带 Tetragon `exec_id`（内核侧映像身份，同 pid 可多次 exec）；start 距离超过 2s 容差即判定 PID 复用、整节点替换；exit 墓碑 `(pid, exec_id)` 拦截迟到事实复活死进程；归属对 actor 做身份闸门——快照 pid 与事实身份矛盾时不再采信（防 stale 快照误归属）。
 
 ## 验收记录（P0–P3，2026-10-30，验证机 192.168.106.131）
 

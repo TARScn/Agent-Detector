@@ -164,6 +164,8 @@ GET  /api/assets/{asset_id}/events        # 资产维度的行为事件（产品
 | `AGENT_DETECTOR_BEHAVIOR_STORE_ARGV` | `0` | 是否在证据中存脱敏后的 argv |
 | `AGENT_DETECTOR_BEHAVIOR_IGNORE_PROC` | 空 | 忽略的进程名列表（逗号分隔）：这些进程的事实计入 `ignored_proc` 并丢弃。用于容器健康检查探针（pg_isready 等）——每次 exec 都是全新 pid，抑制窗口无法去重 |
 | `AGENT_DETECTOR_BEHAVIOR_POLL_INTERVAL` | `2.0` | 采样模式间隔秒（0.5–60） |
+| `AGENT_DETECTOR_PROCESS_RESEED_SECONDS` | `900` | tail 通道（tetragon/auditd）静默该秒数后，从一次 /proc 快照重校准进程注册表（0 关闭；`status().recalibrations` 计数） |
+| `AGENT_DETECTOR_PROC_SNAPSHOT` / `_MAX_AGE` | `./data/process-snapshot.json` / `120` | collector 发布的进程注册表快照；独立扫描新鲜度内优先采用（`scan` stats 的 `process_source=registry`），否则回退 psutil 一次性扫描 |
 | `AGENT_DETECTOR_BEHAVIOR_RULES_DIR` | — | 外部行为规则目录（`behaviors.yaml` / `llm_apis.yaml`，有效则整体覆盖包内规则） |
 
 ## Linux 真机验收步骤（待执行）
