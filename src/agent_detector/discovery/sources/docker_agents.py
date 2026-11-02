@@ -615,6 +615,7 @@ def _merge_compose_scope(assets: list[DetectedAsset], links: dict[str, dict],
                                for e in a.evidence)), members[0])
         merged = DetectedAsset(
             asset_id=build_asset_id(hostname, rule_id, f"compose:{project}"),
+            scope_kind="compose",
             name=primary.name, asset_type=primary.asset_type,
             states=set().union(*(a.states for a in members)),
             confidence=max(a.confidence for a in members),
@@ -779,6 +780,7 @@ def _detect_container_clients(client, brief: ContainerBrief, running: bool,
                         if version else VersionInfo.unknown())
         assets.append(DetectedAsset(
             asset_id=build_asset_id(hostname, rule.id, f"container:{brief.short_id}"),
+            scope_kind="container",
             name=rule.name, asset_type=rule.asset_type, states=states,
             confidence=confidence, version=version_info, evidence=evidence,
             running_pids=running_pids, detector=rule.id,

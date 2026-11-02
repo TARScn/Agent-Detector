@@ -90,6 +90,12 @@ class DetectedAsset:
     running_pids: list[int] = field(default_factory=list)
     listening_ports: list[int] = field(default_factory=list)
     detector: str = ""
+    # Scan-time identity scope of the asset_id key — "user-home" / "project" /
+    # "container" / "compose" / "listen-port". Never persisted: it only feeds
+    # the cross-source correlation stage, which folds a port-scoped HTTP-probe
+    # sighting into its compose/container twin instead of keeping two rows for
+    # one deployment.
+    scope_kind: str = ""
     # Agent-level extras, filled by discovery/inventory.py for AGENT_CLIENT assets.
     mcp_servers: list[str] = field(default_factory=list)
     config_paths: list[str] = field(default_factory=list)

@@ -147,6 +147,7 @@ def detect_frameworks(projects: list[ProjectInfo],
         app_evidence.extend(_process_evidence(processes_by_pid, project.pids))
         app_evidence.extend(_component_evidence(component) for component in components)
         app_asset = DetectedAsset(
+            scope_kind="project",
             asset_id=app_id, name=project.name, asset_type=AssetType.AI_APPLICATION,
             states={AssetState.RUNNING},
             confidence=0.7,  # 项目-进程关联 0.5 + AI 依赖证据 0.2
@@ -180,6 +181,7 @@ def detect_frameworks(projects: list[ProjectInfo],
                          (spec.configured if hit and not installed else 0.0) + \
                          (spec.running if single else 0.0)
             framework_assets.append(DetectedAsset(
+                scope_kind="project",
                 asset_id=build_asset_id(hostname, rule.id, f"project:{project.root}"),
                 name=rule.name, asset_type=AssetType.AGENT_RUNTIME,
                 states=states,

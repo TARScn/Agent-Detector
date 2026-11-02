@@ -100,6 +100,7 @@ class ClientRuleDetector:
                                   f"user-home:{normalize_path(home)}")
         return [DetectedAsset(
             asset_id=asset_id, name=self.rule.name,
+            scope_kind="user-home",
             asset_type=self.rule.asset_type, states=states,
             confidence=round(min(confidence, weights.cap), 2),
             version=version, evidence=evidence,
