@@ -67,7 +67,8 @@ def live_process(pid: int) -> ProcessInfo | None:
 def _node_from(proc: ProcessInfo) -> ProcNode:
     return ProcNode(pid=proc.pid, ppid=proc.ppid, name=proc.name,
                     exe=(proc.cmdline[0] if proc.cmdline else None),
-                    cmdline=tuple(proc.cmdline), create_time=proc.create_time)
+                    cmdline=tuple(proc.cmdline), create_time=proc.create_time,
+                    container_id=proc.container_id)
 
 
 class ProcessGraph:
@@ -110,7 +111,8 @@ class ProcessGraph:
                            name=fresh.name or existing.name,
                            exe=fresh.exe or existing.exe,
                            cmdline=fresh.cmdline or existing.cmdline,
-                           create_time=fresh.create_time or existing.create_time)
+                           create_time=fresh.create_time or existing.create_time,
+                           container_id=fresh.container_id or existing.container_id)
         return existing  # snapshot lacks a start instant: trust the events
 
     def observe_exec(self, *, pid: int, ppid: int | None, name: str,
@@ -218,10 +220,12 @@ class ProcessGraph:
 
     def snapshot_processes(self) -> list[ProcessInfo]:
         """Registry as ProcessInfo rows — the payload for the cross-process
-        snapshot file that standalone scans prefer over a psutil sweep."""
+        snapshot file that standalone scans prefer over a psutil sweep. The
+        cgroup container tag rides along so registry-sourced scans keep the
+        host/container dedup working."""
         return [ProcessInfo(pid=node.pid, name=node.name, cmdline=node.cmdline,
                             create_time=node.create_time, ppid=node.ppid,
-                            exe=node.exe)
+                            exe=node.exe, container_id=node.container_id)
                 for node in self._nodes.values()]
 
     def ancestors_of(self, pid: int, *, ppid: int | None = None,

@@ -95,6 +95,19 @@ def test_seed_merge_keeps_event_fed_identity():
     assert graph.node(61).exec_id is None
 
 
+def test_seed_carries_cgroup_container_tag_and_snapshot_emits_it():
+    """collect_processes tags container processes from /proc cgroup — the tag
+    must survive into the node AND the snapshot payload so registry-sourced
+    scans keep the host/container dedup working."""
+    graph = ProcessGraph(live_lookup=lambda pid: None)
+    tagged = ProcessInfo(pid=80, name="gunicorn", cmdline=("gunicorn", "app"),
+                         create_time=80.0, ppid=1, container_id="d" * 64)
+    graph.seed([tagged])
+    assert graph.node(80).container_id == "d" * 64
+    rows = graph.snapshot_processes()
+    assert rows[0].container_id == "d" * 64
+
+
 def test_seed_replaces_reused_pid_from_snapshot():
     graph = ProcessGraph(live_lookup=lambda pid: None)
     graph.observe_exec(pid=60, ppid=1, name="python3", exec_id="img-1",
