@@ -12,8 +12,11 @@ was reused and the fresh instance replaces the node — never merged.
 re-exec many images on one pid, so an exec replaces the image (exec_id, name,
 argv) while the instance identity (create_time) survives.
 
-Attribution confirms the acting process against a live lookup; the stored
-fields feed that check without touching psutil on the hot path.
+Attribution confirms the acting process against a live psutil lookup
+(``node(verify=True)``); that refresh merges into the stored node — lifecycle
+fields update from the live view while event-fed identity (``exec_id``,
+``container_id``) survives for the same instance, and only a reused pid
+replaces the node wholesale.
 """
 from __future__ import annotations
 
@@ -38,6 +41,9 @@ class ProcNode:
     exe: str | None = None
     cmdline: tuple[str, ...] = ()
     create_time: float | None = None
+    # Working directory — snapshot-fed only (exec events carry no cwd); the
+    # resolver needs it to anchor `-m`/server-entry processes on a project.
+    cwd: str | None = None
     exec_id: str | None = None
     container_id: str | None = None
 
@@ -68,7 +74,7 @@ def _node_from(proc: ProcessInfo) -> ProcNode:
     return ProcNode(pid=proc.pid, ppid=proc.ppid, name=proc.name,
                     exe=(proc.cmdline[0] if proc.cmdline else None),
                     cmdline=tuple(proc.cmdline), create_time=proc.create_time,
-                    container_id=proc.container_id)
+                    cwd=proc.cwd, container_id=proc.container_id)
 
 
 class ProcessGraph:
@@ -112,6 +118,7 @@ class ProcessGraph:
                            exe=fresh.exe or existing.exe,
                            cmdline=fresh.cmdline or existing.cmdline,
                            create_time=fresh.create_time or existing.create_time,
+                           cwd=fresh.cwd or existing.cwd,
                            container_id=fresh.container_id or existing.container_id)
         return existing  # snapshot lacks a start instant: trust the events
 
@@ -138,6 +145,7 @@ class ProcessGraph:
             cmdline=tuple(argv) or (existing.cmdline if existing else ()),
             create_time=(create_time if create_time is not None
                          else (existing.create_time if existing else None)),
+            cwd=existing.cwd if existing else None,
             exec_id=exec_id or (existing.exec_id if existing else None),
             container_id=(container_id or
                           (existing.container_id if existing else None)))
@@ -210,6 +218,11 @@ class ProcessGraph:
         if live is None:
             return cached
         node = _node_from(live)
+        if cached is not None:
+            # A live refresh must not drop event-fed identity: the merge keeps
+            # exec_id/container_id/cwd for the same instance, a reused pid
+            # (start instant disagrees) replaces the node wholesale.
+            node = self._merge_seed(cached, node)
         self._nodes[pid] = node
         self._prune()
         return node
@@ -220,12 +233,13 @@ class ProcessGraph:
 
     def snapshot_processes(self) -> list[ProcessInfo]:
         """Registry as ProcessInfo rows — the payload for the cross-process
-        snapshot file that standalone scans prefer over a psutil sweep. The
-        cgroup container tag rides along so registry-sourced scans keep the
-        host/container dedup working."""
+        snapshot file that standalone scans prefer over a psutil sweep. cwd and
+        the cgroup container tag ride along so registry-sourced scans resolve
+        `-m`/server entries and keep the host/container dedup working."""
         return [ProcessInfo(pid=node.pid, name=node.name, cmdline=node.cmdline,
                             create_time=node.create_time, ppid=node.ppid,
-                            exe=node.exe, container_id=node.container_id)
+                            exe=node.exe, cwd=node.cwd,
+                            container_id=node.container_id)
                 for node in self._nodes.values()]
 
     def ancestors_of(self, pid: int, *, ppid: int | None = None,

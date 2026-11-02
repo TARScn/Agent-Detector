@@ -107,6 +107,39 @@ def service_hostname() -> str:
     return platform.node() or "localhost"
 
 
+def test_registry_chain_keeps_cwd_for_module_entries(tmp_path):
+    """Review P0: cwd must survive the whole registry chain — graph node →
+    snapshot payload → file → scan. A `-m uvicorn` process has no script path,
+    only cwd anchors its project; dropping cwd made registry-sourced scans
+    silently skip processes that psutil-sourced ones resolved."""
+    from pathlib import Path
+
+    from agent_detector.core.models import HostFacts
+    from agent_detector.discovery.scanner.resolver import resolve_projects
+    from agent_detector.monitoring.detection.process_graph import ProcessGraph
+
+    root = tmp_path / "ai-todo"
+    (root / "app").mkdir(parents=True)
+    (root / "pyproject.toml").write_text('[project]\nname = "ai-todo"\n',
+                                         encoding="utf-8")
+    (root / ".venv" / "bin").mkdir(parents=True)
+    exe = str(root / ".venv" / "bin" / "python")
+
+    graph = ProcessGraph(live_lookup=lambda pid: None)
+    graph.seed([ProcessInfo(pid=100, name="python",
+                            cmdline=(exe, "-m", "uvicorn", "main:app"),
+                            create_time=1700.0, ppid=1, exe=exe, cwd=str(root))])
+    path = tmp_path / "process-snapshot.json"
+    write_process_snapshot("h", graph.snapshot_processes(), path=path)
+    loaded = load_process_snapshot(path=path, max_age=120, hostname="h")
+    assert loaded is not None and loaded[0].cwd == str(root)
+
+    projects = resolve_projects(HostFacts("h", loaded, ()))
+    assert len(projects) == 1
+    assert projects[0].resolver_status == "resolved"
+    assert Path(projects[0].root).resolve() == root.resolve()
+
+
 def test_cgroup_container_id_extraction(tmp_path):
     from agent_detector.monitoring.collectors.host.process import (
         _cgroup_container_id, _container_of)

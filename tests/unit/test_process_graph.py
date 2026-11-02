@@ -108,6 +108,53 @@ def test_seed_carries_cgroup_container_tag_and_snapshot_emits_it():
     assert rows[0].container_id == "d" * 64
 
 
+def test_cwd_flows_through_seed_events_and_snapshot():
+    """cwd is snapshot-fed only: seed fills it, exec events (which carry no
+    cwd) must preserve it, and the snapshot payload emits it — a registry-
+    sourced scan then anchors `-m`/server entries exactly like psutil."""
+    graph = ProcessGraph(live_lookup=lambda pid: None)
+    graph.seed([ProcessInfo(pid=90, name="python3",
+                            cmdline=("python3", "-m", "uvicorn", "app:app"),
+                            create_time=9.0, ppid=1, cwd="/home/u/my-agent")])
+    graph.observe_exec(pid=90, ppid=1, name="python3",
+                       argv=("python3", "-m", "uvicorn", "main:app"),
+                       exec_id="img-1")
+    assert graph.node(90).cwd == "/home/u/my-agent"
+    rows = graph.snapshot_processes()
+    assert rows[0].cwd == "/home/u/my-agent"
+
+
+def test_live_refresh_keeps_event_fed_identity():
+    """node(verify=True) runs on the attribution hot path for every fact: the
+    psutil refresh must merge (lifecycle fields update, event-fed exec_id/
+    container_id survive) — overwriting wholesale would strip the identity the
+    verify() gate needs and lose the container tag."""
+    live = {42: ProcessInfo(pid=42, name="python3",
+                            cmdline=("python3", "-m", "app"),
+                            create_time=3.0, ppid=7, cwd="/srv/app")}
+    graph = ProcessGraph(live_lookup=lambda pid: live.get(pid))
+    graph.observe_exec(pid=42, ppid=7, name="python3", exec_id="img-1",
+                       container_id="c" * 64, create_time=3.0)
+    node = graph.node(42, verify=True)
+    assert node.exec_id == "img-1" and node.container_id == "c" * 64
+    assert node.cmdline == ("python3", "-m", "app")  # lifecycle refreshed
+    assert graph.verify(42, exec_id="img-1") is True
+    assert graph.verify(42, exec_id="img-9") is False  # gate stays effective
+
+
+def test_live_refresh_replaces_reused_pid():
+    """A live lookup whose start instant disagrees with the stored node is a
+    reused pid: the live instance replaces the node, nothing stale survives."""
+    live = {42: ProcessInfo(pid=42, name="next-tenant", cmdline=("next",),
+                            create_time=900.0, ppid=1)}
+    graph = ProcessGraph(live_lookup=lambda pid: live.get(pid))
+    graph.observe_exec(pid=42, ppid=7, name="old", exec_id="img-1",
+                       container_id="c" * 64, create_time=3.0)
+    node = graph.node(42, verify=True)
+    assert node.name == "next-tenant" and node.create_time == 900.0
+    assert node.exec_id is None and node.container_id is None
+
+
 def test_seed_replaces_reused_pid_from_snapshot():
     graph = ProcessGraph(live_lookup=lambda pid: None)
     graph.observe_exec(pid=60, ppid=1, name="python3", exec_id="img-1",
