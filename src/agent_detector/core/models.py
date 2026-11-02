@@ -29,6 +29,9 @@ class HostFacts:
     hostname: str
     processes: tuple[ProcessInfo, ...] = ()
     sockets: tuple[ListeningSocket, ...] = ()
+    # "psutil" (live sweep) or "registry" (the collector's event-fed snapshot
+    # file, preferred when fresh) — set by collect_host_facts().
+    process_source: str = "psutil"
 
 
 @dataclass(frozen=True)

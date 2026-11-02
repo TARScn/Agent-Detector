@@ -100,7 +100,8 @@ def run_scan(engine: Engine, active: bool = False,
             docker_context=docker_ctx)
         stats = {
             "observations": {"processes": len(facts.processes),
-                             "listening_sockets": len(facts.sockets)},
+                             "listening_sockets": len(facts.sockets),
+                             "process_source": facts.process_source},
             "self_built": {**project_stats,
                            "applications": len(bundles),
                            "framework_assets": sum(len(b.frameworks) for b in bundles)},

@@ -82,6 +82,14 @@ TETRA_LOG = os.getenv("AGENT_DETECTOR_TETRA_LOG", "/var/log/tetragon/events.json
 # triggers a recalibration too, which costs one snapshot and changes nothing.
 PROCESS_RESEED_SECONDS = min(max(int(os.getenv(
     "AGENT_DETECTOR_PROCESS_RESEED_SECONDS", "900")), 0), 86400)
+# Cross-process registry snapshot: the running collector atomically rewrites
+# this file with its process registry; a standalone scan prefers it (when
+# fresh) over a psutil one-shot so discovery sees the event-fed state. Same
+# shared-file contract as HOOK_TOKEN/SYSMON_BOOKMARK below.
+PROC_SNAPSHOT_PATH = Path(os.getenv("AGENT_DETECTOR_PROC_SNAPSHOT",
+                                    str(DB_PATH.parent / "process-snapshot.json")))
+PROC_SNAPSHOT_MAX_AGE = min(max(int(os.getenv(
+    "AGENT_DETECTOR_PROC_SNAPSHOT_MAX_AGE", "120")), 1), 3600)
 
 # ---------------------------------------------------------------------------
 # V0.2: control plane, hook bridge and policy (design sections 5, 6, 8)

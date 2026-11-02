@@ -4,6 +4,7 @@ import platform
 import psutil
 
 from agent_detector.core.models import HostFacts, ListeningSocket, ProcessInfo
+from agent_detector.monitoring.collectors.host.registry_snapshot import load_process_snapshot
 
 _CMDLINE_ARGS_LIMIT = 100
 
@@ -70,6 +71,18 @@ def collect_sockets() -> list[ListeningSocket]:
 
 
 def collect_host_facts() -> HostFacts:
-    return HostFacts(hostname=platform.node() or "localhost",
-                     processes=tuple(collect_processes()),
-                     sockets=tuple(collect_sockets()))
+    """Host facts preferring the collector's live registry snapshot over a
+    psutil one-shot. The snapshot is the running collector's event-fed
+    registry (exec identities the poller cannot see); whenever it is missing,
+    stale, corrupt or from another host — e.g. a standalone scan while the
+    collector service is not running — this falls back to the classic psutil
+    sweep, so the command line keeps working everywhere. Sockets are always
+    read live; Windows psutil and the Docker channel keep their own paths.
+    ``facts.process_source`` records which sweep produced the processes."""
+    hostname = platform.node() or "localhost"
+    processes = load_process_snapshot(hostname=hostname)
+    source = "registry" if processes is not None else "psutil"
+    if processes is None:
+        processes = tuple(collect_processes())
+    return HostFacts(hostname=hostname, processes=processes,
+                     sockets=tuple(collect_sockets()), process_source=source)

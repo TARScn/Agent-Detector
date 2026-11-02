@@ -216,6 +216,14 @@ class ProcessGraph:
     def node_count(self) -> int:
         return len(self._nodes)
 
+    def snapshot_processes(self) -> list[ProcessInfo]:
+        """Registry as ProcessInfo rows — the payload for the cross-process
+        snapshot file that standalone scans prefer over a psutil sweep."""
+        return [ProcessInfo(pid=node.pid, name=node.name, cmdline=node.cmdline,
+                            create_time=node.create_time, ppid=node.ppid,
+                            exe=node.exe)
+                for node in self._nodes.values()]
+
     def ancestors_of(self, pid: int, *, ppid: int | None = None,
                      max_depth: int = 12) -> list[ProcNode]:
         """``[actor, parent, ...]``; the first node is verified live, the fact's

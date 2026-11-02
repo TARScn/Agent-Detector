@@ -48,10 +48,11 @@ from agent_detector.core.config import (ALERT_RISK_LEVEL, BEHAVIOR_AUDIT_KEYS,
                                           BEHAVIOR_PATH_POLICY, BEHAVIOR_POLL_INTERVAL,
                                           BEHAVIOR_RETENTION_DAYS, BEHAVIOR_STORE_ARGV,
                                           BEHAVIOR_SUPPRESS_SECONDS, PROCESS_RESEED_SECONDS,
-                                          SYSMON_CHANNEL,
+                                          PROC_SNAPSHOT_PATH, SYSMON_CHANNEL,
                                           TETRA_LOG)
 from agent_detector.core.security import redact
 from agent_detector.monitoring.collectors.host.process import collect_processes
+from agent_detector.monitoring.collectors.host.registry_snapshot import write_process_snapshot
 from agent_detector.core.enums import RiskLevel
 from agent_detector.core.models import ProcessInfo
 from agent_detector.discovery.fingerprints.loader import load_rules
@@ -133,6 +134,7 @@ class BehaviorIngestService:
         self._recent: list[float] = []
         self._last_purge = 0.0
         self._last_record_monotonic: float | None = None
+        self._last_snapshot_monotonic: float | None = None
 
         self.started_at: str | None = None
         self.batches = 0
@@ -328,8 +330,24 @@ class BehaviorIngestService:
         self._maybe_recalibrate()
         stored = self._process_facts(facts)
         self.batches += 1
+        self._maybe_write_snapshot()
         self._maybe_purge(time.monotonic())
         return stored
+
+    def _maybe_write_snapshot(self) -> None:
+        """Share the registry with standalone scans: the snapshot file is the
+        contract (atomic rewrite, readers never see a partial state). Throttled
+        to one write per minute; a scan ignores it when stale."""
+        if not self.graph.node_count:
+            return
+        now = time.monotonic()
+        if (self._last_snapshot_monotonic is not None
+                and now - self._last_snapshot_monotonic < 60):
+            return
+        self._last_snapshot_monotonic = now
+        write_process_snapshot(platform.node() or "localhost",
+                               self.graph.snapshot_processes(),
+                               path=PROC_SNAPSHOT_PATH)
 
     def _maybe_recalibrate(self) -> None:
         """Heuristic event-loss recovery: a tail channel (tetragon/auditd)
