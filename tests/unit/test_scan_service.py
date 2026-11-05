@@ -55,6 +55,53 @@ def test_merge_assets_combines_states_and_keeps_evidence():
     assert merged.confidence == 0.95
 
 
+def test_correlate_folds_probe_into_infra_twin():
+    """Same product on one host: the HTTP probe's listen-port sighting folds
+    into the compose/container asset instead of living as a duplicate row
+    (merge_assets cannot help — the asset_ids differ by construction)."""
+    infra = DetectedAsset(asset_id="dify--compose", name="Dify",
+                          asset_type=AssetType.AGENT_PLATFORM,
+                          states={AssetState.INSTALLED, AssetState.RUNNING},
+                          confidence=0.95, version=VersionInfo.unknown(),
+                          evidence=["infra-evidence"], detector="dify",
+                          scope_kind="compose")
+    probe = DetectedAsset(asset_id="dify--port80", name="dify",
+                          asset_type=AssetType.AGENT_PLATFORM,
+                          states={AssetState.RUNNING}, confidence=0.75,
+                          version=VersionInfo.unknown(),
+                          evidence=["probe-evidence"], listening_ports=[80],
+                          detector="http-probe", scope_kind="listen-port")
+    (merged,) = scan_service.correlate_assets([infra, probe])
+    assert merged.asset_id == "dify--compose"  # infra identity survives
+    assert merged.evidence == ["infra-evidence", "probe-evidence"]
+    assert merged.listening_ports == [80]
+    assert merged.states == {AssetState.INSTALLED, AssetState.RUNNING}
+
+
+def test_correlate_keeps_unmatched_probe_and_unscoped_assets():
+    infra = DetectedAsset(asset_id="n8n--compose", name="n8n",
+                          asset_type=AssetType.AGENT_PLATFORM,
+                          states={AssetState.RUNNING}, confidence=0.9,
+                          version=VersionInfo.unknown(), evidence=[],
+                          detector="n8n", scope_kind="compose")
+    probe = DetectedAsset(asset_id="ollama--port", name="Ollama",
+                          asset_type=AssetType.LLM_SERVICE,
+                          states={AssetState.RUNNING}, confidence=0.75,
+                          version=VersionInfo.unknown(), evidence=[],
+                          listening_ports=[11434],
+                          detector="http-probe", scope_kind="listen-port")
+    plain = DetectedAsset(asset_id="codex--home", name="Codex",
+                          asset_type=AssetType.AGENT_CLIENT,
+                          states={AssetState.RUNNING}, confidence=0.8,
+                          version=VersionInfo.unknown(), evidence=[],
+                          detector="codex-cli")
+    kept = scan_service.correlate_assets([infra, probe, plain])
+    # Ollama has no infra twin: the probe row stays (a real sighting);
+    # Codex is unscoped host-side: untouched.
+    assert [a.asset_id for a in kept] == ["n8n--compose", "ollama--port",
+                                          "codex--home"]
+
+
 # ---------------------------------------------------------------------------
 # Self-built agent discovery through the full scan pipeline (design §3-§6)
 # ---------------------------------------------------------------------------
@@ -180,7 +227,7 @@ def test_removed_asset_instances_are_stopped(tmp_path, monkeypatch):
                         lambda: HostFacts("h", (), ()))
     engine = make_engine(tmp_path / "db.sqlite3")
     asset = make_asset("sig--1")
-    asset.running_pids = [4242]  # signature-style sighting with a live process
+    asset.running_pids = [4242]  # process sighting with a live process
     scan_service.run_scan(engine, detectors=[GoodDetector(asset)])
     with Session(engine) as session:
         assert len(AgentInventoryRepository(session).list_instances()) == 1

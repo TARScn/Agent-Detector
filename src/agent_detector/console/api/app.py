@@ -53,7 +53,7 @@ def create_app(*, serve_console: bool = True) -> FastAPI:
             "discovery": {"implemented": True},
             "monitor": {"implemented": True, "channels": {
                 "native_hook": True, "sysmon": True, "auditd": True,
-                "poll": True, "netmon": True}},
+                "tetragon": True, "poll": True, "netmon": True}},
             "protect": {"implemented": True, "agents": ["claude_code", "codex_cli",
                                                         "cursor"],
                         "not_implemented": ["gemini_cli", "opencode",

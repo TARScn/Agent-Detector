@@ -13,9 +13,9 @@ from typing import Sequence
 
 from agent_detector.monitoring.detection.process_graph import ProcNode, ProcessGraph
 from agent_detector.core.models import ProcessInfo
-from agent_detector.discovery.fingerprints.match import match_client_process, match_signature_process
-from agent_detector.discovery.fingerprints.schema import ClientRule, SignatureRule
-from agent_detector.core.identity import build_asset_id, normalize_path, slugify
+from agent_detector.discovery.fingerprints.match import match_client_process
+from agent_detector.discovery.fingerprints.schema import ClientRule
+from agent_detector.core.identity import build_asset_id, normalize_path
 
 
 @dataclass(frozen=True)
@@ -29,20 +29,42 @@ class Attribution:
 class AgentAttributor:
     def __init__(self, *, hostname: str, graph: ProcessGraph, pid_map: dict[int, str],
                  known_asset_ids: set[str], client_rules: Sequence[ClientRule] = (),
-                 signature_rules: Sequence[SignatureRule] = (),
-                 home: Path | None = None, max_depth: int = 12):
+                 home: Path | None = None, max_depth: int = 12,
+                 container_map: dict[str, tuple[str, str]] | None = None):
         self.hostname = hostname
         self.graph = graph
         self.pid_map = pid_map
         self.known_asset_ids = known_asset_ids
         self.client_rules = tuple(client_rules)
-        self.signature_rules = tuple(signature_rules)
         self.home = home
         self.max_depth = max_depth
+        # container hex-ID prefix -> (asset_id, agent name), from the Docker
+        # discovery channel's container-origin assets
+        self.container_map = dict(container_map or {})
 
-    def attribute(self, *, pid: int, ppid: int | None, process_name: str) -> Attribution:
+    def attribute(self, *, pid: int, ppid: int | None, process_name: str,
+                  container_id: str | None = None,
+                  start_time: float | None = None,
+                  exec_id: str | None = None) -> Attribution:
+        if container_id and self.container_map:
+            # Container processes report host-namespace PIDs (Tetragon runs on
+            # the host) while Docker discovery stores container-namespace PIDs,
+            # so instance-level pid matching is impossible by construction —
+            # container events match at the asset level only.
+            for prefix, (asset_id, name) in self.container_map.items():
+                if prefix and (container_id.startswith(prefix)
+                               or prefix.startswith(container_id)):
+                    return Attribution(name or process_name or f"pid-{pid}",
+                                       asset_id, ("container_id",), None)
         for index, node in enumerate(self.graph.ancestors_of(
                 pid, ppid=ppid, max_depth=self.max_depth)):
+            if index == 0 and self.graph.verify(node.pid, start_time=start_time,
+                                                exec_id=exec_id) is False:
+                # Identity gate (verified against the registry): the fact's
+                # start instant / exec_id contradicts the live node, i.e. this
+                # pid was reused — nothing about the live process (nor the
+                # snapshot asset pinned to that pid) applies to the fact.
+                continue
             asset_id = self.pid_map.get(node.pid)
             if asset_id:
                 label = node.name or process_name or f"pid-{node.pid}"
@@ -67,13 +89,6 @@ class AgentAttributor:
                 return Attribution(rule.name, self._known_asset(candidate),
                                    ("process_fingerprint", f"rule:{rule.id}",
                                     f"match:{reason}"), node.pid)
-        for rule in self.signature_rules:
-            if match_signature_process(rule, proc):
-                exe = proc.cmdline[0] if proc.cmdline else proc.name
-                candidate = build_asset_id(self.hostname, slugify(rule.name),
-                                           f"process:{normalize_path(exe)}")
-                return Attribution(rule.name, self._known_asset(candidate),
-                                   ("process_fingerprint", "signature"), node.pid)
         return None
 
     def _known_asset(self, candidate: str | None) -> str | None:

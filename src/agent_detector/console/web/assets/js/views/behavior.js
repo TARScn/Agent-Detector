@@ -11,6 +11,7 @@ const SOURCE_FILTERS = [
   { value: '', label: '全部' },
   { value: 'native_hook', label: 'Agent Hook' },
   { value: 'sysmon', label: 'Sysmon' },
+  { value: 'tetragon', label: 'eBPF' },
   { value: 'auditd', label: 'auditd' },
   { value: 'poll', label: '进程采样' },
   { value: 'netmon', label: '网络调用' },

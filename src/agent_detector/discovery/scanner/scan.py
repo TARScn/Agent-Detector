@@ -10,6 +10,7 @@ processes to project directories, read AI-relevant dependency metadata, match
 framework rules. A failure there degrades to a scan error like any detector.
 """
 import logging
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -77,7 +78,7 @@ def run_scan(engine: Engine, active: bool = False,
         assets.extend(bundle.asset for bundle in bundles)
         for bundle in bundles:
             assets.extend(bundle.frameworks)
-        merged = merge_assets(assets)
+        merged = correlate_assets(merge_assets(assets))
         asset_repo = AssetRepository(session)
         evidence_repo = EvidenceRepository(session)
         for asset in merged:
@@ -100,7 +101,8 @@ def run_scan(engine: Engine, active: bool = False,
             docker_context=docker_ctx)
         stats = {
             "observations": {"processes": len(facts.processes),
-                             "listening_sockets": len(facts.sockets)},
+                             "listening_sockets": len(facts.sockets),
+                             "process_source": facts.process_source},
             "self_built": {**project_stats,
                            "applications": len(bundles),
                            "framework_assets": sum(len(b.frameworks) for b in bundles)},
@@ -215,6 +217,47 @@ def merge_assets(assets: list[DetectedAsset]) -> list[DetectedAsset]:
         if asset.version.confidence > current.version.confidence:
             current.version = asset.version
     return list(by_id.values())
+
+
+_INFRA_SCOPES = frozenset({"compose", "container"})
+_PROBE_SCOPE = "listen-port"
+
+
+def _name_key(name: str) -> str:
+    """Loose product-name key for cross-source matching: 'Dify' / 'dify' /
+    'Open WebUI' / 'openwebui' collapse to one token string."""
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+
+def correlate_assets(assets: list[DetectedAsset]) -> list[DetectedAsset]:
+    """Fold port-scoped HTTP-probe sightings into their infrastructure twin.
+
+    The active probe anchors identity on ``listen-port:{port}``; the same
+    deployment that Docker discovery keys as ``compose:{project}`` or
+    ``container:{id}`` would otherwise stay two assets forever, because
+    merge_assets only folds identical ids. Matching is by normalized product
+    name on the same host: the probe's evidence and ports join the infra
+    asset and the probe row disappears. An unmatched probe keeps its own row
+    — a real sighting without a known backend is still evidence.
+    """
+    infra: dict[str, DetectedAsset] = {}
+    for asset in assets:
+        if asset.scope_kind in _INFRA_SCOPES:
+            infra.setdefault(_name_key(asset.name), asset)
+    if not infra:
+        return assets
+    kept: list[DetectedAsset] = []
+    for asset in assets:
+        twin = (infra.get(_name_key(asset.name))
+                if asset.scope_kind == _PROBE_SCOPE else None)
+        if twin is not None:
+            twin.evidence.extend(asset.evidence)
+            for port in asset.listening_ports:
+                if port not in twin.listening_ports:
+                    twin.listening_ports.append(port)
+            continue
+        kept.append(asset)
+    return kept
 
 
 def _summary(asset: DetectedAsset) -> dict:

@@ -49,6 +49,7 @@ def probe_facts(facts: HostFacts, max_probes: int = 20) -> list[DetectedAsset]:
                         assets.append(DetectedAsset(
                             asset_id=build_asset_id(facts.hostname, slugify(name),
                                                     f"listen-port:{port}"),
+                            scope_kind="listen-port",
                             name=name, asset_type=asset_type,
                             states={AssetState.RUNNING}, confidence=0.75,
                             version=VersionInfo.unknown(),

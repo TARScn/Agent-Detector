@@ -14,6 +14,7 @@ process stays visible in scan stats rather than being silently dropped.
 from __future__ import annotations
 
 import hashlib
+import os
 import tomllib
 from pathlib import Path
 
@@ -75,6 +76,33 @@ def _has_marker(directory: Path) -> bool:
         return False
 
 
+def _venv_app_root(proc: ProcessInfo) -> Path | None:
+    """App directory for a bare-venv install: the venv's parent directory.
+
+    uv/pip application installs ("uv pip install langflow" into ~/app/.venv)
+    leave no project markers, so ``_find_root`` fails even though the process
+    demonstrably runs *from* a venv. The venv's parent anchors identity more
+    stably than cwd (a systemd WorkingDirectory and the install dir agree),
+    and the venv's site-packages carries real dist-info metadata for the deps
+    scanner. Requires ``pyvenv.cfg`` so random directories named "venv" on a
+    system interpreter's path never promote.
+    """
+    sources = [proc.exe, proc.cmdline[0] if proc.cmdline else None]
+    for candidate in sources:
+        if not candidate:
+            continue
+        # NB: abspath, NOT resolve() — on POSIX the venv's bin/python is a
+        # symlink to the base interpreter, and resolving it erases the .venv
+        # path segment this function is looking for (observed on the VM).
+        current = Path(os.path.abspath(candidate))
+        for parent in current.parents:
+            if parent.name.lower() not in _VENV_DIR_NAMES:
+                continue
+            if (parent / "pyvenv.cfg").is_file():
+                return parent.parent
+    return None
+
+
 def _find_root(start: Path) -> Path | None:
     """Nearest ancestor (≤ _MAX_ROOT_WALK levels up) holding a project marker."""
     current = start
@@ -102,19 +130,28 @@ def _project_name(root: Path) -> str:
 
 
 def _venv_of(exe: str | None, root: Path) -> str | None:
-    """The venv directory when the interpreter path lives under the project root."""
+    """The venv directory when the interpreter path lives under the project root.
+
+    Literal (abspath) spellings are compared, not resolved(): on POSIX the
+    venv's bin/python is a symlink to the base interpreter, and resolving it
+    erases the .venv path segment this function must find (observed on the
+    validation VM). A resolved-spelling match stays as a fallback for paths
+    that traverse symlinked mounts.
+    """
     if not exe:
         return None
     try:
-        current = Path(exe).resolve()
+        current = Path(os.path.abspath(exe))
+        root_literal = Path(os.path.abspath(str(root)))
         root_resolved = root.resolve()
     except OSError:
         return None
-    if root_resolved not in current.parents:
+    roots = {root_literal, root_resolved}
+    if not any(candidate in current.parents for candidate in roots):
         return None
     for parent in current.parents:
-        if parent == root_resolved:
-            return None
+        if parent in roots:
+            return None  # venv must sit strictly between the exe and the root
         if parent.name.lower() in _VENV_DIR_NAMES:
             return str(parent)
     return None
@@ -177,8 +214,11 @@ def resolve_projects(facts: HostFacts, *,
     budget = MAX_PROJECT_PROBES if max_projects is None else max_projects
     if budget <= 0:
         return []
+    # Container-tagged processes (host /proc cgroup) resolve through the
+    # Docker channel's container deep-scan, never as host projects — their
+    # paths live inside container filesystems.
     candidates = [proc for proc in sorted(facts.processes, key=lambda p: p.pid)
-                  if runtime_of(proc) == "python"][:budget]
+                  if runtime_of(proc) == "python" and not proc.container_id][:budget]
 
     grouped: dict[str, tuple[Path, list[ProcessInfo], str, str | None]] = {}
     for proc in candidates:
@@ -199,6 +239,10 @@ def resolve_projects(facts: HostFacts, *,
             root = _find_root(start)
             if root is not None:
                 break
+        if root is None:
+            # Bare-venv app install: no markers anywhere, but the process runs
+            # from a real venv — anchor the project on the venv's parent.
+            root = _venv_app_root(proc)
         anchor = root if root is not None else starts[-1]
         key = normalize_path(anchor)
         if key in grouped:

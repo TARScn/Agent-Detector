@@ -1,0 +1,32 @@
+# Agent Detector · Tetragon TracingPolicy：关键目录写入观察。
+# 安装：sudo cp 本文件到 /etc/tetragon/tetragon.tp.d/ 后
+#       `sudo systemctl restart tetragon`。
+# security_file_permission 对每次文件访问都会触发，所以用 matchArgs 过滤
+# mask==MAY_WRITE(2)，只保留"以写意图打开"的事件；再按需收紧 watch 路径，
+# 避免全盘事件洪泛（与 auditd 的 -F dir= 思路一致）。
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: agent-detector-file-writes
+spec:
+  kprobes:
+    - call: "security_file_permission"
+      syscall: false
+      args:
+        - index: 0
+          type: "file"
+        - index: 1
+          type: "int"
+      selectors:
+        - matchArgs:
+            # MAY_WRITE = 2：只观察写意图
+            - index: 1
+              operator: "Equal"
+              values:
+                - "2"
+            # 按需追加要观察的目录前缀（删掉本条则观察全系统写入，量大）
+            - index: 0
+              operator: "Prefix"
+              values:
+                - "/opt/agent-lab"
+                - "/home/"

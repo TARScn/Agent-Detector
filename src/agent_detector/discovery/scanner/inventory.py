@@ -173,8 +173,8 @@ class InventoryBuilder:
           installed but no live process → inactive. Only *installed*
           evidence counts — a pyproject declaration alone does not keep
           an asset alive.
-        * Sighting-only assets (signature hits, no app link): their whole
-          existence claim was the process; gone → removed.
+        * Sighting-only assets (process sightings with no app link): their
+          whole existence claim was the process; gone → removed.
         * 容器资产 (container_id set): the host-path rules above do not
           apply — project roots are container-internal and unreachable
           without the daemon. The Docker channel's own result is the
@@ -313,14 +313,15 @@ class InventoryBuilder:
 
     @staticmethod
     def _agent_key(asset: DetectedAsset) -> str:
-        """Rule id (`claude_code`) or slugified display name for signature hits."""
+        """Rule id (`claude_code`), or the display-name slug when the detector
+        marker is a channel rather than a rule id."""
         key = asset.detector or ""
         if key == "docker":
             # Docker-channel client asset: the channel marker is not a rule
             # id; the display-name slug ("OpenClaw" -> "openclaw") hits the
-            # capability matrix like a signature hit does.
+            # capability matrix like a client-rule id does.
             return (asset.name or "").strip().lower().replace(" ", "_")
-        if key and key != "signatures":
+        if key:
             return key
         return (asset.name or "").strip().lower().replace(" ", "_")
 

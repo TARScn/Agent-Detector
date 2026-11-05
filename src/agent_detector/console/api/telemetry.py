@@ -18,8 +18,10 @@ from agent_detector.console.api.deps import Services, get_services
 from agent_detector.console.api.schemas import BehaviorStartRequest, MonitorStartRequest
 from agent_detector.monitoring.collectors.audit.rules_template import (build_rules, install_commands,
                                                            uninstall_commands)
+from agent_detector.monitoring.collectors.ebpf.tetragon import tetragon_available
 from agent_detector.monitoring.collectors.host.sysmon import sysmon_available
-from agent_detector.core.config import SYSMON_CHANNEL
+from agent_detector.core.config import SYSMON_CHANNEL, TETRA_LOG
+from agent_detector.monitoring.services.collector_status import load_collector_status
 from agent_detector.monitoring.services.ingest import BehaviorIngestError
 from agent_detector.monitoring.services.monitor import MonitorError
 
@@ -30,19 +32,42 @@ def _services() -> Services:
     return get_services()
 
 
+def _behavior_status(ingest) -> dict:
+    """Local ingest status, or the running collector's published counters.
+
+    Under the systemd deployment the console never starts its own ingest —
+    showing that idle twin would report the collector as stopped with zero
+    counters. When the local instance is idle, prefer the collector-status
+    file the real service publishes; ``source`` says which one answered.
+    """
+    status = dict(ingest.status())
+    if not status.get("running"):
+        collector = load_collector_status(hostname=platform.node() or "localhost")
+        if collector is not None:
+            return {**collector["collector"], "source": "collector",
+                    "status_age_seconds": collector["age_seconds"]}
+    status["source"] = "local"
+    return status
+
+
 @router.get("/status")
 def telemetry_status(services: Services = Depends(_services)):
     """Which observation channels exist on this host, and are they running."""
     ingest = services.ingest
     assert ingest is not None and services.monitor is not None
     sysmon = sysmon_available(SYSMON_CHANNEL)
+    tetragon = tetragon_available(TETRA_LOG)
     return {
         "host_platform": platform.system(),
         "monitor": services.monitor.status(),
-        "behavior": ingest.status(),
+        "behavior": _behavior_status(ingest),
         "channels": [
             {"id": "sysmon", "name": "Windows Sysmon", "available": sysmon.available,
              "detail": sysmon.reason, "platform": "Windows"},
+            {"id": "tetragon", "name": "eBPF (Tetragon)", "available": tetragon.available,
+             "detail": tetragon.reason or "进程/网络/文件事件，含容器身份",
+             "platform": "Linux",
+             "last_write_age_seconds": tetragon.last_write_age_seconds},
             {"id": "auditd", "name": "Linux auditd", "available": _audit_available(),
              "detail": _audit_detail(), "platform": "Linux"},
             {"id": "poll", "name": "采样降级模式", "available": True,

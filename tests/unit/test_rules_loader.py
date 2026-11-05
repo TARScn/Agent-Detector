@@ -11,14 +11,9 @@ def test_packaged_rules_load_cleanly():
     assert [r.id for r in loaded.client_rules] == ["claude-code", "codex-cli",
                                                     "cursor", "dify", "hermes",
                                                     "n8n", "openclaw", "opencode"]
-    names = {r.name for r in loaded.signature_rules}
-    assert {"Ollama", "vLLM", "AgentScope"} <= names
-    # 口径裁定 2026-10-26：依赖是资产的最终口径，进程只是发现的入口 ——
-    # 有专属 framework_rule / client_rule 的产品不留在签名集（抢证据且拿不到版本）。
-    assert not {"LangChain", "LangGraph", "AutoGen", "CrewAI"} & names
-    assert "Codex CLI" not in names  # moved to the codex-cli client rule
-    assert "OpenClaw" not in names  # moved to the openclaw client rule
-    assert len(loaded.signature_rules) >= 7
+    # 自建框架走依赖识别（framework_rule），签名通道已于 2026-11-02 退役 ——
+    # 宽松命令行正则拿不到版本、还会撞上参数/路径里的同名单词（Dify 误报事故）。
+    assert {"langchain", "langgraph", "langflow"} <= {r.id for r in loaded.framework_rules}
 
 
 def test_broken_rule_file_is_isolated(tmp_path):
@@ -26,14 +21,14 @@ def test_broken_rule_file_is_isolated(tmp_path):
     rules_dir.mkdir()
     (rules_dir / "broken.yaml").write_text("kind: client_rule\nid: [unclosed", encoding="utf-8")
     (rules_dir / "unknown_kind.yaml").write_text("kind: mystery\n", encoding="utf-8")
-    (rules_dir / "bad_regex.yaml").write_text(
-        yaml.safe_dump({"kind": "signature_set", "rules": [
-            {"name": "X", "asset_type": "LLM_SERVICE", "pattern": "([bad"}]}),
+    (rules_dir / "bad_framework.yaml").write_text(
+        yaml.safe_dump({"kind": "framework_rule", "id": "x", "name": "X",
+                        "dependencies": "nope"}),
         encoding="utf-8")
     loaded = load_rules(extra_dir=rules_dir)
     assert len(loaded.errors) == 3
     assert not loaded.client_rules or loaded.client_rules[0].id == "claude-code"
-    assert len(loaded.signature_rules) >= 7  # packaged set still intact
+    assert len(loaded.framework_rules) >= 5  # packaged set still intact
 
 
 def test_external_dir_overrides_packaged_rule_by_id(tmp_path):
@@ -52,15 +47,3 @@ def test_external_dir_overrides_packaged_rule_by_id(tmp_path):
     assert len(claude) == 1  # overridden, not duplicated
     assert claude[0].name == "Claude Code (site override)"
     assert claude[0].process.executable_names == ["site-claude"]
-
-
-def test_extra_signature_rules_accumulate(tmp_path):
-    rules_dir = tmp_path / "rules"
-    rules_dir.mkdir()
-    (rules_dir / "extra.yaml").write_text(
-        yaml.safe_dump({"kind": "signature_set", "rules": [
-            {"name": "MyAgent", "asset_type": "AGENT_CLIENT", "pattern": "\bmyagent\b"}]}),
-        encoding="utf-8")
-    loaded = load_rules(extra_dir=rules_dir)
-    assert "MyAgent" in {r.name for r in loaded.signature_rules}
-    assert loaded.errors == []

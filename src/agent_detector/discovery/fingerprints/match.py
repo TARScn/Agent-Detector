@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 
 from agent_detector.core.models import ProcessInfo
-from agent_detector.discovery.fingerprints.schema import ClientRule, ProcessSpec, SignatureRule
+from agent_detector.discovery.fingerprints.schema import ClientRule, ProcessSpec
 
 
 def process_text(proc: ProcessInfo) -> str:
@@ -48,7 +48,3 @@ def match_client_process(rule: ClientRule, proc: ProcessInfo,
         if any(token in lowered for token in tokens):
             return "package-path"
     return None
-
-
-def match_signature_process(rule: SignatureRule, proc: ProcessInfo) -> bool:
-    return re.search(rule.pattern, process_text(proc), re.I) is not None

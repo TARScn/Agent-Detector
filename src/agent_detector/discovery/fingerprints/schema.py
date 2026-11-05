@@ -15,25 +15,6 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
-class SignatureRule(_Strict):
-    """One generic command-line signature (cheap first-pass screening)."""
-
-    name: str
-    asset_type: AssetType
-    pattern: str
-
-    @field_validator("pattern")
-    @classmethod
-    def _regex_compiles(cls, value: str) -> str:
-        re.compile(value)
-        return value
-
-
-class SignatureSet(_Strict):
-    kind: Literal["signature_set"]
-    rules: list[SignatureRule]
-
-
 class PackageProbe(_Strict):
     package: str
     confidence: float = 0.9

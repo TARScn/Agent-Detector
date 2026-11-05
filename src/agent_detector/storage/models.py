@@ -112,6 +112,9 @@ class BehaviorEventRow(Base):
     decision: Mapped[str | None] = mapped_column(String(16))
     execution_status: Mapped[str | None] = mapped_column(String(24))
     policy_id: Mapped[str | None] = mapped_column(String(64))
+    # eBPF (Tetragon) channel: container hex-ID prefix when the process ran in
+    # a container; empty for host processes.
+    container_id: Mapped[str | None] = mapped_column(String(96))
 
 
 class AgentAssetRow(Base):

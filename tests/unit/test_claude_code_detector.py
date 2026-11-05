@@ -148,6 +148,20 @@ def test_running_process_without_install_evidence(tmp_path):
     assert asset.states == {AssetState.RUNNING}
 
 
+def test_container_tagged_process_is_not_a_host_sighting(tmp_path):
+    """A claude process inside a container (host /proc cgroup tag) belongs to
+    the Docker channel — a host-side sighting would mint a duplicate host
+    asset next to the container asset."""
+    home = build_home(tmp_path)
+    tagged = ProcessInfo(12, "claude", ("claude",), None, 1, None, None,
+                         "c" * 64)
+    assert detector_for(home).detect(make_facts([tagged])) == []
+    # an untagged twin still produces the host sighting
+    (asset,) = detector_for(home).detect(
+        make_facts([ProcessInfo(13, "claude", ("claude",))]))
+    assert asset.running_pids == [13]
+
+
 def test_asset_id_is_stable_across_scans(tmp_path):
     home = build_home(tmp_path, npm="1.0.0", claude_json_keys=["projects"])
     detector = detector_for(home)

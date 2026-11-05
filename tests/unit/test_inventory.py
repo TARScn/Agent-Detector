@@ -104,7 +104,7 @@ def test_unknown_agent_gets_no_protection_claims(services, home):
     asset = DetectedAsset(asset_id="mystery--1", name="Mystery Bot",
                           asset_type=AssetType.AGENT_CLIENT, states={AssetState.RUNNING},
                           confidence=0.6, version=VersionInfo.unknown(),
-                          running_pids=[], detector="signatures")
+                          running_pids=[], detector="demo-detector")
     builder = InventoryBuilder(home=home)
     with Session(services.engine) as session:
         builder.apply_scan(session, [asset], facts_with(*PROCESSES))

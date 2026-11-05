@@ -136,5 +136,5 @@ class BehaviorEventRepository:
                 "session_id": row.session_id, "instance_id": row.instance_id,
                 "process_guid": row.process_guid, "risk_level": row.risk_level,
                 "decision": row.decision, "execution_status": row.execution_status,
-                "policy_id": row.policy_id,
+                "policy_id": row.policy_id, "container_id": row.container_id,
                 "evidence": json.loads(row.evidence_json or "[]")}

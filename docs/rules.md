@@ -11,12 +11,11 @@
 2. 环境变量 `AGENT_DETECTOR_RULES_DIR` 指向的外部目录
 3. `load_rules(extra_dir=...)` 显式传入的目录
 
-合并语义：`client_rule` 按 `id` 覆盖（外部目录可整体替换某个产品的规则）；
-`signature_set` 的规则累加。解析失败或校验不通过的文件被跳过并记录错误，
-不会影响其他规则和扫描任务。
+合并语义：`client_rule` 按 `id` 覆盖（外部目录可整体替换某个产品的规则）。
+解析失败或校验不通过的文件被跳过并记录错误，不会影响其他规则和扫描任务。
 
 所有模型 `extra="forbid"`：手写 YAML 的拼写错误会在加载时立即报错，
-而不是静默改变检测行为。正则表达式在加载时预编译校验。
+而不是静默改变检测行为。
 
 ## 规则类型一：client_rule（一个产品一条，全证据源融合）
 
@@ -85,25 +84,44 @@ confidence:                  # 合成公式 base + 命中状态权重，封顶 c
 作为版本号。npm shim（.cmd/.ps1）不能作为探针目标——无 shell 时无法
 执行，请指向真实二进制。
 
-## 规则类型二：signature_set（一组通用命令行正则，廉价初筛）
+## 规则类型二：framework_rule（自建框架，依赖元数据识别）
 
-完整示例见 `rules/signatures.yaml`：
+完整示例见 `rules/framework_langchain.yaml` 与 `framework_langflow.yaml`：
 
 ```yaml
-kind: signature_set
-rules:
-  - name: Ollama
-    asset_type: LLM_SERVICE
-    pattern: '(?<![\w-])ollama(?:\s+serve)?(?![\w-])'
+kind: framework_rule
+id: langchain
+name: LangChain
+runtimes: [python, node]
+dependencies:
+  any:            # 任一命中即可（PEP 503 归一化 / npm scoped 包名）
+    - langchain
+    - langchain-core
+    - '@langchain/core'
 ```
 
-匹配语义：对全部进程命令行做大小写不敏感搜索。仅命中 → RUNNING、置信度 0.65；
-同时按 PID 关联到本机 LISTEN 端口 → 置信度 0.85。命令行中声明的版本号
-会提取为 `process-claim` 来源（低可信，未经包管理器验证）。
+匹配语义：对"进程 → 项目解析 → 依赖元数据"得到的组件清单做包名匹配
+（dist-info METADATA / lock / pyproject 依赖声明），不做进程名正则。
+`runtimes` 是硬过滤——项目 runtime 不在规则声明内则不匹配（Docker 通道
+给 npm 包根造的是 node 项目，python-only 规则不再误配；runtime 未知
+（如已停止容器）对所有规则保持兼容）。证据分级：组件仅来自声明类出处
+（`declared`/`locked`，未经 dist-info 确认）时框架资产状态为 CONFIGURED
+而非 INSTALLED——"声明过"不等于"装上了"；任一组件有已安装元数据才回
+INSTALLED。依赖命中只证明框架**环境**；RUNNING 由进程-项目关联单独给出
+（frameworks.py 的多框架诚实规则：RUNNING 只归应用资产）。
 
-**写正则的红线**：只匹配可执行文件名、模块路径、可识别 token；
-禁止 `agent`、`python`、`claude` 这类裸单词——误报率会失控。
-有专属 client_rule 的产品不要同时放进 signature_set，避免两套逻辑抢证据。
+跨来源归并（scan.py `correlate_assets`）：HTTP 主动探测按
+`listen-port:{port}` 建资产，Docker 通道按 `compose:`/`container:` 建——
+同一部署两者 asset_id 必然不同。同主机、规范化产品名相同（`Dify`/`dify`
+同键）时，探测资产折叠进基础设施资产（证据与端口并入）；无对应方的探测
+资产保留独立行。
+
+> **签名通道已退役（2026-11-02）**：原 `signature_set`（通用命令行正则
+> 廉价初筛）整通道删除。它拿不到版本、会在参数/路径/进程标题撞上同名单词
+> （实证：`\bdify\b` 把 postgres 连接标题、grep/tmux 命令行全部误报成
+> "Dify 运行中"，每个连接各生成一个 asset_id）。产品发现一律走专属
+> `client_rule`（安装/配置/进程全证据源）或 `framework_rule`（依赖口径）；
+> 新产品验证时按实勘数据提取专属指纹，不再回流通用正则。
 
 ## 验证修改
 

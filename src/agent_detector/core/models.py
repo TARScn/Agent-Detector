@@ -15,6 +15,10 @@ class ProcessInfo:
     ppid: int | None = None
     exe: str | None = None
     cwd: str | None = None
+    # Linux only: the container id parsed from /proc/<pid>/cgroup — lets the
+    # host sweep tell container processes apart (the Docker channel owns
+    # them) before any detector mints a duplicate host asset. None elsewhere.
+    container_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,9 @@ class HostFacts:
     hostname: str
     processes: tuple[ProcessInfo, ...] = ()
     sockets: tuple[ListeningSocket, ...] = ()
+    # "psutil" (live sweep) or "registry" (the collector's event-fed snapshot
+    # file, preferred when fresh) — set by collect_host_facts().
+    process_source: str = "psutil"
 
 
 @dataclass(frozen=True)
@@ -83,6 +90,12 @@ class DetectedAsset:
     running_pids: list[int] = field(default_factory=list)
     listening_ports: list[int] = field(default_factory=list)
     detector: str = ""
+    # Scan-time identity scope of the asset_id key — "user-home" / "project" /
+    # "container" / "compose" / "listen-port". Never persisted: it only feeds
+    # the cross-source correlation stage, which folds a port-scoped HTTP-probe
+    # sighting into its compose/container twin instead of keeping two rows for
+    # one deployment.
+    scope_kind: str = ""
     # Agent-level extras, filled by discovery/inventory.py for AGENT_CLIENT assets.
     mcp_servers: list[str] = field(default_factory=list)
     config_paths: list[str] = field(default_factory=list)

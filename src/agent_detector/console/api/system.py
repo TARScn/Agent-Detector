@@ -137,7 +137,7 @@ def system_info(services: Services = Depends(_services)):
             "client_rules": [{"id": rule.id, "name": rule.name,
                               "asset_type": rule.asset_type.value,
                               "revision": rule.revision} for rule in loaded.client_rules],
-            "signature_rules": len(loaded.signature_rules),
+            "framework_rules": len(loaded.framework_rules),
             "errors": loaded.errors,
         },
         "agent_matrix": {

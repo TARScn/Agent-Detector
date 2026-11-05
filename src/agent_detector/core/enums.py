@@ -148,6 +148,7 @@ class EventSource(str, Enum):
     NATIVE_HOOK = "native_hook"
     SYSMON = "sysmon"
     AUDITD = "auditd"
+    TETRAGON = "tetragon"
     POLL = "poll"
     NETMON = "netmon"
     SCAN = "scan"

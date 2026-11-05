@@ -1,0 +1,23 @@
+[Unit]
+Description=Agent Detector behavior collector (eBPF/Tetragon channel)
+Documentation=file:/home/xubuntu/agent-detector/docs/ebpf-monitoring.md
+After=network.target tetragon.service
+Wants=tetragon.service
+
+[Service]
+Type=simple
+User=xubuntu
+WorkingDirectory=/home/xubuntu/agent-detector
+# Ignore docker healthcheck probes: pg_isready (dify-db_postgres) re-execs
+# every second with a fresh pid — without this the suppression window (which
+# keys on pid by design) would store an exec+connect pair per probe run.
+Environment=AGENT_DETECTOR_BEHAVIOR_IGNORE_PROC=pg_isready,redis-cli
+# 24h collection window; Restart=always re-launches daily (fresh process-graph
+# seed each day). The collector only tails /var/log/tetragon/events.json (0644,
+# no root needed) and writes ./data/agent_detector.sqlite3.
+ExecStart=/home/xubuntu/agent-detector/.venv/bin/agent-detector collect --mode tetragon --duration 86400
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -86,7 +86,7 @@ export async function render(ctx) {
       ], system.detection_rules.client_rules || []),
       el('div', { style: { marginTop: '10px' } }, [
         el('p', { class: 'muted', style: { color: 'var(--text-muted)', fontSize: '12px' },
-          text: `另有 ${system.detection_rules.signature_rules} 条签名规则；新增目标只需加 YAML。` }),
+          text: `另有 ${system.detection_rules.framework_rules || 0} 条自建框架识别规则（依赖元数据口径）；新增目标只需加 YAML。` }),
         system.detection_rules.errors?.length
           ? note(`规则文件存在错误：${JSON.stringify(system.detection_rules.errors)}`, 'danger', 'warning')
           : null,
@@ -114,7 +114,7 @@ export async function render(ctx) {
     el('li', {}, ['Named Pipe + 用户 SID 决策通道（现为 loopback HTTP + Token） ', todo('待开发')]),
     el('li', {}, ['策略可视化编辑与签名、企业托管下发 ', todo('待开发')]),
     el('li', {}, ['WSL2 内部采集 ', todo('待开发')]),
-    el('li', {}, ['eBPF / ETW 通道与容器内 Agent 发现 ', todo('待开发')]),
+    el('li', {}, ['ETW 通道（Windows 原生替代 Sysmon）', todo('待开发')]),
     el('li', {}, ['告警通知、报表导出、多用户与权限 ', todo('待开发')]),
   ]), { flush: false }));
 
@@ -193,22 +193,42 @@ export async function render(ctx) {
 
   function paintCollectors(host, payload) {
     const behavior = payload.behavior || {};
+    const fromCollector = behavior.source === 'collector';
+    const eventAge = behavior.last_event_age_seconds;
+    const statusAge = behavior.status_age_seconds;
+    const warnings = [];
+    if (fromCollector && statusAge != null && statusAge > 180) {
+      warnings.push(note('采集器状态已过期：常驻采集器（agent-detector-collector）可能已停止', 'warning'));
+    }
+    if (eventAge != null && eventAge > 1800) {
+      warnings.push(note(`事件通道已静默 ${eventAge}s：静默期间的行为事件可能缺失`, 'warning'));
+    }
+    const title = fromCollector
+      ? `采集器状态（常驻采集器，${statusAge ?? '?'}s 前）`
+      : '采集器状态';
     host.replaceChildren(el('div', { class: 'grid grid-2' }, [
-      card('采集器状态', keyValues([
+      card(title, [...warnings, keyValues([
         ['模式', behavior.mode],
         ['运行中', behavior.running ? '是' : '否'],
         ['采集批次', String(behavior.batches ?? 0)],
+        ['已读记录', String(behavior.records_read ?? 0)],
         ['已存事件', String(behavior.events ?? 0)],
+        ['最近事件', eventAge != null ? `${eventAge}s 前` : '—'],
+        ['重校准次数', String(behavior.recalibrations ?? 0)],
+        ['进程图节点', String(behavior.graph_nodes ?? 0)],
         ['Sysmon 通道', behavior.sysmon_channel || '—'],
         ['间隔', `${behavior.interval}s`],
         ['抑制窗口', `${behavior.suppress_seconds}s`],
         ['保留天数', `${behavior.retention_days} 天`],
-      ]), { actions: [
-        behavior.running
-          ? button('停止采集', { size: 'small', onClick: () => control('behavior/stop') })
-          : button('启动采集', { size: 'small', kind: 'primary', onClick: () => control('behavior/start',
-            { mode: behavior.mode }) }),
-      ] }),
+        behavior.last_error ? ['最近错误', behavior.last_error] : null,
+      ].filter(Boolean))], {
+        actions: fromCollector ? undefined : [
+          behavior.running
+            ? button('停止采集', { size: 'small', onClick: () => control('behavior/stop') })
+            : button('启动采集', { size: 'small', kind: 'primary', onClick: () => control('behavior/start',
+              { mode: behavior.mode }) }),
+        ],
+      }),
       card('auditd 规则生成器（Linux）', auditGenerator()),
     ]));
   }

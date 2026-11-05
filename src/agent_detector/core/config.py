@@ -62,8 +62,44 @@ BEHAVIOR_MAX_EVENTS_PER_MINUTE = min(max(int(os.getenv(
 BEHAVIOR_PATH_POLICY = _env_choice("AGENT_DETECTOR_BEHAVIOR_PATH_POLICY",
                                    ("full", "basename"), "full")
 BEHAVIOR_STORE_ARGV = _env_flag("AGENT_DETECTOR_BEHAVIOR_STORE_ARGV")
+# Operator-scoped ignore list: comma-separated process names (case-insensitive)
+# whose facts are out of scope — counted and dropped before rules/attribution.
+# Motivated by container healthcheck probes (pg_isready, redis-cli, ...): they
+# re-exec every few seconds with a fresh pid, so the suppression window (which
+# keys on pid by design) would otherwise store an exec+connect pair per run.
+BEHAVIOR_IGNORE_PROCS = tuple(name.strip().lower() for name in os.getenv(
+    "AGENT_DETECTOR_BEHAVIOR_IGNORE_PROC", "").split(",") if name.strip())
 BEHAVIOR_POLL_INTERVAL = min(max(float(os.getenv("AGENT_DETECTOR_BEHAVIOR_POLL_INTERVAL",
                                                  "2.0")), 0.5), 60.0)
+# eBPF channel (Tetragon): the JSON export file the tetragon service writes
+# (--export-filename / /etc/tetragon/tetragon.conf.d/export-filename). The
+# collector only ever tails this file; it never talks to the kernel itself.
+TETRA_LOG = os.getenv("AGENT_DETECTOR_TETRA_LOG", "/var/log/tetragon/events.json")
+# Event-loss heuristic: when a tail channel (tetragon/auditd) has produced no
+# raw lines for this many seconds, the source is presumed down or dropping —
+# the process registry is recalibrated from one live snapshot (merge
+# semantics, event-fed exec_ids survive). 0 disables. A genuinely idle host
+# triggers a recalibration too, which costs one snapshot and changes nothing.
+PROCESS_RESEED_SECONDS = min(max(int(os.getenv(
+    "AGENT_DETECTOR_PROCESS_RESEED_SECONDS", "900")), 0), 86400)
+# Cross-process registry snapshot: the running collector atomically rewrites
+# this file with its process registry; a standalone scan prefers it (when
+# fresh) over a psutil one-shot so discovery sees the event-fed state. Same
+# shared-file contract as HOOK_TOKEN/SYSMON_BOOKMARK below.
+PROC_SNAPSHOT_PATH = Path(os.getenv("AGENT_DETECTOR_PROC_SNAPSHOT",
+                                    str(DB_PATH.parent / "process-snapshot.json")))
+PROC_SNAPSHOT_MAX_AGE = min(max(int(os.getenv(
+    "AGENT_DETECTOR_PROC_SNAPSHOT_MAX_AGE", "120")), 1), 3600)
+# Cross-process collector health: the running ingest service rewrites this
+# file with its live counters (records, last event time, recalibrations) so
+# the console — a separate process whose own ingest instance stays idle under
+# the systemd deployment — can show the real collector state. Same
+# shared-file contract as the snapshot above; the gate is a multiple of the
+# one-minute write cadence.
+COLLECTOR_STATUS_PATH = Path(os.getenv("AGENT_DETECTOR_COLLECTOR_STATUS",
+                                       str(DB_PATH.parent / "collector-status.json")))
+COLLECTOR_STATUS_MAX_AGE = min(max(int(os.getenv(
+    "AGENT_DETECTOR_COLLECTOR_STATUS_MAX_AGE", "180")), 30), 3600)
 
 # ---------------------------------------------------------------------------
 # V0.2: control plane, hook bridge and policy (design sections 5, 6, 8)

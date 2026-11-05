@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-FACT_KINDS = ("proc.exec", "file.write", "file.move", "file.delete", "file.attr",
-              "file.read", "net.connect", "proc.kill")
+FACT_KINDS = ("proc.exec", "proc.exit", "file.write", "file.move", "file.delete",
+              "file.attr", "file.read", "net.connect", "proc.kill")
 
 
 @dataclass(frozen=True)
@@ -35,3 +35,11 @@ class BehaviorFact:
     syscall: str | None = None
     keys: tuple[str, ...] = ()
     evidence: tuple[str, ...] = ()
+    # eBPF (Tetragon) extras. ``container_id`` is Tetragon's container prefix
+    # (a leading hex substring of the full Docker ID), ``exec_id`` the
+    # kernel-side process identity that survives PID reuse, ``start_time`` the
+    # process-start instant (epoch seconds; same semantic as psutil's
+    # create_time). All three stay None for the other channels.
+    container_id: str | None = None
+    exec_id: str | None = None
+    start_time: float | None = None
