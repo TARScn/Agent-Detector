@@ -14,6 +14,7 @@ process stays visible in scan stats rather than being silently dropped.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import tomllib
 from pathlib import Path
@@ -30,7 +31,9 @@ _VENV_DIR_NAMES = {".venv", "venv", "env"}
 
 # Project-root markers. The nearest directory containing any of these wins.
 _ROOT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
-                 "Pipfile", "uv.lock", "poetry.lock", ".git")
+                 "Pipfile", "uv.lock", "poetry.lock",
+                 "package.json", "package-lock.json", "pnpm-lock.yaml",
+                 "yarn.lock", "node_modules", ".git")
 
 _SERVER_TOOLS = {"uvicorn", "gunicorn", "celery"}
 
@@ -42,16 +45,49 @@ def _exe_stem(text: str | None) -> str:
 
 
 def runtime_of(proc: ProcessInfo) -> str | None:
-    """"python" for CPython-ish interpreters (incl. venv wrappers); else None."""
+    """"python" / "node" for interpreter processes; else None."""
     candidates = [_exe_stem(proc.exe)]
     if proc.cmdline:
         candidates.append(_exe_stem(proc.cmdline[0]))
-    return "python" if any(stem in {"py", "pythonw"} or stem.startswith("python")
-                           for stem in candidates) else None
+    if any(stem in {"py", "pythonw"} or stem.startswith("python")
+           for stem in candidates):
+        return "python"
+    if any(stem in {"node", "nodejs"} for stem in candidates):
+        return "node"
+    return None
+
+
+_NODE_ENTRY_SUFFIXES = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts",
+                        ".jsx", ".tsx")
+_NODE_FLAGS_WITH_VALUE = {"-r", "--require", "--loader",
+                          "--experimental-loader", "--import", "--inspect-port"}
+
+
+def _extract_node_entry(proc: ProcessInfo) -> tuple[str, str | None]:
+    args = list(proc.cmdline)
+    if args:
+        args = args[1:]
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in ("-e", "--eval", "-p", "--print"):
+            return "cwd", None  # inline code has no project entry
+        if arg in _NODE_FLAGS_WITH_VALUE:
+            index += 2
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        if arg.lower().endswith(_NODE_ENTRY_SUFFIXES):
+            return "script", arg
+        index += 1
+    return "cwd", None
 
 
 def _extract_entry(proc: ProcessInfo) -> tuple[str, str | None]:
     """(kind, entry) from the cmdline; kinds: module | script | server-entry | cwd."""
+    if runtime_of(proc) == "node":
+        return _extract_node_entry(proc)
     args = list(proc.cmdline)
     if args:
         args = args[1:]  # drop the interpreter itself
@@ -116,16 +152,23 @@ def _find_root(start: Path) -> Path | None:
 
 
 def _project_name(root: Path) -> str:
-    """pyproject [project].name / [tool.poetry].name, else the directory name."""
+    """pyproject / package.json name, else the directory name."""
     try:
         data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError):
-        return root.name
+        data = {}
     holders = (data.get("project"), data.get("tool", {}).get("poetry"))
     for holder in holders:
         if isinstance(holder, dict) and isinstance(holder.get("name"), str) \
                 and holder["name"].strip():
             return holder["name"].strip()
+    try:
+        package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        package = {}
+    if isinstance(package, dict) and isinstance(package.get("name"), str) \
+            and package["name"].strip():
+        return package["name"].strip()
     return root.name
 
 
@@ -188,7 +231,14 @@ def _usable_path(path: Path) -> str:
 def _build_project(root: Path, procs: list[ProcessInfo], kind: str, entry: str | None,
                    runtime: str, *, resolved: bool) -> ProjectInfo:
     key = normalize_path(root)  # identity: stable across machines' path spellings
-    venv = _group_venv(procs, root)
+    venv = _group_venv(procs, root) if runtime == "python" else None
+    environment = venv
+    if runtime == "node":
+        node_modules = root / "node_modules"
+        try:
+            environment = str(node_modules) if node_modules.is_dir() else None
+        except OSError:
+            environment = None
     return ProjectInfo(
         project_id=_project_id(key),
         root=_usable_path(root),
@@ -196,7 +246,7 @@ def _build_project(root: Path, procs: list[ProcessInfo], kind: str, entry: str |
         runtime=runtime,
         pids=tuple(sorted(proc.pid for proc in procs)),
         executable=procs[0].exe,
-        environment_path=_usable_path(Path(venv)) if venv else None,
+        environment_path=_usable_path(Path(environment)) if environment else None,
         entry=entry,
         entry_kind=kind,
         resolver_status="resolved" if resolved else "unresolved",
@@ -218,10 +268,12 @@ def resolve_projects(facts: HostFacts, *,
     # Docker channel's container deep-scan, never as host projects — their
     # paths live inside container filesystems.
     candidates = [proc for proc in sorted(facts.processes, key=lambda p: p.pid)
-                  if runtime_of(proc) == "python" and not proc.container_id][:budget]
+                  if runtime_of(proc) in ("python", "node")
+                  and not proc.container_id][:budget]
 
-    grouped: dict[str, tuple[Path, list[ProcessInfo], str, str | None]] = {}
+    grouped: dict[tuple[str, str], tuple[Path, list[ProcessInfo], str, str | None, str]] = {}
     for proc in candidates:
+        runtime = runtime_of(proc) or "unknown"
         kind, entry = _extract_entry(proc)
         starts: list[Path] = []
         if kind == "script" and entry:
@@ -239,19 +291,19 @@ def resolve_projects(facts: HostFacts, *,
             root = _find_root(start)
             if root is not None:
                 break
-        if root is None:
+        if root is None and runtime == "python":
             # Bare-venv app install: no markers anywhere, but the process runs
             # from a real venv — anchor the project on the venv's parent.
             root = _venv_app_root(proc)
         anchor = root if root is not None else starts[-1]
-        key = normalize_path(anchor)
+        key = (normalize_path(anchor), runtime)
         if key in grouped:
             grouped[key][1].append(proc)
             continue
-        grouped[key] = (anchor, [proc], kind, entry)
+        grouped[key] = (anchor, [proc], kind, entry, runtime)
 
     projects: list[ProjectInfo] = []
-    for anchor, procs, kind, entry in grouped.values():
-        projects.append(_build_project(anchor, procs, kind, entry, "python",
+    for anchor, procs, kind, entry, runtime in grouped.values():
+        projects.append(_build_project(anchor, procs, kind, entry, runtime,
                                        resolved=_has_marker(anchor)))
     return projects

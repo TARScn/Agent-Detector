@@ -4,12 +4,14 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from agent_detector.console.api.agent_view import (app_name_map, attach_container_relations,
+from agent_detector.console.api.agent_view import (app_name_map, app_state_map,
+                                                   attach_container_relations,
                                                    merge_agent_rows)
 from agent_detector.console.api.deps import Services, get_services
 from agent_detector.storage import (AgentInventoryRepository,
-                                                 ApplicationRepository,
-                                                 BehaviorEventRepository, EvidenceRepository)
+                                    ApplicationRepository,
+                                    BehaviorEventRepository, ComponentRepository,
+                                    EvidenceRepository)
 
 router = APIRouter(prefix="/api/v1", tags=["agents"])
 
@@ -31,7 +33,8 @@ def list_agents(include_stopped: bool = False, include_removed: bool = False,
         assets = repository.list_assets(include_removed=include_removed)
         for asset in assets:
             asset["session_count"] = repository.count_sessions(asset["asset_id"])
-        items = merge_agent_rows(assets, app_name_map(session), counts)
+        items = merge_agent_rows(assets, app_name_map(session), counts,
+                                 app_states=app_state_map(session))
     return {"items": items, "total": len(items),
             "matrix_errors": services.matrix.errors}
 
@@ -51,6 +54,11 @@ def agent_detail(asset_id: str, services: Services = Depends(_services)):
         if asset.get("app_id"):
             asset["application"] = ApplicationRepository(session).get_application(
                 asset["app_id"])
+        if asset.get("entity_id"):
+            asset["components"] = ComponentRepository(session).list_for_entity(
+                asset["entity_id"])
+        else:
+            asset["components"] = []
         attach_container_relations(asset, session)
     return asset
 

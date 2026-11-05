@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from agent_detector import __version__
-from agent_detector.console.api.agent_view import app_name_map, merge_agent_rows
+from agent_detector.console.api.agent_view import (app_name_map, app_state_map,
+                                                  merge_agent_rows)
 from agent_detector.console.api.deps import Services, get_services
 from agent_detector.monitoring.collectors.host.sysmon import sysmon_available
 from agent_detector.core.config import (ALERT_RISK_LEVEL, BEHAVIOR_PATH_POLICY,
@@ -46,7 +47,8 @@ def overview(services: Services = Depends(_services)):
         counts: dict[str, int] = {}
         for instance in instances:
             counts[instance["asset_id"]] = counts.get(instance["asset_id"], 0) + 1
-        entities = merge_agent_rows(agents, app_name_map(session), counts)
+        entities = merge_agent_rows(agents, app_name_map(session), counts,
+                                    app_states=app_state_map(session))
         # 只数未移除实体名下的实例：removed 资产的实例行要等下一次扫描才被
         # 退役（inventory 的收尾清理），两次扫描之间不能把幽灵算成运行中。
     protection: dict[str, int] = {}

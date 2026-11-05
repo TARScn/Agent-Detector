@@ -77,6 +77,37 @@ def test_collect_host_facts_prefers_fresh_registry(tmp_path, monkeypatch):
     assert facts.process_source == "psutil" and facts.processes[0].pid == 1
 
 
+def test_registry_hydrates_missing_cwd_for_live_same_instance(monkeypatch):
+    """Tetragon exec events carry no cwd, so a process started after the last
+    psutil seed has none in the snapshot. The scan fills it from the live
+    process — but only when create_time proves it is the same instance."""
+    missing = ProcessInfo(pid=300, name="node", cmdline=("node", "index.js"),
+                          create_time=1702.0, ppid=1, exe="/opt/node/bin/node")
+    reused = ProcessInfo(pid=301, name="node", cmdline=("node", "index.js"),
+                         create_time=1703.0, ppid=1, exe="/opt/node/bin/node")
+
+    class Live:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def create_time(self):
+            return 1702.5 if self.pid == 300 else 9999.0
+
+        def cwd(self):
+            return "/home/u/node-app"
+
+    monkeypatch.setattr(host_process, "load_process_snapshot",
+                        lambda **kwargs: (missing, reused))
+    monkeypatch.setattr(host_process.psutil, "Process",
+                        lambda pid: Live(pid))
+    monkeypatch.setattr(host_process, "collect_processes",
+                        lambda **kwargs: pytest.fail("full sweep not needed"))
+    facts = host_process.collect_host_facts()
+    assert facts.process_source == "registry"
+    assert facts.processes[0].cwd == "/home/u/node-app"
+    assert facts.processes[1].cwd is None  # pid was reused: no inheritance
+
+
 def test_ingest_publishes_snapshot_for_scans(tmp_path, monkeypatch):
     """The collector shares its registry through the snapshot file: the first
     batch writes immediately (throttle starts empty) and the file carries the

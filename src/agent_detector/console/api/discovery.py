@@ -9,7 +9,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from agent_detector.console.api.agent_view import app_name_map, merge_agent_rows
+from agent_detector.console.api.agent_view import (app_name_map, app_state_map,
+                                                  merge_agent_rows)
 from agent_detector.console.api.deps import Services, get_services
 from agent_detector.console.api.schemas import ScanRequest
 from agent_detector.discovery.scanner.scan import run_scan
@@ -74,7 +75,8 @@ def discovery_summary(services: Services = Depends(_services)):
         agents = AgentInventoryRepository(session).list_assets()
         applications = ApplicationRepository(session).count_applications()
     # 与资产清单同一合并口径（框架折叠进产品/应用实体）
-    agent_entities = merge_agent_rows(agents, app_name_map(session))
+    agent_entities = merge_agent_rows(agents, app_name_map(session),
+                                      app_states=app_state_map(session))
     by_type: dict[str, int] = {}
     for asset in assets:
         by_type[asset["asset_type"]] = by_type.get(asset["asset_type"], 0) + 1

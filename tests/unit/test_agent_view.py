@@ -71,6 +71,18 @@ def test_states_union_across_group():
     assert entity["states"] == ["INSTALLED", "RUNNING"]
 
 
+def test_app_states_are_unioned_into_the_entity_row():
+    """The framework rows of a multi-framework app deliberately keep their
+    environment state; the running application's own state must still show."""
+    assets = [row("langchain--1", "LangChain · langflow", app_id="app--1",
+                  states=["INSTALLED"]),
+              row("langgraph--2", "LangGraph · langflow", "langgraph",
+                  app_id="app--1", states=["INSTALLED"])]
+    (entity,) = merge_agent_rows(assets, {"app--1": "langflow"},
+                                 app_states={"app--1": ["INSTALLED", "RUNNING"]})
+    assert entity["states"] == ["INSTALLED", "RUNNING"]
+
+
 def test_client_rows_pass_through():
     assets = [row("claude--1", "Claude Code", "claude_code", version="2.1.3")]
     items = merge_agent_rows(assets, {})

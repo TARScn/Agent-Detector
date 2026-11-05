@@ -25,7 +25,9 @@ from agent_detector.core.config import ALERT_RISK_LEVEL, HOOK_FAILURE_MODE
 from agent_detector.monitoring.detection.correlation import resolve_instance_for_pid
 from agent_detector.core.enums import ExecutionStatus, HookEvent
 from agent_detector.core.models import PolicyVerdict, ToolCall
-from agent_detector.interception.hooks.normalizer import describe_event, normalize
+from agent_detector.interception.hooks.normalizer import (describe_event,
+                                                          mcp_server_name,
+                                                          normalize)
 from agent_detector.interception.hooks.registry import get_adapter
 from agent_detector.interception.policy.engine import PolicyEngine, risk_at_least
 from agent_detector.interception.policy.loader import load_policies
@@ -177,6 +179,7 @@ class HookDecisionService:
                     closed=call.event_type is HookEvent.SESSION_END)
             if call.event_type is HookEvent.PRE_TOOL_USE:
                 operation, target = describe_event(call)
+                protocol = "MCP" if operation == "mcp.call" else "HOOK"
                 execution = (ExecutionStatus.BLOCKED_BY_HOOK
                              if outcome.verdict.blocked else ExecutionStatus.ALLOWED)
                 event_id = events.record_tool_call(
@@ -189,9 +192,15 @@ class HookDecisionService:
                     execution_status=execution.value,
                     risk_level=outcome.verdict.risk.value,
                     policy_id=outcome.verdict.policy_id,
+                    protocol=protocol,
+                    mcp_server=mcp_server_name(call.tool_name),
                     pid=bridge_ppid,
                     evidence=list(outcome.verdict.matched_rules))
                 outcome.event_id = event_id
+                self._record_execution_claim(
+                    session, outcome, operation=operation,
+                    tool=call.tool_name, session_id=call.session_id,
+                    protocol=protocol)
                 if outcome.verdict.blocked or risk_at_least(outcome.verdict.risk.value,
                                                             self.alert_risk):
                     alerts.raise_alert(
@@ -215,8 +224,50 @@ class HookDecisionService:
                     instance_id=outcome.instance_id,
                     decision="allow",
                     execution_status=_post_status(call),
+                    protocol=("MCP" if call.tool_name and
+                              call.tool_name.lower().startswith("mcp__") else "HOOK"),
+                    mcp_server=mcp_server_name(call.tool_name),
                     risk_level=None, event_type="tool_result")
             session.commit()
+
+    def _record_execution_claim(self, session, outcome: HookOutcome, *,
+                                operation: str, tool: str | None,
+                                session_id: str | None,
+                                protocol: str) -> None:
+        """E5 evidence: the Agent's own hook reported a tool call."""
+        if not outcome.asset_id:
+            return
+        from agent_detector.aggregation.evidence_ledger import (
+            EvidenceLedger, static_claim_valid_to)
+        from agent_detector.storage.identity_repository import IdentityRepository
+
+        entity_id = IdentityRepository(session).resolve_alias(outcome.asset_id)
+        if not entity_id:
+            return
+        ledger = EvidenceLedger(session)
+        observed_at = utc_now_iso()
+        source_uid = f"hook-{outcome.event_id}"
+        observation_id = ledger.record_observation(
+            source="native_hook", source_event_uid=source_uid,
+            scope_key="", fact_type="agent_execution",
+            payload={"tool": tool or "", "operation": operation,
+                     "session_id": session_id, "protocol": protocol},
+            observed_at=observed_at, collection_run_id=0)
+        valid_to = static_claim_valid_to()
+        ledger.add_claim(
+            subject_ref=entity_id, predicate="agent_capability",
+            object_ref="AGENT_EXECUTION_OBSERVED", evidence_class="E5",
+            verification_method="verified_session", rule_id="native_hook",
+            rule_generation=0, collection_run_id=0, observed_at=observed_at,
+            valid_to=valid_to, observation_id=observation_id)
+        if protocol == "MCP":
+            ledger.add_claim(
+                subject_ref=entity_id, predicate="protocol_tool_call",
+                object_ref=f"mcp:{tool or ''}", evidence_class="E5",
+                verification_method="verified_session", rule_id="native_hook",
+                rule_generation=0, collection_run_id=0,
+                observed_at=observed_at, valid_to=valid_to,
+                observation_id=observation_id)
 
     def failure_outcome(self, reason: str, agent_type: str | None = None) -> HookOutcome:
         """Verdict used when the caller (transport) could not reach the service."""

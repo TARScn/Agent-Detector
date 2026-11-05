@@ -139,11 +139,15 @@ def test_agents_list_merges_frameworks_into_entities(client, services):
 
     items = client.get("/api/v1/agents").json()["items"]
     by_id = {item["asset_id"]: item for item in items}
-    assert set(by_id) == {"n8n--1", "langchain--3"}  # 框架行折叠，4 行 → 2 行
+    # The representative of a multi-framework app is the latest-seen member;
+    # both members can be inserted within the same clock second, so accept
+    # either while still requiring one row per application.
+    demo_id = "langchain--3" if "langchain--3" in by_id else "langgraph--4"
+    assert set(by_id) == {"n8n--1", demo_id}  # 框架行折叠，4 行 → 2 行
     n8n = by_id["n8n--1"]
     assert n8n["dependencies"][0]["name"] == "LangChain"
     assert n8n["dependencies"][0]["version"] == "1.2.8"
-    demo = by_id["langchain--3"]
+    demo = by_id[demo_id]
     assert demo["name"] == "agentTest_langchain"  # 统一应用名
     assert [d["name"] for d in demo["dependencies"]] == ["LangChain", "LangGraph"]
 

@@ -66,6 +66,15 @@ def describe_event(call: ToolCall) -> tuple[str, str]:
     return f"tool.{normalized}" if normalized else "tool.call", _first_path(call)
 
 
+def mcp_server_name(tool_name: str | None) -> str | None:
+    """Server portion of ``mcp__<server>__<tool>``; None for non-MCP tools."""
+    name = (tool_name or "").strip()
+    if not name.startswith("mcp__"):
+        return None
+    parts = name.split("__")
+    return parts[1] if len(parts) > 1 and parts[1] else None
+
+
 def _first_path(call: ToolCall) -> str:
     for key in ("file_path", "filepath", "path", "notebook_path", "url"):
         value = call.tool_input.get(key)

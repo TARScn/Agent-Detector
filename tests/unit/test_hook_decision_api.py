@@ -110,6 +110,35 @@ def test_post_tool_use_records_a_result_not_a_decision(client, services):
     assert events[0]["execution_status"] == "failed"
 
 
+def test_mcp_hook_records_protocol_and_e5_claim(client, services):
+    from agent_detector.core.models import AgentInventoryItem
+    from agent_detector.storage.identity_repository import IdentityRepository
+    from agent_detector.storage.models import ClaimRow
+
+    with Session(services.engine) as session:
+        AgentInventoryRepository(session).upsert_asset(AgentInventoryItem(
+            asset_id="claude--1", agent_type="claude_code", name="Claude Code"))
+        identities = IdentityRepository(session)
+        entity = identities.ensure_entity(
+            "PRODUCT_INSTALL", "legacy_asset", "key-claude", scope_key="host")
+        identities.alias_legacy("claude--1", entity)
+        session.commit()
+
+    payload = {"hook_event_name": "PreToolUse", "session_id": "session-mcp",
+               "cwd": "D:/Project-A", "tool_name": "mcp__github__create_issue",
+               "tool_input": {}}
+    body = decide(client, payload).json()
+    assert body["decision"] in ("allow", "ask", "audit")
+    with Session(services.engine) as session:
+        event = BehaviorEventRepository(session).list_events(
+            source="native_hook")[0]
+        predicates = {row.predicate for row in session.query(ClaimRow)}
+    assert event["protocol"] == "MCP"
+    assert event["mcp_server"] == "github"
+    assert "protocol_tool_call" in predicates
+    assert "agent_capability" in predicates
+
+
 def test_disabled_policy_flips_the_verdict_via_the_api(client):
     update = client.put("/api/v1/policies/deny-delete-protected-path",
                         json={"enabled": False})

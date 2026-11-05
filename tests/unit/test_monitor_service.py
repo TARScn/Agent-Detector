@@ -2,6 +2,8 @@ import time
 
 from sqlalchemy.orm import Session
 
+from agent_detector.correlation import DockerPortResolver
+from agent_detector.identity import ProcessBirth
 from agent_detector.monitoring.services import monitor as ms
 from agent_detector.monitoring.services.monitor import MonitorError, MonitorManager
 from agent_detector.monitoring.collectors.host.netflow import ConnInfo
@@ -9,7 +11,7 @@ from agent_detector.core.enums import AssetState, AssetType
 from agent_detector.core.models import DetectedAsset, VersionInfo
 from agent_detector.storage.database import make_engine
 from agent_detector.storage import (AssetRepository, BehaviorEventRepository,
-                                                     ScanRepository)
+                                    IdentityRepository, ScanRepository)
 
 
 def make_asset(**overrides):
@@ -54,7 +56,8 @@ def seed_events(monkeypatch, tmp_path, conns, dns_mapping):
     monkeypatch.setattr(ms, "resolve_process_names",
                         lambda pids: {c.pid: "claude.exe" for c in conns})
     monkeypatch.setattr(ms, "resolve_known_hosts", lambda hosts: {})
-    manager = MonitorManager(engine)
+    manager = MonitorManager(
+        engine, port_resolver=DockerPortResolver(enabled=False))
     manager._dns = FakeDns(dns_mapping)
     return manager, engine
 
@@ -74,6 +77,21 @@ def test_run_once_writes_llm_api_event(monkeypatch, tmp_path):
     assert row["agent_label"] == "claude.exe"
     assert row["endpoint"] == "93.184.216.34:443"
     assert row["evidence"] == ["dns_cache", "known_llm_host"]
+
+
+def test_two_observations_get_distinct_source_event_uids(monkeypatch, tmp_path):
+    conns = [ConnInfo(pid=4242, process_name="", remote_ip="93.184.216.34",
+                      remote_port=443)]
+    manager, engine = seed_events(monkeypatch, tmp_path, conns,
+                                  {"93.184.216.34": "api.anthropic.com"})
+    manager.suppress_seconds = 0
+    manager.run_once()
+    manager.run_once()
+    with Session(engine) as session:
+        rows = BehaviorEventRepository(session).list_events(source="netmon")
+    assert len(rows) == 2
+    assert len({row["source_event_uid"] for row in rows}) == 2
+    assert len({row["flow_id"] for row in rows}) == 2
 
 
 def test_suppression_window_dedupes(monkeypatch, tmp_path):
@@ -98,6 +116,10 @@ def test_pid_attribution_to_asset(monkeypatch, tmp_path):
     with Session(engine) as session:
         row = BehaviorEventRepository(session).list_events(source="netmon")[0]
     assert row["asset_id"] == "claude-code--abc123def456"
+    assert row["actor_asset_id"] == "claude-code--abc123def456"
+    assert row["target_asset_id"] is None
+    assert row["attribution_method"] == "pid_snapshot"
+    assert row["attribution_state"] == "candidate"
 
 
 def test_local_model_event_uses_scan_asset_and_corroborated_port(monkeypatch, tmp_path):
@@ -115,8 +137,62 @@ def test_local_model_event_uses_scan_asset_and_corroborated_port(monkeypatch, tm
     with Session(engine) as session:
         row = BehaviorEventRepository(session).list_events(source="netmon")[0]
     assert (row["operation"], row["upstream_host"]) == ("local_model", "Ollama:11434")
-    assert row["asset_id"] == "ollama--xyz"
-    assert row["evidence"] == ["local_model_port", "scan_asset"]
+    assert row["asset_id"] is None
+    assert row["actor_asset_id"] is None
+    assert row["target_asset_id"] == "ollama--xyz"
+    assert row["target_endpoint_id"]
+    assert row["attribution_method"] == "target_scan_listen_port"
+    assert row["attribution_state"] == "target_only"
+    assert row["evidence"] == ["local_model_port", "scan_asset",
+                               "target:scan_listen_port", "endpoint:local"]
+
+
+def test_actor_and_target_are_separate(monkeypatch, tmp_path):
+    conns = [ConnInfo(pid=4242, process_name="my-agent.exe",
+                      remote_ip="127.0.0.1", remote_port=11434)]
+    manager, engine = seed_events(monkeypatch, tmp_path, conns, {})
+    with Session(engine) as session:
+        scan_id = ScanRepository(session).create("agent")
+        repo = AssetRepository(session)
+        repo.upsert(make_asset(asset_id="claude--1", running_pids=[4242]), scan_id)
+        repo.upsert(make_asset(asset_id="ollama--1", name="Ollama",
+                               asset_type=AssetType.LLM_SERVICE,
+                               listening_ports=[11434]), scan_id)
+        session.commit()
+    manager.run_once()
+    with Session(engine) as session:
+        row = BehaviorEventRepository(session).list_events(source="netmon")[0]
+    assert row["asset_id"] == "claude--1"
+    assert row["actor_asset_id"] == "claude--1"
+    assert row["target_asset_id"] == "ollama--1"
+    assert row["target_endpoint_id"]
+
+
+def test_actor_birth_verification(monkeypatch, tmp_path):
+    conns = [ConnInfo(pid=4242, process_name="claude.exe",
+                      remote_ip="93.184.216.34", remote_port=443)]
+    manager, engine = seed_events(monkeypatch, tmp_path, conns,
+                                  {"93.184.216.34": "api.anthropic.com"})
+    birth = ProcessBirth(
+        platform="test", scope_key=manager._scope_key or "unknown",
+        boot_identity="boot-a", pid_namespace_key="host", pid=4242,
+        native_birth_value="100", clock_domain="boot_ticks",
+        resolution="proc_starttime_ticks", canonical_start_ticks=100,
+        source="proc", verification_state="verified")
+    with Session(engine) as session:
+        scan_id = ScanRepository(session).create("agent")
+        AssetRepository(session).upsert(
+            make_asset(asset_id="claude--1", running_pids=[4242]), scan_id)
+        IdentityRepository(session).record_process_birth(birth)
+        session.commit()
+    monkeypatch.setattr(ms, "build_process_birth", lambda pid, scope: birth)
+    manager.run_once()
+    with Session(engine) as session:
+        row = BehaviorEventRepository(session).list_events(source="netmon")[0]
+    assert row["actor_asset_id"] == "claude--1"
+    assert row["actor_process_key"] == birth.instance_key
+    assert row["attribution_method"] == "verified_instance"
+    assert row["attribution_state"] == "verified"
 
 
 def test_proactive_sweep_merges_known_hosts_and_is_throttled(monkeypatch, tmp_path):

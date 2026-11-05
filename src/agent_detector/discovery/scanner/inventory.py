@@ -25,8 +25,12 @@ from agent_detector.discovery.fingerprints.loader import load_rules
 from agent_detector.discovery.sources.llm_config import endpoints_for
 from agent_detector.discovery.sources.mcp import for_agent as mcp_for_agent
 from agent_detector.discovery.sources.mcp import scan_mcp_servers
+from agent_detector.core.config import legacy_delete_enabled
 from agent_detector.core.enums import (AssetState, AssetType, HookState, ProtectionStatus,
                                          VersionSource)
+from agent_detector.coverage import (ABSENT, PRESENT, UNVERIFIED,
+                                     reconfirm_application,
+                                     reconfirm_container, reconfirm_paths)
 from agent_detector.core.models import (AgentInstance, AgentInventoryItem, DetectedAsset,
                                           HostFacts, ProjectInfo)
 from agent_detector.interception.hooks.installer import inspect as inspect_hook
@@ -88,6 +92,10 @@ class InventoryBuilder:
         self._verification_interest = interest_names(deps)
         self.mcp_servers = []
         self.warnings: list[str] = []
+        # P0-B: absence candidates recorded by the stale verification; the
+        # scan coordinator persists them after apply_scan returns.
+        self.removal_candidates: list[dict] = []
+        self._coverage = None
 
     def refresh_mcp(self) -> None:
         try:
@@ -100,7 +108,8 @@ class InventoryBuilder:
                    facts: HostFacts, *,
                    app_links: dict[str, dict] | None = None,
                    failed_detectors: tuple[str, ...] | set[str] = (),
-                   docker_context: dict | None = None) -> list[dict]:
+                   docker_context: dict | None = None,
+                   coverage=None) -> list[dict]:
         """Upsert Agent assets/instances for one scan; returns the asset dicts.
 
         ``app_links`` maps a self-built framework asset id to its application
@@ -113,6 +122,8 @@ class InventoryBuilder:
         command, processes}).
         """
         repository = AgentInventoryRepository(session)
+        self.removal_candidates = []
+        self._coverage = coverage
         self.refresh_mcp()
         processes = {proc.pid: proc for proc in facts.processes}
         app_links = app_links or {}
@@ -196,6 +207,16 @@ class InventoryBuilder:
         failed = {name.replace("-", "_") for name in failed_detectors}
         frameworks_failed = "frameworks" in failed
 
+        docker_scope_key = docker.get("scope_key") or "local"
+        engine_required = (("docker_engine_enumeration", docker_scope_key,
+                            "container_presence"),)
+        project_required = (("project_candidate_universe", "scan",
+                             "application_presence"),)
+        engine_complete = (self._coverage is not None
+                           and self._coverage.is_complete(
+                               "docker_engine_enumeration", docker_scope_key,
+                               "container_presence"))
+
         unseen_framework: dict[str, list[dict]] = {}
         for row in repository.list_assets(include_removed=True):
             if row["asset_id"] in seen_asset_ids:
@@ -204,12 +225,31 @@ class InventoryBuilder:
                 if docker_failed:
                     continue  # docker channel silent: no verdict for containers
                 container_id = row["container_id"]
-                if container_id not in containers_seen:
-                    repository.delete_asset(row["asset_id"])  # 容器已删除
-                elif container_id in candidates_seen:
-                    repository.delete_asset(row["asset_id"])  # 深扫未见：容器内已卸载
-                else:
-                    repository.set_status(row["asset_id"], "inactive")  # 无法复核
+                if legacy_delete_enabled():
+                    # Preserve the pre-P0-B verdict exactly when opted in.
+                    if container_id not in containers_seen \
+                            or container_id in candidates_seen:
+                        repository.delete_asset(row["asset_id"])
+                    else:
+                        repository.set_status(row["asset_id"], "inactive")
+                    continue
+                deep_status = (self._coverage.predicate_status(
+                    "container_deep_scan", container_id, "component_presence")
+                    if self._coverage is not None else None)
+                verdict = reconfirm_container(
+                    container_id, engine_complete=engine_complete,
+                    containers_seen=containers_seen,
+                    candidates_seen=candidates_seen,
+                    deep_scan_status=deep_status)
+                required = engine_required
+                if container_id in containers_seen:
+                    required = engine_required + (
+                        ("container_deep_scan", container_id,
+                         "component_presence"),)
+                self._record_absence(
+                    repository, row["asset_id"], predicate="container_presence",
+                    required_scopes=required, verdict=verdict.verdict,
+                    reason=verdict.reason, entity_kind="container")
                 continue
             if row["agent_type"].replace("-", "_") in failed:
                 continue  # its detector crashed: absence proves nothing
@@ -219,16 +259,34 @@ class InventoryBuilder:
             if is_framework:
                 unseen_framework.setdefault(row["app_id"], []).append(row)
             else:
-                repository.set_status(row["asset_id"], "removed")
+                paths = list(row.get("config_paths") or [])
+                if row.get("executable"):
+                    paths.append(row["executable"])
+                verdict = reconfirm_paths(paths)
+                self._record_absence(
+                    repository, row["asset_id"], predicate="product_presence",
+                    required_scopes=self._product_required_scopes(row["agent_type"]),
+                    verdict=verdict.verdict, reason=verdict.reason,
+                    entity_kind="product", legacy_delete=False)
 
         seen_apps = {link.get("app_id") for link in app_links.values()
                      if link.get("app_id")}
         for app_id, rows in unseen_framework.items():
             app = apps_by_id.get(app_id)
-            if app is None or not Path(app["root_path"]).exists():
+            root_path = app.get("root_path") if app else None
+            root_verdict = reconfirm_application(root_path)
+            if app is None or root_verdict.verdict == ABSENT:
                 for row in rows:
-                    repository.delete_asset(row["asset_id"])
-                applications.delete_application(app_id)
+                    self._record_absence(
+                        repository, row["asset_id"],
+                        predicate="component_presence",
+                        required_scopes=project_required,
+                        verdict=root_verdict.verdict,
+                        reason=root_verdict.reason,
+                        entity_kind="application", legacy_delete=True)
+                self._record_application_absence(
+                    applications, app_id, required_scopes=project_required,
+                    verdict=root_verdict.verdict, reason=root_verdict.reason)
                 continue
             installed = self._installed_dependencies(app)
             if installed is None:
@@ -240,14 +298,22 @@ class InventoryBuilder:
             for row in rows:
                 rule = self._framework_rules.get(row["agent_type"])
                 if rule is not None and not rule_matches(rule, installed):
-                    repository.delete_asset(row["asset_id"])  # 依赖已卸载
+                    self._record_absence(
+                        repository, row["asset_id"],
+                        predicate="component_presence",
+                        required_scopes=project_required, verdict=ABSENT,
+                        reason=f"installed packages no longer match {row['agent_type']}",
+                        entity_kind="application", legacy_delete=True)
                 else:
                     repository.set_status(row["asset_id"], "inactive")
             if installed:
                 if app_id not in seen_apps:
                     applications.set_status(app_id, "inactive")
             else:
-                applications.delete_application(app_id)  # venv 空壳
+                self._record_application_absence(
+                    applications, app_id, required_scopes=project_required,
+                    verdict=ABSENT,
+                    reason="no installed AI dependencies remain")
 
         for app_id, app in apps_by_id.items():
             if app_id in seen_apps or app_id in unseen_framework:
@@ -257,24 +323,41 @@ class InventoryBuilder:
                 # Container application with no asset rows re-seen: the asset
                 # verdicts above already handled the assets; here the
                 # application row follows the container, not the host path.
-                if not docker_failed:
-                    if container_id in containers_seen:
-                        # 容器在而框架资产未再现：可能仅剩 SDK 依赖，置 inactive；
-                        # 依赖彻底清空的容器由下一扫描的 upsert 语义自然重建或维持。
-                        applications.set_status(app_id, "inactive")
-                    else:
-                        applications.delete_application(app_id)  # 容器已删除
+                if docker_failed:
+                    continue
+                if container_id in containers_seen:
+                    # 容器在而框架资产未再现：可能仅剩 SDK 依赖，置 inactive；
+                    # 依赖彻底清空的容器由下一扫描的 upsert 语义自然重建或维持。
+                    applications.set_status(app_id, "inactive")
+                    continue
+                verdict = reconfirm_container(
+                    container_id, engine_complete=engine_complete,
+                    containers_seen=containers_seen,
+                    candidates_seen=candidates_seen,
+                    deep_scan_status=(self._coverage.predicate_status(
+                        "container_deep_scan", container_id,
+                        "component_presence") if self._coverage is not None
+                        else None))
+                self._record_application_absence(
+                    applications, app_id, required_scopes=engine_required,
+                    verdict=verdict.verdict, reason=verdict.reason)
                 continue
             if frameworks_failed:
                 continue
-            if not Path(app["root_path"]).exists():
-                applications.delete_application(app_id)
+            root_verdict = reconfirm_application(app.get("root_path"))
+            if root_verdict.verdict == ABSENT:
+                self._record_application_absence(
+                    applications, app_id, required_scopes=project_required,
+                    verdict=ABSENT, reason=root_verdict.reason)
                 continue
             installed = self._installed_dependencies(app)
             if installed is None or installed:
                 applications.set_status(app_id, "inactive")
             else:
-                applications.delete_application(app_id)
+                self._record_application_absence(
+                    applications, app_id, required_scopes=project_required,
+                    verdict=ABSENT,
+                    reason="no installed AI dependencies remain")
 
         # Verdicts are in: removed/inactive assets have no live process by
         # definition, so their instance rows must not stay "running" (they
@@ -282,6 +365,97 @@ class InventoryBuilder:
         # 运行中 entries). Assets skipped over a crashed detector keep both
         # their active status and their instances.
         repository.stop_instances_of_unrunnable_assets()
+
+    # -- P0-B absence helpers ------------------------------------------------
+
+    def _coverage_complete(self,
+                           required: tuple[tuple[str, str, str], ...]) -> bool:
+        if self._coverage is None or not required:
+            return False
+        return all(self._coverage.is_complete(scope_type, scope_key, predicate)
+                   for scope_type, scope_key, predicate in required)
+
+    def _product_required_scopes(self, agent_type: str
+                                 ) -> tuple[tuple[str, str, str], ...]:
+        """Prefer the asset's own rule scope; fall back to every rule.
+
+        The fallback is deliberately conservative: if the stored agent type
+        cannot be mapped to one rule, a failure in any rule blocks the absence
+        candidate rather than guessing which rule owned the asset.
+        """
+        if self._coverage is None:
+            return ()
+        scopes = [scope for scope in self._coverage.scopes()
+                  if scope.scope_type == "product_rule"]
+        by_key = {scope.scope_key.replace("-", "_"): scope for scope in scopes}
+        for key in (agent_type, agent_type.replace("-", "_")):
+            scope = by_key.get(key.replace("-", "_"))
+            if scope is not None:
+                return ((scope.scope_type, scope.scope_key,
+                         "product_presence"),)
+        return tuple((scope.scope_type, scope.scope_key, "product_presence")
+                     for scope in scopes)
+
+    def _record_absence(self, repository: AgentInventoryRepository, asset_id: str,
+                        *, predicate: str,
+                        required_scopes: tuple[tuple[str, str, str], ...],
+                        verdict: str, reason: str, entity_kind: str,
+                        legacy_delete: bool = True) -> None:
+        """Archive/mark an unseen asset; never deletes unless legacy mode is on."""
+        if legacy_delete_enabled():
+            if legacy_delete:
+                repository.delete_asset(asset_id)
+            else:
+                repository.set_status(asset_id, "removed")
+            return
+        if verdict == PRESENT:
+            repository.set_status(asset_id, "inactive")
+            return
+        repository.set_status(asset_id, "inactive")
+        if self._coverage is None:
+            return  # no coverage means no negative-evidence record at all
+        if verdict == ABSENT \
+                and not self._coverage_complete(required_scopes):
+            return  # incomplete coverage never yields a removal candidate
+        self.removal_candidates.append({
+            "asset_id": asset_id,
+            "entity_kind": entity_kind,
+            "predicate": predicate,
+            "status": ("CONFIRMED_ABSENT" if verdict == ABSENT
+                       else "UNVERIFIED"),
+            "reason": reason,
+            "coverage_refs": [f"{scope_type}:{scope_key}:{predicate_name}"
+                              for scope_type, scope_key, predicate_name
+                              in required_scopes],
+        })
+
+    def _record_application_absence(self, applications: ApplicationRepository,
+                                    app_id: str, *,
+                                    required_scopes: tuple[tuple[str, str, str], ...],
+                                    verdict: str, reason: str) -> None:
+        if legacy_delete_enabled():
+            applications.delete_application(app_id)
+            return
+        if verdict == PRESENT:
+            applications.set_status(app_id, "inactive")
+            return
+        applications.set_status(app_id, "inactive")
+        if self._coverage is None:
+            return
+        if verdict == ABSENT \
+                and not self._coverage_complete(required_scopes):
+            return
+        self.removal_candidates.append({
+            "asset_id": app_id,
+            "entity_kind": "application",
+            "predicate": "application_presence",
+            "status": ("CONFIRMED_ABSENT" if verdict == ABSENT
+                       else "UNVERIFIED"),
+            "reason": reason,
+            "coverage_refs": [f"{scope_type}:{scope_key}:{predicate_name}"
+                              for scope_type, scope_key, predicate_name
+                              in required_scopes],
+        })
 
     def _installed_dependencies(self, app: dict) -> set[str] | None:
         """AI-relevant package names still *installed* in the app's environment.

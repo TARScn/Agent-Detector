@@ -19,7 +19,8 @@ from agent_detector.core.config import DB_PATH
 from agent_detector.discovery.scanner.scan import run_scan
 from agent_detector.storage.database import make_engine
 from agent_detector.storage import (AgentInventoryRepository, AlertRepository,
-                                                 AssetRepository, BehaviorEventRepository)
+                                    AssetRepository, BehaviorEventRepository,
+                                    ScanRepository)
 
 EXIT_OK, EXIT_USAGE, EXIT_ERROR = 0, 2, 3
 
@@ -130,6 +131,22 @@ def main(argv=None) -> int:
     snippet = hook_commands.add_parser("snippet", help="打印可手工粘贴的配置片段")
     snippet.add_argument("agent")
 
+    identity = commands.add_parser(
+        "identity", help="Identity migration and legacy-id alias resolution")
+    identity_commands = identity.add_subparsers(dest="identity_command",
+                                                required=True)
+    identity_commands.add_parser(
+        "backfill", help="Backfill canonical entities/aliases from legacy tables")
+    identity_resolve = identity_commands.add_parser(
+        "resolve", help="Resolve a legacy asset id to its canonical entity")
+    identity_resolve.add_argument("asset_id")
+
+    replay_evidence = commands.add_parser(
+        "replay-evidence",
+        help="Replay stored observations into a new generation (no re-collection)")
+    replay_evidence.add_argument("--scan-id", type=int, required=True)
+    replay_evidence.add_argument("--target-scan-id", type=int, default=None)
+
     purge = commands.add_parser("purge", help="按保留策略清理行为事件")
     purge.add_argument("--older-than-days", type=int, default=None)
     purge.add_argument("--source", default=None)
@@ -143,6 +160,7 @@ def main(argv=None) -> int:
         "replay": _replay, "channels": _channels, "audit-rules": _audit_rules,
         "tetragon": _tetragon,
         "policy": _policy, "hooks": _hooks, "purge": _purge,
+        "identity": _identity, "replay-evidence": _replay_evidence,
     }
     return handlers[args.command](args, engine)
 
@@ -217,9 +235,11 @@ def _agents(args, engine) -> int:
             for instance in instances:
                 counts[instance["asset_id"]] = counts.get(instance["asset_id"], 0) + 1
             from agent_detector.console.api.agent_view import (app_name_map,
+                                                               app_state_map,
                                                                merge_agent_rows)
             assets = merge_agent_rows(repository.list_assets(),
-                                      app_name_map(session), counts)
+                                      app_name_map(session), counts,
+                                      app_states=app_state_map(session))
             if not assets:
                 print("尚未建立 Agent 清单；先运行 `agent-detector scan`")
                 return EXIT_OK
@@ -522,6 +542,43 @@ def _hooks(args, engine) -> int:
             print(f"    backup: {result['backup']}")
         if not result["written"]:
             print("    （dry-run：未写入任何文件；加 --apply 才会修改配置并备份）")
+    return EXIT_OK
+
+
+def _identity(args, engine) -> int:
+    from sqlalchemy.orm import Session
+    from agent_detector.identity.backfill import backfill_identity
+    from agent_detector.identity.host import HostIdentityStore
+    from agent_detector.storage.identity_repository import IdentityRepository
+
+    host = HostIdentityStore.for_engine(engine).resolve()
+    with Session(engine) as session:
+        repo = IdentityRepository(session)
+        if args.identity_command == "backfill":
+            stats = backfill_identity(session, scope_key=host.scope_key)
+            session.commit()
+            print(json.dumps(stats, ensure_ascii=False, indent=2))
+            return EXIT_OK
+        row = repo.get_alias(args.asset_id)
+        if row is None:
+            print(f"unresolved: {args.asset_id}")
+            return EXIT_OK
+        status = row.status or "OK"
+        print(f"{args.asset_id} -> {row.entity_id} ({status})")
+        return EXIT_OK
+
+
+def _replay_evidence(args, engine) -> int:
+    from agent_detector.aggregation.replay import replay_scan_evidence
+
+    with Session(engine) as session:
+        target = args.target_scan_id
+        if target is None:
+            target = ScanRepository(session).create("replay")
+        stats = replay_scan_evidence(session, args.scan_id, target)
+        ScanRepository(session).finish(target, "completed", stats)
+        session.commit()
+    print(json.dumps(stats, ensure_ascii=False, indent=2))
     return EXIT_OK
 
 

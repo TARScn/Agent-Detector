@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agent_detector.monitoring.detection.attribution import AgentAttributor, Attribution
@@ -53,6 +54,7 @@ from agent_detector.core.config import (ALERT_RISK_LEVEL, BEHAVIOR_AUDIT_KEYS,
                                           PROC_SNAPSHOT_PATH, SYSMON_CHANNEL,
                                           TETRA_LOG)
 from agent_detector.core.security import redact
+from agent_detector.identity import HostIdentityStore, build_process_birth
 from agent_detector.monitoring.collectors.host.process import collect_processes
 from agent_detector.monitoring.collectors.host.registry_snapshot import write_process_snapshot
 from agent_detector.monitoring.services.collector_status import write_collector_status
@@ -144,6 +146,10 @@ class BehaviorIngestService:
         # the registry snapshot file was last rewritten.
         self._last_event_epoch: float | None = None
         self._snapshot_epoch: float | None = None
+        # P0-C: actor process identity for stored events. A shadow identity
+        # failure must not stop the collector; the key is then simply absent.
+        self._scope_key = self._resolve_scope_key()
+        self._birth_cache: dict[tuple[int, float | None, str | None], str | None] = {}
         # The `collect` CLI drives run_once() inline on its main thread
         # instead of start()'s worker thread — `running` must still say yes
         # or the published health file reports a live collector as stopped.
@@ -675,15 +681,65 @@ class BehaviorIngestService:
             logger.exception("behavior retention purge failed")
 
     # ---------------------------------------------------------------- persist
+    def _resolve_scope_key(self) -> str | None:
+        try:
+            return HostIdentityStore.for_engine(self.engine).resolve().scope_key
+        except Exception:  # identity failure must not stop the collector
+            logger.exception("ingest host identity lookup failed")
+            return None
+
+    def _process_key(self, fact: BehaviorFact) -> str | None:
+        """Best-effort P0-A process key for the acting process; cached per fact identity."""
+        cache_key = (fact.pid, fact.start_time or None, fact.exec_id)
+        if cache_key in self._birth_cache:
+            return self._birth_cache[cache_key]
+        info = ProcessInfo(pid=fact.pid, name=fact.process_name,
+                           create_time=fact.start_time or None, ppid=fact.ppid)
+        birth = build_process_birth(fact.pid, self._scope_key or "unknown",
+                                    process_info=info, source=self.source)
+        key = birth.instance_key if birth is not None else None
+        self._birth_cache[cache_key] = key
+        if len(self._birth_cache) > 4096:
+            for stale in list(self._birth_cache)[:2048]:
+                del self._birth_cache[stale]
+        return key
+
+    @staticmethod
+    def _attribution_method(attribution: Attribution) -> str:
+        evidence = set(attribution.evidence)
+        if "container_id" in evidence:
+            return "container_membership"
+        if "self_asset_pid" in evidence or "ancestor_asset_pid" in evidence:
+            return "pid_snapshot"
+        if "process_fingerprint" in evidence:
+            return "process_fingerprint"
+        return "unattributed"
+
+    @staticmethod
+    def _attribution_state(method: str) -> str:
+        if method == "container_membership":
+            return "verified"
+        if method == "unattributed":
+            return "unattributed"
+        return "candidate"
+
     def _to_row(self, fact: BehaviorFact, derived: DerivedBehavior,
                 attribution: Attribution, target: str | None,
                 risk: RiskLevel, risk_reasons: list[str]) -> BehaviorEventRow:
         source = self.source
+        flow_id = f"{source}-{fact.serial}"[:64]
+        method = self._attribution_method(attribution)
         return BehaviorEventRow(
             observed_at=self._observed_at(fact), source=source,
             agent_label=(attribution.agent_label or f"pid-{fact.pid}")[:80],
             asset_id=attribution.asset_id,
-            flow_id=f"{source}-{fact.serial}"[:64],
+            actor_asset_id=attribution.asset_id,
+            actor_process_key=self._process_key(fact),
+            scope_key=self._scope_key,
+            attribution_method=method,
+            attribution_state=self._attribution_state(method),
+            source_event_uid=flow_id,
+            flow_id=flow_id,
             upstream_host="", protocol="SYS",
             event_type=fact.kind, operation=derived.operation,
             confidence=derived.confidence,
@@ -721,10 +777,15 @@ class BehaviorIngestService:
                     attribution: Attribution, target: str | None,
                     risk: RiskLevel, risk_reasons: list[str],
                     source: str = "auditd") -> dict:
+        method = BehaviorIngestService._attribution_method(attribution)
         return {"observed_at": BehaviorIngestService._observed_at(fact),
                 "source": "sysmon" if source == "sysmon" else source,
                 "agent_label": attribution.agent_label or f"pid-{fact.pid}",
-                "asset_id": attribution.asset_id, "pid": fact.pid,
+                "asset_id": attribution.asset_id,
+                "actor_asset_id": attribution.asset_id,
+                "attribution_method": method,
+                "attribution_state": BehaviorIngestService._attribution_state(method),
+                "pid": fact.pid,
                 "container_id": fact.container_id,
                 "process_name": fact.process_name, "event_type": fact.kind,
                 "operation": derived.operation, "target": target,
@@ -773,6 +834,26 @@ class BehaviorIngestService:
             logger.exception("alert raising failed")
 
     def _write(self, rows: list[BehaviorEventRow]) -> None:
+        if not rows:
+            return
         with Session(self.engine) as session:
-            session.add_all(rows)
+            source = rows[0].source
+            uids = [row.source_event_uid for row in rows
+                    if row.source_event_uid]
+            existing: set[str] = set()
+            if uids:
+                existing = set(session.scalars(
+                    select(BehaviorEventRow.source_event_uid).where(
+                        BehaviorEventRow.source == source,
+                        BehaviorEventRow.source_event_uid.in_(uids))))
+            seen = set(existing)
+            fresh: list[BehaviorEventRow] = []
+            for row in rows:
+                uid = row.source_event_uid
+                if uid and uid in seen:
+                    continue  # replay of an already-stored source event
+                if uid:
+                    seen.add(uid)
+                fresh.append(row)
+            session.add_all(fresh)
             session.commit()

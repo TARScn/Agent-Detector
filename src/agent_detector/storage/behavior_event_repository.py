@@ -1,9 +1,10 @@
 import json
+import uuid
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
-from agent_detector.storage.models import BehaviorEventRow
+from agent_detector.storage.models import BehaviorEventRow, EntityAliasRow
 
 
 class BehaviorEventRepository:
@@ -23,7 +24,15 @@ class BehaviorEventRepository:
                     before_id: int | None = None) -> list[dict]:
         """Newest first. ``before_id`` walks further back in history: the feed
         asks for one page at a time instead of loading the whole table."""
-        statement = select(BehaviorEventRow)
+        actor_alias = aliased(EntityAliasRow)
+        target_alias = aliased(EntityAliasRow)
+        statement = (select(BehaviorEventRow, actor_alias.entity_id,
+                            actor_alias.status, target_alias.entity_id,
+                            target_alias.status)
+                     .outerjoin(actor_alias,
+                                BehaviorEventRow.asset_id == actor_alias.old_id)
+                     .outerjoin(target_alias,
+                                BehaviorEventRow.target_asset_id == target_alias.old_id))
         if protocol:
             statement = statement.where(BehaviorEventRow.protocol == protocol)
         if source:
@@ -46,7 +55,10 @@ class BehaviorEventRepository:
             statement = statement.where(BehaviorEventRow.id < int(before_id))
         statement = statement.order_by(BehaviorEventRow.id.desc()).limit(
             min(max(int(limit), 1), 500))
-        return [self._to_dict(row) for row in self._session.scalars(statement)]
+        return [self._to_dict(row, actor_entity, actor_status,
+                              target_entity, target_status)
+                for row, actor_entity, actor_status, target_entity, target_status
+                in self._session.execute(statement)]
 
     def record_tool_call(self, *, observed_at: str, agent_label: str, tool: str,
                          operation: str, target: str | None = None,
@@ -59,6 +71,8 @@ class BehaviorEventRepository:
                          policy_id: str | None = None,
                          confidence: str = "high",
                          event_type: str = "tool_call",
+                         protocol: str = "HOOK",
+                         mcp_server: str | None = None,
                          pid: int | None = None,
                          evidence: list[str] | None = None) -> int:
         """Append one Agent tool-call event (source="native_hook").
@@ -66,10 +80,17 @@ class BehaviorEventRepository:
         Hook events are the highest-confidence feed: the Agent itself told us
         what it was about to do, so ``confidence`` defaults to *high*.
         """
+        source_event_uid = f"hook-{uuid.uuid4().hex}"
         row = BehaviorEventRow(
             observed_at=observed_at, source="native_hook", agent_label=agent_label,
-            asset_id=asset_id, flow_id=f"hook-{session_id or 'nosession'}",
-            upstream_host="", protocol="HOOK", event_type=event_type,
+            asset_id=asset_id, actor_asset_id=asset_id,
+            actor_instance_id=instance_id,
+            attribution_method="verified_session",
+            attribution_state="verified",
+            source_event_uid=source_event_uid,
+            flow_id=f"hook-{session_id or 'nosession'}",
+            upstream_host="", protocol=protocol, event_type=event_type,
+            mcp_server=mcp_server,
             operation=operation, confidence=confidence,
             endpoint="", tool=tool, target=target, pid=pid,
             session_id=session_id, instance_id=instance_id,
@@ -122,9 +143,31 @@ class BehaviorEventRepository:
                 "last_event_at": last_event_at}
 
     @staticmethod
-    def _to_dict(row: BehaviorEventRow) -> dict:
+    def _to_dict(row: BehaviorEventRow, actor_entity_id: str | None = None,
+                 actor_alias_status: str | None = None,
+                 target_entity_id: str | None = None,
+                 target_alias_status: str | None = None) -> dict:
+        actor_entity = (actor_entity_id
+                        if (actor_alias_status or "OK") == "OK" else None)
+        target_entity = (target_entity_id
+                         if (target_alias_status or "OK") == "OK" else None)
         return {"id": row.id, "observed_at": row.observed_at, "source": row.source,
+                "entity_id": actor_entity,
+                "entity_alias_status": actor_alias_status,
+                "target_entity_id": target_entity,
+                "target_alias_status": target_alias_status,
                 "agent_label": row.agent_label, "asset_id": row.asset_id,
+                "scope_key": row.scope_key,
+                "actor_asset_id": row.actor_asset_id,
+                "actor_instance_id": row.actor_instance_id,
+                "actor_process_key": row.actor_process_key,
+                "target_asset_id": row.target_asset_id,
+                "target_endpoint_id": row.target_endpoint_id,
+                "target_instance_id": row.target_instance_id,
+                "attribution_method": row.attribution_method,
+                "attribution_state": row.attribution_state,
+                "source_event_uid": row.source_event_uid,
+                "mcp_server": row.mcp_server,
                 "flow_id": row.flow_id, "upstream_host": row.upstream_host,
                 "protocol": row.protocol, "event_type": row.event_type,
                 "operation": row.operation, "confidence": row.confidence,

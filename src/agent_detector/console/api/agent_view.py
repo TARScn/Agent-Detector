@@ -38,10 +38,12 @@ def _is_product_row(asset: dict) -> bool:
 
 
 def merge_agent_rows(assets: list[dict], app_names: dict[str, str],
-                     instance_counts: dict[str, int] | None = None
+                     instance_counts: dict[str, int] | None = None,
+                     app_states: dict[str, list[str]] | None = None
                      ) -> list[dict]:
     """合并为 Agent 实体行；每个 item 携带 ``dependencies``（可为空数组）。"""
     counts = instance_counts or {}
+    app_states = app_states or {}
     items: list[dict] = []
     products_by_container: dict[str, dict] = {}
     for asset in assets:
@@ -75,7 +77,8 @@ def merge_agent_rows(assets: list[dict], app_names: dict[str, str],
         if representative["dependencies"]:
             representative["version"] = representative["dependencies"][0]["version"]
         representative["states"] = sorted(
-            {state for row in members for state in row["states"]})
+            {state for row in members for state in row["states"]}
+            | set(app_states.get(app_id, ())))
         items.append(representative)
     return items
 
@@ -107,3 +110,17 @@ def app_name_map(session: Session) -> dict[str, str]:
     applications = ApplicationRepository(session).list_applications(
         include_removed=True, limit=1000)
     return {app["app_id"]: app["name"] for app in applications}
+
+
+def app_state_map(session: Session) -> dict[str, list[str]]:
+    """app_id → 应用资产自身状态。
+
+    框架行只带框架环境状态：单框架应用会继承 RUNNING，但多框架应用的
+    框架行刻意保持环境态（诚实规则），合并后的行就会漏掉应用本身在跑。
+    用最新一份 AI_APPLICATION 快照补齐，让列表状态与应用实体一致。
+    """
+    from agent_detector.storage import AssetRepository
+
+    return {row["asset_id"]: list(row.get("states") or ())
+            for row in AssetRepository(session).latest_snapshots()
+            if row.get("asset_type") == "AI_APPLICATION"}

@@ -47,9 +47,12 @@ from agent_detector.core.models import (ComponentInfo, DetectedAsset, Evidence, 
 from agent_detector.core.security import redact
 from agent_detector.discovery.sources import dockerapi
 from agent_detector.discovery.sources.deps import (components_from_lock_text,
+                                                   components_from_package_json_text,
                                                    components_from_pyproject_text,
                                                    components_from_requirements_text,
-                                                   interest_names, normalize_name)
+                                                   interest_names,
+                                                   metadata_component,
+                                                   normalize_name)
 from agent_detector.discovery.sources.dockerapi import (ContainerBrief, DockerStalled,
                                                         DockerUnavailable, TopProcess)
 from agent_detector.discovery.sources.frameworks import ApplicationBundle, detect_frameworks
@@ -459,11 +462,13 @@ def _node_components(client, brief: ContainerBrief, internal_root: str,
     raw = dockerapi.read_container_file(
         client, brief.container_id, f"{internal_root}/package.json", read_max_bytes)
     if raw:
+        text = raw.decode("utf-8", "replace")
         try:
-            data = json.loads(raw.decode("utf-8", "replace"))
+            data = json.loads(text)
         except ValueError:
             data = {}
         source = f"container:{brief.short_id}:{internal_root}/package.json"
+        observed.extend(components_from_package_json_text(text, source, interest))
         declared: list[tuple[str, str]] = []  # (raw npm name, normalized)
         for section in ("dependencies", "devDependencies", "optionalDependencies"):
             values = data.get(section)
@@ -473,9 +478,6 @@ def _node_components(client, brief: ContainerBrief, internal_root: str,
                 normalized = normalize_name(str(package))
                 if normalized in interest:
                     declared.append((str(package), normalized))
-                    observed.append(ComponentInfo(
-                        name=normalized, version="UNKNOWN",
-                        version_source=VersionSource.DECLARED, source_path=source))
         # Installed node metadata: exact paths from the declared names, so each
         # read is one cheap targeted get_archive instead of a tree walk.
         for package, normalized in declared:
@@ -488,14 +490,13 @@ def _node_components(client, brief: ContainerBrief, internal_root: str,
                 pkg_data = json.loads(pkg_raw.decode("utf-8", "replace"))
             except ValueError:
                 continue
-            version = str(pkg_data.get("version") or "")
-            if not version:
-                continue
-            observed.append(ComponentInfo(
-                name=normalized, version=version,
-                version_source=VersionSource.PACKAGE_METADATA,
-                source_path=(f"container:{brief.short_id}:{internal_root}"
-                             f"/node_modules/{package}/package.json")))
+            component = metadata_component(
+                pkg_data,
+                (f"container:{brief.short_id}:{internal_root}"
+                 f"/node_modules/{package}/package.json"),
+                expected_name=package)
+            if component is not None:
+                observed.append(component)
     if not interest_probes:
         return observed
     # 兴趣驱动的定向读：npm 的安装路径就是包名，不需要 readdir —— 对兴趣表
@@ -513,13 +514,12 @@ def _node_components(client, brief: ContainerBrief, internal_root: str,
             pkg_data = json.loads(pkg_raw.decode("utf-8", "replace"))
         except ValueError:
             continue
-        version = str(pkg_data.get("version") or "")
-        if not version:
-            continue
-        observed.append(ComponentInfo(
-            name=normalize_name(name), version=version,
-            version_source=VersionSource.PACKAGE_METADATA,
-            source_path=f"container:{brief.short_id}:{base}/{name}/package.json"))
+        component = metadata_component(
+            pkg_data,
+            f"container:{brief.short_id}:{base}/{name}/package.json",
+            expected_name=name)
+        if component is not None:
+            observed.append(component)
     return observed
 
 
@@ -616,6 +616,7 @@ def _merge_compose_scope(assets: list[DetectedAsset], links: dict[str, dict],
         merged = DetectedAsset(
             asset_id=build_asset_id(hostname, rule_id, f"compose:{project}"),
             scope_kind="compose",
+            identity_scope=project,
             name=primary.name, asset_type=primary.asset_type,
             states=set().union(*(a.states for a in members)),
             confidence=max(a.confidence for a in members),
@@ -781,6 +782,7 @@ def _detect_container_clients(client, brief: ContainerBrief, running: bool,
         assets.append(DetectedAsset(
             asset_id=build_asset_id(hostname, rule.id, f"container:{brief.short_id}"),
             scope_kind="container",
+            identity_scope=brief.container_id,
             name=rule.name, asset_type=rule.asset_type, states=states,
             confidence=confidence, version=version_info, evidence=evidence,
             running_pids=running_pids, detector=rule.id,

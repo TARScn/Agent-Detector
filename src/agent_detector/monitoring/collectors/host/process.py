@@ -2,6 +2,7 @@
 import os
 import platform
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import psutil
@@ -11,6 +12,7 @@ from agent_detector.monitoring.collectors.host.registry_snapshot import load_pro
 
 _CMDLINE_ARGS_LIMIT = 100
 _CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}")
+_CREATE_TIME_TOLERANCE = 2.0
 
 
 def _clean(text: str) -> str:
@@ -93,6 +95,38 @@ def collect_sockets() -> list[ListeningSocket]:
     return result
 
 
+def _live_cwd(proc: ProcessInfo) -> str | None:
+    """cwd of the live process, but only when it is still the same instance.
+
+    The event-fed registry has no cwd for processes that started after the
+    last psutil seed (Tetragon exec events do not carry it), which made a
+    fresh Node/Python project unresolvable until the 15-minute reseed.
+    ``create_time`` is the reuse guard: a pid that now belongs to a different
+    process must not inherit the old node's directory.
+    """
+    if proc.create_time is None:
+        return None
+    try:
+        live = psutil.Process(proc.pid)
+        if abs(live.create_time() - proc.create_time) > _CREATE_TIME_TOLERANCE:
+            return None
+        cwd = _clean(live.cwd() or "")
+    except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess,
+            OSError):
+        return None
+    return cwd or None
+
+
+def _hydrate_missing_cwd(processes) -> tuple[ProcessInfo, ...]:
+    hydrated = []
+    for proc in processes:
+        if proc.cwd is None:
+            cwd = _live_cwd(proc)
+            proc = replace(proc, cwd=cwd) if cwd else proc
+        hydrated.append(proc)
+    return tuple(hydrated)
+
+
 def collect_host_facts() -> HostFacts:
     """Host facts preferring the collector's live registry snapshot over a
     psutil one-shot. The snapshot is the running collector's event-fed
@@ -101,11 +135,17 @@ def collect_host_facts() -> HostFacts:
     collector service is not running — this falls back to the classic psutil
     sweep, so the command line keeps working everywhere. Sockets are always
     read live; Windows psutil and the Docker channel keep their own paths.
-    ``facts.process_source`` records which sweep produced the processes."""
+    ``facts.process_source`` records which sweep produced the processes.
+
+    Registry entries missing a cwd get one hydrated from the live process
+    (same-instance checked) so project resolution does not have to wait for
+    the collector's periodic reseed."""
     hostname = platform.node() or "localhost"
     processes = load_process_snapshot(hostname=hostname)
     source = "registry" if processes is not None else "psutil"
     if processes is None:
         processes = tuple(collect_processes())
+    else:
+        processes = _hydrate_missing_cwd(processes)
     return HostFacts(hostname=hostname, processes=processes,
                      sockets=tuple(collect_sockets()), process_source=source)

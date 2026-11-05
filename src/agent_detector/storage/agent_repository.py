@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 from agent_detector.core.enums import HookState, ProtectionStatus
 from agent_detector.core.models import AgentInstance, AgentInventoryItem
 from agent_detector.storage.models import (AgentAssetRow, AgentInstanceRow,
-                                          AgentSessionRow, utc_now_iso)
+                                          AgentSessionRow, EntityAliasRow,
+                                          EntitySnapshotRow, utc_now_iso)
 
 
 class AgentInventoryRepository:
@@ -67,7 +68,7 @@ class AgentInventoryRepository:
         if not include_removed:
             statement = statement.where(AgentAssetRow.status != "removed")
         rows = self._session.scalars(statement)
-        return [self._asset_dict(row) for row in rows]
+        return [self._annotate(self._asset_dict(row)) for row in rows]
 
     def set_status(self, asset_id: str, status: str) -> bool:
         """Post-scan verification verdict for an asset not seen in this scan.
@@ -102,13 +103,44 @@ class AgentInventoryRepository:
 
     def get_asset(self, asset_id: str) -> dict | None:
         row = self._session.get(AgentAssetRow, asset_id)
-        return self._asset_dict(row) if row else None
+        return self._annotate(self._asset_dict(row)) if row else None
 
     def find_asset_by_type(self, agent_type: str) -> dict | None:
         row = self._session.scalar(select(AgentAssetRow).where(
             AgentAssetRow.agent_type == agent_type).order_by(
                 AgentAssetRow.last_seen_at.desc()).limit(1))
-        return self._asset_dict(row) if row else None
+        return self._annotate(self._asset_dict(row)) if row else None
+
+    def _annotate(self, data: dict) -> dict:
+        """Attach the canonical entity mapping without changing the legacy id."""
+        alias = self._session.get(EntityAliasRow, data["asset_id"])
+        if alias is None:
+            data["entity_id"] = None
+            data["entity_alias_status"] = None
+            data["agent_status"] = None
+            data["capability_tags"] = []
+            data["status_basis"] = {}
+            data["removal_verdict"] = None
+            return data
+        status = alias.status or "OK"
+        data["entity_alias_status"] = status
+        data["entity_id"] = alias.entity_id if status == "OK" else None
+        snapshot = None
+        if data["entity_id"]:
+            snapshot = self._session.scalars(
+                select(EntitySnapshotRow).where(
+                    EntitySnapshotRow.entity_id == data["entity_id"]).order_by(
+                        EntitySnapshotRow.generation_id.desc(),
+                        EntitySnapshotRow.id.desc())).first()
+        data["agent_status"] = snapshot.agent_status if snapshot else None
+        data["capability_tags"] = (
+            json.loads(snapshot.capability_tags_json or "[]")
+            if snapshot else [])
+        data["status_basis"] = (
+            json.loads(snapshot.status_basis_json or "{}")
+            if snapshot else {})
+        data["removal_verdict"] = snapshot.removal_verdict if snapshot else None
+        return data
 
     # -- instances ---------------------------------------------------------
 

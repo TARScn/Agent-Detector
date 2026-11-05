@@ -11,6 +11,7 @@ that cannot be read anywhere is recorded as UNKNOWN, never guessed.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from importlib.resources import files as resource_files
@@ -99,7 +100,131 @@ def _read_dist_name_version(metadata_path: Path) -> tuple[str, str] | None:
     return None
 
 
+def _read_package_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def metadata_component(data: dict, source: str,
+                       expected_name: str | None = None
+                       ) -> ComponentInfo | None:
+    """Component from one installed package.json object (shared host/Docker)."""
+    if not isinstance(data, dict):
+        return None
+    name = data.get("name") or expected_name
+    if not isinstance(name, str) or not name.strip():
+        return None
+    version = data.get("version")
+    return ComponentInfo(
+        name=normalize_name(name),
+        version=str(version) if version else "UNKNOWN",
+        version_source=VersionSource.PACKAGE_METADATA,
+        source_path=source)
+
+
+def _node_installed_components(project: ProjectInfo,
+                               interest: set[str]) -> list[ComponentInfo]:
+    """Installed Node packages from node_modules/*/package.json (read-only)."""
+    found: list[ComponentInfo] = []
+    if project.environment_path:
+        base = Path(project.environment_path)
+        if base.name != "node_modules":
+            base = base / "node_modules"
+    else:
+        base = Path(project.root) / "node_modules"
+    candidates: list[Path] = []
+    try:
+        candidates.extend(sorted(base.glob("*/package.json")))
+        candidates.extend(sorted(base.glob("@*/*/package.json")))
+    except OSError:
+        return found
+    for package_json in candidates[:_MAX_METADATA_READS]:
+        component = metadata_component(_read_package_json(package_json),
+                                       str(package_json))
+        if component is None or component.name not in interest:
+            continue
+        found.append(component)
+    return found
+
+
+def components_from_package_json_text(text: str, source: str,
+                                      interest: set[str]) -> list[ComponentInfo]:
+    """Declared components from package.json (dependencies are ranges, not installs)."""
+    found: list[ComponentInfo] = []
+    try:
+        data = json.loads(text)
+    except (UnicodeError, ValueError, json.JSONDecodeError):
+        return found
+    if not isinstance(data, dict):
+        return found
+    for section in ("dependencies", "devDependencies", "peerDependencies",
+                    "optionalDependencies"):
+        dependencies = data.get(section)
+        if not isinstance(dependencies, dict):
+            continue
+        for name in dependencies:
+            normalized = normalize_name(str(name))
+            if normalized in interest:
+                found.append(ComponentInfo(name=normalized, version="UNKNOWN",
+                                           version_source=VersionSource.DECLARED,
+                                           source_path=source))
+    return found
+
+
+def components_from_package_lock_text(text: str, source: str,
+                                      interest: set[str]) -> list[ComponentInfo]:
+    """Locked components from package-lock.json (v1 tree and v2/v3 packages)."""
+    found: list[ComponentInfo] = []
+    try:
+        data = json.loads(text)
+    except (UnicodeError, ValueError, json.JSONDecodeError):
+        return found
+    if not isinstance(data, dict):
+        return found
+
+    packages = data.get("packages")
+    if isinstance(packages, dict):
+        for path, info in packages.items():
+            if not isinstance(info, dict) or not path:
+                continue
+            marker = "node_modules/"
+            if marker not in path:
+                continue
+            name = path.rsplit(marker, 1)[-1]
+            normalized = normalize_name(name)
+            if normalized not in interest:
+                continue
+            found.append(ComponentInfo(
+                name=normalized,
+                version=str(info.get("version") or "UNKNOWN"),
+                version_source=VersionSource.LOCKED,
+                source_path=f"{source}:{path}"))
+
+    def walk(dependencies) -> None:
+        if not isinstance(dependencies, dict):
+            return
+        for name, info in dependencies.items():
+            if not isinstance(info, dict):
+                continue
+            normalized = normalize_name(str(name))
+            if normalized in interest:
+                found.append(ComponentInfo(
+                    name=normalized,
+                    version=str(info.get("version") or "UNKNOWN"),
+                    version_source=VersionSource.LOCKED,
+                    source_path=source))
+            walk(info.get("dependencies"))
+
+    walk(data.get("dependencies"))
+    return found
+
+
 def _installed_components(project: ProjectInfo, interest: set[str]) -> list[ComponentInfo]:
+    if project.runtime == "node":
+        return _node_installed_components(project, interest)
     found: list[ComponentInfo] = []
     reads = 0
     for site_packages in _site_packages_candidates(project):
@@ -230,6 +355,14 @@ def _declared_components(project: ProjectInfo, interest: set[str]) -> list[Compo
         text = ""
     if text:
         found.extend(components_from_requirements_text(text, str(requirements), interest))
+    package_json = Path(project.root) / "package.json"
+    try:
+        text = package_json.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        text = ""
+    if text:
+        found.extend(components_from_package_json_text(text, str(package_json),
+                                                       interest))
     return found
 
 
@@ -242,6 +375,14 @@ def _locked_components(project: ProjectInfo, interest: set[str]) -> list[Compone
         except (OSError, UnicodeError):
             continue
         found.extend(components_from_lock_text(text, str(lock_path), interest))
+    package_lock = Path(project.root) / "package-lock.json"
+    try:
+        text = package_lock.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        text = ""
+    if text:
+        found.extend(components_from_package_lock_text(text, str(package_lock),
+                                                       interest))
     return found
 
 
