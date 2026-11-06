@@ -33,7 +33,8 @@ from agent_detector.interception.policy.engine import PolicyEngine, risk_at_leas
 from agent_detector.interception.policy.loader import load_policies
 from agent_detector.storage.models import utc_now_iso
 from agent_detector.storage import (AgentInventoryRepository, AlertRepository,
-                                                BehaviorEventRepository, PolicyRepository)
+                                                BehaviorEventRepository,
+                                                EntityRepository, PolicyRepository)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class HookOutcome:
     response: dict
     event_id: int | None = None
     asset_id: str | None = None
+    entity_id: str | None = None
     instance_id: str | None = None
     session_id: str | None = None
     correlated_by: str = "none"
@@ -160,20 +162,24 @@ class HookDecisionService:
         assert call is not None
         with Session(self.engine) as session:
             inventory = AgentInventoryRepository(session)
+            entities = EntityRepository(session)
             events = BehaviorEventRepository(session)
             alerts = AlertRepository(session)
 
-            agent = inventory.find_asset_by_type(call.agent_type)
-            outcome.asset_id = agent["asset_id"] if agent else None
+            agent = entities.find_by_agent_type(call.agent_type)
+            outcome.entity_id = agent["entity_id"] if agent else None
+            outcome.asset_id = outcome.entity_id
             instance = resolve_instance_for_pid(bridge_ppid, session)
             if instance is not None:
                 outcome.instance_id = instance["instance_id"]
                 outcome.correlated_by = instance.get("matched_by", "process-tree")
-                if outcome.asset_id is None:
-                    outcome.asset_id = instance["asset_id"]
+                if outcome.entity_id is None:
+                    outcome.entity_id = instance.get("entity_id")
+                    outcome.asset_id = outcome.entity_id
             if call.session_id:
                 inventory.touch_session(
-                    call.session_id, call.agent_type, asset_id=outcome.asset_id,
+                    call.session_id, call.agent_type, asset_id=outcome.entity_id,
+                    entity_id=outcome.entity_id,
                     instance_id=outcome.instance_id, cwd=call.cwd,
                     tool=call.tool_name or None,
                     closed=call.event_type is HookEvent.SESSION_END)
@@ -186,7 +192,8 @@ class HookDecisionService:
                     observed_at=utc_now_iso(),
                     agent_label=call.agent_label or call.agent_type,
                     tool=call.tool_name, operation=operation, target=target[:512],
-                    asset_id=outcome.asset_id, session_id=call.session_id,
+                    asset_id=outcome.entity_id, entity_id=outcome.entity_id,
+                    session_id=call.session_id,
                     instance_id=outcome.instance_id,
                     decision=outcome.verdict.decision.value,
                     execution_status=execution.value,
@@ -208,7 +215,8 @@ class HookDecisionService:
                         reason=outcome.verdict.reason,
                         risk_level=outcome.verdict.risk.value,
                         decision=outcome.verdict.decision.value,
-                        asset_id=outcome.asset_id, agent_type=call.agent_type,
+                        asset_id=outcome.entity_id, entity_id=outcome.entity_id,
+                        agent_type=call.agent_type,
                         agent_label=call.agent_label or call.agent_type,
                         session_id=call.session_id, event_id=event_id,
                         policy_id=outcome.verdict.policy_id,
@@ -220,7 +228,8 @@ class HookDecisionService:
                     agent_label=call.agent_label or call.agent_type,
                     tool=call.tool_name, operation="post.tool_use",
                     target=_post_target(call.tool_input),
-                    asset_id=outcome.asset_id, session_id=call.session_id,
+                    asset_id=outcome.entity_id, entity_id=outcome.entity_id,
+                    session_id=call.session_id,
                     instance_id=outcome.instance_id,
                     decision="allow",
                     execution_status=_post_status(call),
@@ -235,15 +244,12 @@ class HookDecisionService:
                                 session_id: str | None,
                                 protocol: str) -> None:
         """E5 evidence: the Agent's own hook reported a tool call."""
-        if not outcome.asset_id:
+        if not outcome.entity_id:
             return
         from agent_detector.aggregation.evidence_ledger import (
             EvidenceLedger, static_claim_valid_to)
-        from agent_detector.storage.identity_repository import IdentityRepository
 
-        entity_id = IdentityRepository(session).resolve_alias(outcome.asset_id)
-        if not entity_id:
-            return
+        entity_id = outcome.entity_id
         ledger = EvidenceLedger(session)
         observed_at = utc_now_iso()
         source_uid = f"hook-{outcome.event_id}"

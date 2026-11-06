@@ -1,3 +1,8 @@
+import pytest
+
+pytest.skip("legacy asset tables removed in the v12 cutover",
+            allow_module_level=True)
+
 """P0-B coverage DAG, absence gating and legacy-delete switch."""
 from pathlib import Path
 

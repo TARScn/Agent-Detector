@@ -20,6 +20,7 @@ from agent_detector.identity.canonical import canonical_json, digest
 from agent_detector.monitoring.collectors.trace.controlled import read_trace
 from agent_detector.storage import AgentInventoryRepository
 from agent_detector.storage.identity_repository import IdentityRepository
+from agent_detector.storage.models import BehaviorEventRow, EntityAttributeRow
 from agent_detector.storage.models import BehaviorEventRow, utc_now_iso
 
 
@@ -51,14 +52,11 @@ def write_controlled_trace(session, *, scan_id: int,
         actor_asset_id = actor_asset.asset_id if actor_asset else None
         actor_entity = (identities.resolve_alias(actor_asset_id)
                         if actor_asset_id else None)
-        actor_row = (inventory.get_asset(actor_asset_id)
-                     if actor_asset_id else None)
-        # Self-built applications live in the discovery asset tables, not in
-        # agent_assets, so fall back to the scan asset's own name/type instead
-        # of labelling an attributed event with a bare pid.
-        agent_type = ((actor_row or {}).get("agent_type")
+        attr = (session.get(EntityAttributeRow, actor_entity)
+                if actor_entity else None)
+        agent_type = ((attr.agent_type if attr else None)
                       or (actor_asset.name if actor_asset else "unknown"))
-        label = ((actor_row or {}).get("name")
+        label = ((attr.name if attr else None)
                  or (actor_asset.name if actor_asset else None)
                  or (f"pid-{event.pid}" if event.pid else "trace"))
         source = ("runtime_trace" if event.kind == "runtime"
@@ -97,8 +95,9 @@ def write_controlled_trace(session, *, scan_id: int,
             observed_at=observed_at,
             source=source,
             agent_label=label,
-            asset_id=actor_asset_id,
-            actor_asset_id=actor_asset_id,
+            asset_id=actor_entity,
+            actor_asset_id=actor_entity,
+            actor_entity_id=actor_entity,
             actor_process_key=process_key,
             scope_key=host_key or None,
             attribution_method=source,

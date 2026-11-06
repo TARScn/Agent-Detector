@@ -38,8 +38,8 @@ from agent_detector.discovery.scanner.resolver import resolve_projects, runtime_
 from agent_detector.discovery.sources.docker_agents import scan_docker_agents
 from agent_detector.core.models import DetectedAsset, HostFacts
 from agent_detector.discovery.probes.http import probe_facts
-from agent_detector.storage import (AssetRepository, CoverageRepository,
-                                    EvidenceRepository, ScanRepository)
+from agent_detector.storage import (CoverageRepository, IdentityRepository,
+                                    ScanRepository)
 
 logger = logging.getLogger(__name__)
 
@@ -88,14 +88,6 @@ def run_scan(engine: Engine, active: bool = False,
         for bundle in bundles:
             assets.extend(bundle.frameworks)
         merged = correlate_assets(merge_assets(assets))
-        asset_repo = AssetRepository(session)
-        evidence_repo = EvidenceRepository(session)
-        for asset in merged:
-            asset_repo.upsert(asset, scan_id)
-            evidence_repo.add_all(scan_id, asset)
-        if bundles:
-            from agent_detector.storage import ApplicationRepository
-            ApplicationRepository(session).upsert_all(bundles)
         failed_detectors = {error["detector"] for error in errors}
         if project_stats.get("error"):
             failed_detectors.add("frameworks")  # stage failed: absence proves nothing
@@ -130,14 +122,15 @@ def run_scan(engine: Engine, active: bool = False,
             errors.append({"detector": "coverage", "error": str(exc)})
             coverage = None
 
-        agent_inventory, inventory_warnings, removal_candidates = _build_inventory(
-            session, merged, facts, home=home, matrix=matrix,
-            app_links={framework.asset_id: {"app_id": bundle.app_id,
-                                            "app_name": bundle.project.name}
-                       for bundle in bundles for framework in bundle.frameworks},
-            failed_detectors=failed_detectors,
-            docker_context=docker_ctx,
-            coverage=coverage)
+        agent_inventory, inventory_warnings, removal_candidates, unverified = (
+            _build_inventory(
+                session, merged, facts, home=home, matrix=matrix,
+                app_links={framework.asset_id: {"app_id": bundle.app_id,
+                                                "app_name": bundle.project.name}
+                           for bundle in bundles for framework in bundle.frameworks},
+                failed_detectors=failed_detectors,
+                docker_context=docker_ctx,
+                coverage=coverage))
         coverage_repo.record_candidates(scan_id, removal_candidates)
         identity_shadow = write_identity_shadow(session, engine, merged, facts)
         if identity_shadow.get("error"):
@@ -170,12 +163,16 @@ def run_scan(engine: Engine, active: bool = False,
                 docker_scope_key=docker_scope_key,
                 coverage_scope_ids=coverage_scope_ids,
                 removal_candidates=removal_candidates,
+                unverified=unverified,
                 coverage=coverage)
         except Exception as exc:  # evidence ledger failure must not void the scan
             logger.exception("scan evidence ledger failed")
             errors.append({"detector": "evidence-ledger", "error": str(exc)})
             evidence_stats = {"observations": 0, "claims": 0, "entities": 0,
                               "statuses": {}, "error": str(exc)}
+        identities = IdentityRepository(session)
+        entity_of = {asset.asset_id: identities.resolve_alias(asset.asset_id)
+                     for asset in merged}
         stats = {
             "observations": {"processes": len(facts.processes),
                              "listening_sockets": len(facts.sockets),
@@ -184,16 +181,18 @@ def run_scan(engine: Engine, active: bool = False,
                            "applications": len(bundles),
                            "framework_assets": sum(len(b.frameworks) for b in bundles)},
             "docker": docker_stats,
-            "assets": len(merged),
+            "detections": len(merged),
             "coverage": (coverage.summary() if coverage is not None
                          else {"scopes": 0}),
             "removal_candidates": len(removal_candidates),
             "evidence": evidence_stats,
             "controlled_trace": controlled_trace,
             "identity_shadow": identity_shadow,
-            "agent_assets": agent_inventory,
+            "entity_inventory": [_inventory_entry(item, entity_of)
+                                 for item in agent_inventory],
             "agent_instances": sum(item["instance_count"] for item in agent_inventory),
-            "asset_summaries": [_summary(asset) for asset in merged],
+            "entity_summaries": [_entity_summary(asset, entity_of.get(asset.asset_id))
+                                 for asset in merged],
             "errors": errors + [{"detector": "inventory", "error": warning}
                                 for warning in inventory_warnings],
         }
@@ -276,7 +275,7 @@ def _build_inventory(session: Session, merged: list[DetectedAsset], facts: HostF
                      failed_detectors: set[str] | None = None,
                      docker_context: dict | None = None,
                      coverage=None
-                     ) -> tuple[list[dict], list[str], list[dict]]:
+                     ) -> tuple[list[dict], list[str], list[dict], dict[str, str]]:
     """Agent-level view of the same scan; a failure here never voids the scan."""
     try:
         builder = InventoryBuilder(home=home, matrix=matrix)
@@ -284,10 +283,11 @@ def _build_inventory(session: Session, merged: list[DetectedAsset], facts: HostF
                                    failed_detectors=failed_detectors or set(),
                                    docker_context=docker_context,
                                    coverage=coverage)
-        return items, builder.warnings, builder.removal_candidates
+        return (items, builder.warnings, builder.removal_candidates,
+                dict(builder.unverified))
     except Exception as exc:
         logger.exception("agent inventory build failed")
-        return [], [str(exc)], []
+        return [], [str(exc)], [], {}
 
 
 def merge_assets(assets: list[DetectedAsset]) -> list[DetectedAsset]:
@@ -367,8 +367,19 @@ def _rule_digests(*rule_groups) -> dict[str, str]:
     return digests
 
 
-def _summary(asset: DetectedAsset) -> dict:
-    return {"asset_id": asset.asset_id, "name": asset.name,
+def _inventory_entry(item: dict, entity_of: dict[str, str | None]) -> dict:
+    """Agent-level scan row on the canonical key (detector ids stay internal)."""
+    return {"entity_id": entity_of.get(item["asset_id"]),
+            "agent_type": item["agent_type"], "name": item["name"],
+            "protection_status": item["protection_status"],
+            "hook_state": item["hook_state"],
+            "capabilities": item["capabilities"],
+            "llm_endpoints": item["llm_endpoints"],
+            "instance_count": item["instance_count"]}
+
+
+def _entity_summary(asset: DetectedAsset, entity_id: str | None) -> dict:
+    return {"entity_id": entity_id, "name": asset.name,
             "asset_type": asset.asset_type.value,
             "states": sorted(state.value for state in asset.states),
             "confidence": asset.confidence, "version": asset.version.value,

@@ -1,22 +1,17 @@
-"""Discovery endpoints: run a scan, browse component assets (§8).
-
-These are the V0.1 endpoints with the V0.2 shape: a scan still produces
-component assets (Agent clients, MCP servers, model services) with evidence,
-and it now also refreshes the Agent inventory (agent_assets/instances).
-"""
+"""Discovery endpoints on the canonical V1.2 read model."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from agent_detector.console.api.agent_view import (app_name_map, app_state_map,
-                                                  merge_agent_rows)
 from agent_detector.console.api.deps import Services, get_services
 from agent_detector.console.api.schemas import ScanRequest
 from agent_detector.discovery.scanner.scan import run_scan
-from agent_detector.storage import (AgentInventoryRepository, ApplicationRepository,
-                                                 AssetRepository, EvidenceRepository,
-                                                 ScanRepository)
+from agent_detector.storage import EntityRepository, ScanRepository
+from agent_detector.storage.models import (ComponentRelationRow,
+                                           EntityAttributeRow,
+                                           EntityLocationRow, utc_now_iso)
 
 router = APIRouter(prefix="/api/v1", tags=["discovery"])
 
@@ -28,12 +23,39 @@ def _services() -> Services:
 @router.post("/discovery/scan")
 def create_scan(body: ScanRequest, services: Services = Depends(_services)):
     if not services.scan_lock.acquire(blocking=False):
+        from fastapi import HTTPException
         raise HTTPException(status_code=409, detail="已有扫描在进行中")
+    mode = "agent+traffic" if body.active else "agent"
+    services.scan_run.started_at = utc_now_iso()
+    services.scan_run.mode = mode
     try:
-        return run_scan(services.engine, active=body.active, matrix=services.matrix,
-                        docker_enabled=body.docker)
+        result = run_scan(services.engine, active=body.active,
+                          matrix=services.matrix, docker_enabled=body.docker)
+        with Session(services.engine) as session:
+            entities = EntityRepository(session).list_agents()
+            components = session.scalar(
+                select(func.count()).select_from(ComponentRelationRow).where(
+                    ComponentRelationRow.valid_to.is_(None))) or 0
+        return {"scan_id": result["scan_id"], "mode": result["mode"],
+                "status": result["status"], "entities": len(entities),
+                "components": int(components),
+                "errors": result.get("errors", [])}
     finally:
+        services.scan_run.started_at = None
         services.scan_lock.release()
+
+
+@router.get("/discovery/scan/status")
+def scan_status(services: Services = Depends(_services)):
+    """Whether a scan is running right now.
+
+    The console reloads its mutation state on navigation, so the running flag
+    must come from the process that owns the scan, not from browser memory.
+    """
+    running = services.scan_lock.locked()
+    return {"running": running,
+            "started_at": services.scan_run.started_at if running else None,
+            "mode": services.scan_run.mode if running else None}
 
 
 @router.get("/discovery/scans")
@@ -43,43 +65,50 @@ def list_scans(limit: int = 30, services: Services = Depends(_services)):
 
 
 @router.get("/discovery/assets")
-def list_assets(scan_id: int | None = None, services: Services = Depends(_services)):
-    """Latest (or per-scan) component assets from the detection pipeline."""
+def list_assets(services: Services = Depends(_services)):
+    """Canonical entity inventory (legacy asset snapshots are gone)."""
     with Session(services.engine) as session:
-        repository = AssetRepository(session)
-        items = (repository.list_snapshots(scan_id) if scan_id is not None
-                 else repository.latest_snapshots())
+        items = EntityRepository(session).list_agents(include_hidden=True)
     return {"items": items, "total": len(items)}
 
 
 @router.get("/discovery/applications")
-def list_applications(include_removed: bool = False,
-                      services: Services = Depends(_services)):
-    """自建 Agent 应用：进程解析出的项目目录与其 AI 依赖组件。
-
-    只记录路径、运行时与包名/版本元数据，不读取项目源码内容；
-    复核发现项目目录已删除的应用会连同资产一起从库中删除。
-    """
+def list_applications(services: Services = Depends(_services)):
+    """Self-built/container applications from canonical entity locations."""
     with Session(services.engine) as session:
-        items = ApplicationRepository(session).list_applications(
-            include_removed=include_removed)
+        components = {entity_id: count for entity_id, count in session.execute(
+            select(ComponentRelationRow.entity_id, func.count()).where(
+                ComponentRelationRow.valid_to.is_(None)).group_by(
+                    ComponentRelationRow.entity_id))}
+        items = []
+        for location in session.scalars(select(EntityLocationRow)):
+            attr = session.get(EntityAttributeRow, location.entity_id)
+            items.append({
+                "entity_id": location.entity_id,
+                "name": attr.name if attr else "",
+                "agent_type": attr.agent_type if attr else "",
+                "root_path": location.root_path,
+                "environment_path": location.environment_path,
+                "runtime": location.runtime,
+                "entrypoint": location.entrypoint,
+                "entry_kind": location.entry_kind,
+                "status": location.status,
+                "components": int(components.get(location.entity_id, 0)),
+                "first_seen_at": location.first_seen_at,
+                "last_seen_at": location.last_seen_at,
+            })
     return {"items": items, "total": len(items)}
 
 
 @router.get("/discovery/summary")
 def discovery_summary(services: Services = Depends(_services)):
-    """Counts by asset type, plus whether the inventory has been built yet."""
     with Session(services.engine) as session:
-        assets = AssetRepository(session).latest_snapshots()
+        entities = EntityRepository(session).list_agents(include_hidden=True)
+        components = session.scalar(
+            select(func.count()).select_from(ComponentRelationRow).where(
+                ComponentRelationRow.valid_to.is_(None))) or 0
+        applications = session.scalar(
+            select(func.count()).select_from(EntityLocationRow)) or 0
         latest_scan = ScanRepository(session).latest_id()
-        agents = AgentInventoryRepository(session).list_assets()
-        applications = ApplicationRepository(session).count_applications()
-    # 与资产清单同一合并口径（框架折叠进产品/应用实体）
-    agent_entities = merge_agent_rows(agents, app_name_map(session),
-                                      app_states=app_state_map(session))
-    by_type: dict[str, int] = {}
-    for asset in assets:
-        by_type[asset["asset_type"]] = by_type.get(asset["asset_type"], 0) + 1
-    return {"assets": len(assets), "by_type": by_type,
-            "agent_assets": len(agent_entities),
-            "applications": applications, "latest_scan_id": latest_scan}
+    return {"entities": len(entities), "components": int(components),
+            "applications": int(applications), "latest_scan_id": latest_scan}

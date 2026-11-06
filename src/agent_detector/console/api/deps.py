@@ -24,10 +24,24 @@ from agent_detector.storage.models import utc_now_iso
 
 
 @dataclass
+class ScanRun:
+    """In-process scan activity, so a page reload still sees the running scan.
+
+    The scan itself is a blocking call inside this process; ``scan_lock`` is the
+    authoritative "is a scan running" signal, these fields only carry display
+    metadata for the console.
+    """
+
+    started_at: str | None = None
+    mode: str = "agent"
+
+
+@dataclass
 class Services:
     engine: Engine
     started_at: str = field(default_factory=utc_now_iso)
     scan_lock: threading.Lock = field(default_factory=threading.Lock)
+    scan_run: ScanRun = field(default_factory=ScanRun)
     matrix: LoadedMatrix = field(default_factory=load_agent_matrix)
     monitor: MonitorManager | None = None
     ingest: BehaviorIngestService | None = None
@@ -50,6 +64,18 @@ class Services:
         loaded = load_policies()
         return {"rules": len(loaded.rules), "errors": loaded.errors,
                 "sources": loaded.sources}
+
+    def telemetry_context(self) -> tuple[bool, str]:
+        """Whether any behaviour channel is running, and its granularity.
+
+        Asset-level coverage is not yet derivable for every source, so the
+        honest default is "global"; the UI must not present it as per-asset
+        monitoring.
+        """
+        behavior = self.ingest.status() if self.ingest is not None else {}
+        monitor = self.monitor.status() if self.monitor is not None else {}
+        running = bool(behavior.get("running") or monitor.get("running"))
+        return running, ("global" if running else "none")
 
     def shutdown(self) -> None:
         if self.monitor is not None:

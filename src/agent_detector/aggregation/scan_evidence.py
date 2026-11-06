@@ -7,6 +7,10 @@ reconfirmation loop is wired into the ledger.
 """
 from __future__ import annotations
 
+import json
+
+from sqlalchemy import select
+
 from agent_detector.aggregation.evidence_ledger import (EvidenceLedger,
                                                         running_claim_valid_to,
                                                         static_claim_valid_to)
@@ -16,7 +20,9 @@ from agent_detector.core.models import DetectedAsset
 from agent_detector.identity.entity import legacy_identity_for_asset
 from agent_detector.storage.component_repository import ComponentRepository
 from agent_detector.storage.identity_repository import IdentityRepository
-from agent_detector.storage.models import utc_now_iso
+from agent_detector.storage.models import (AgentInstanceRow,
+                                           EntityAttributeRow,
+                                           EntityLocationRow, utc_now_iso)
 
 _EVIDENCE_STATE_CLASS = {
     AssetState.INSTALLED: ("E2", "package_metadata"),
@@ -32,8 +38,11 @@ _HOOK_ORDER = (
 # ENFORCEMENT_VERIFIED require runtime evidence the scan does not have.
 _SNAPSHOT_HOOK_STATE = {
     HookState.INSTALLED.value: "CONFIGURED",
-    HookState.PARTIAL.value: "UNKNOWN",
-    HookState.CONFLICT.value: "UNKNOWN",
+    # PARTIAL/CONFLICT describe the configuration itself; do not collapse them
+    # to UNKNOWN, otherwise the console cannot explain why protection is
+    # conservative.
+    HookState.PARTIAL.value: "PARTIAL",
+    HookState.CONFLICT.value: "CONFLICT",
     HookState.NOT_INSTALLED.value: "NOT_CONFIGURED",
     HookState.UNSUPPORTED.value: "UNKNOWN",
     HookState.UNKNOWN.value: "UNKNOWN",
@@ -144,6 +153,76 @@ def _link_component(components: ComponentRepository, entity_id: str,
         version_source=asset.version.source.value)
 
 
+def _write_canonical_inventory(session, assets: list[DetectedAsset],
+                               inventory: list[dict],
+                               entity_by_asset: dict[str, str],
+                               stats: dict) -> None:
+    """Keep the canonical attributes/locations/instances fresh on each scan."""
+    items = {item.get("asset_id"): item for item in inventory}
+    now = utc_now_iso()
+    for asset in assets:
+        entity_id = entity_by_asset.get(asset.asset_id)
+        if not entity_id:
+            continue
+        item = items.get(asset.asset_id) or {}
+        attr = session.get(EntityAttributeRow, entity_id)
+        if attr is None:
+            attr = EntityAttributeRow(entity_id=entity_id)
+            session.add(attr)
+            attr.first_seen_at = now
+        docker = (asset.scope_kind in ("compose", "container")
+                  or asset.identity_scope.startswith("container:"))
+        attr.agent_type = (item.get("agent_type") or asset.detector
+                           or asset.asset_type.value.lower())
+        attr.name = item.get("name") or asset.name
+        attr.vendor = item.get("vendor") or ""
+        attr.version = asset.version.value
+        attr.version_source = asset.version.source.value
+        attr.origin = "docker" if docker else "host"
+        attr.container_id = (item.get("container_id")
+                             or (asset.identity_scope
+                                 if asset.scope_kind == "container" else None))
+        attr.executable = asset.executable
+        attr.config_paths_json = json.dumps(asset.config_paths,
+                                            ensure_ascii=False)
+        attr.mcp_servers_json = json.dumps(asset.mcp_servers,
+                                           ensure_ascii=False)
+        attr.llm_endpoints_json = json.dumps(
+            item.get("llm_endpoints") or [], ensure_ascii=False)
+        attr.listening_ports_json = json.dumps(
+            list(asset.listening_ports), ensure_ascii=False)
+        attr.notes_json = json.dumps(item.get("notes") or [], ensure_ascii=False)
+        attr.capabilities_json = json.dumps(
+            item.get("capabilities") or {}, ensure_ascii=False)
+        attr.inventory_kind = "agent"
+        attr.status = "active"
+        attr.last_seen_at = now
+        stats["attributes"] = stats.get("attributes", 0) + 1
+
+        if asset.scope_kind in ("project", "compose", "container"):
+            location = session.get(EntityLocationRow, entity_id)
+            if location is None:
+                location = EntityLocationRow(entity_id=entity_id)
+                session.add(location)
+                location.first_seen_at = now
+            location.root_path = asset.identity_scope
+            runtime = ((asset.executable or "").lower())
+            if "python" in runtime:
+                location.runtime = "python"
+            elif "node" in runtime:
+                location.runtime = "node"
+            location.container_id = attr.container_id
+            location.status = "active"
+            location.last_seen_at = now
+            stats["locations"] = stats.get("locations", 0) + 1
+
+        for instance in session.scalars(
+                select(AgentInstanceRow).where(
+                    AgentInstanceRow.asset_id == asset.asset_id)):
+            instance.entity_id = entity_id
+            stats["instance_refs"] = stats.get("instance_refs", 0) + 1
+
+
 def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
                         inventory: list[dict], coverage_summary: dict,
                         rule_digests: dict[str, str],
@@ -151,6 +230,7 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
                         engine_key: str, docker_scope_key: str,
                         coverage_scope_ids: dict[tuple[str, str], int] | None = None,
                         removal_candidates: list[dict] | None = None,
+                        unverified: dict[str, str] | None = None,
                         coverage=None
                         ) -> dict:
     ledger = EvidenceLedger(session)
@@ -160,6 +240,7 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
     scope_ids = coverage_scope_ids or {}
     entity_hook: dict[str, set[str]] = {}
     entity_removal: dict[str, str] = {}
+    entity_by_asset: dict[str, str] = {}
     for candidate in removal_candidates or ():
         asset_id = str(candidate.get("asset_id") or "")
         entity_id = identities.resolve_alias(asset_id) if asset_id else None
@@ -175,6 +256,7 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
     entity_host_scoped: set[str] = set()
     observations = 0
     claims = 0
+    stats: dict = {}
     running_valid_to = running_claim_valid_to()
     static_valid_to = static_claim_valid_to()
 
@@ -189,6 +271,7 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
             identities.alias_legacy(asset.asset_id, entity_id,
                                     reason="evidence:scan")
         seen_entities.add(entity_id)
+        entity_by_asset[asset.asset_id] = entity_id
         if (asset.scope_kind in ("compose", "container")
                 or asset.identity_scope.startswith("container:")):
             entity_container_ids.setdefault(entity_id, set()).add(
@@ -349,6 +432,9 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
             components.close_stale(
                 entity_id, active_components.get(entity_id, set()))
 
+    _write_canonical_inventory(session, assets, inventory, entity_by_asset,
+                               stats)
+
     for rule_id, rule_digest in rule_digests.items():
         ledger.upsert_rule_revision(rule_id, rule_digest, "packaged")
 
@@ -364,6 +450,20 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
             removal_verdict=entity_removal.get(entity_id, "NONE"))
         statuses[result["agent_status"]] = statuses.get(
             result["agent_status"], 0) + 1
+    # Entities this run could not check still get a snapshot: without one the
+    # console would fall back to the last generation and keep the old status.
+    for entity_id, reason in sorted((unverified or {}).items()):
+        if entity_id in seen_entities or entity_id in entity_removal:
+            continue
+        result = project_entity(
+            session, entity_id, scan_id, coverage_summary=coverage_summary,
+            removal_verdict=entity_removal.get(entity_id, "NONE"),
+            unverified=reason)
+        statuses[result["agent_status"]] = statuses.get(
+            result["agent_status"], 0) + 1
     session.flush()
     return {"observations": observations, "claims": claims,
-            "entities": len(seen_entities), "statuses": statuses}
+            "entities": len(seen_entities),
+            "unverified": len(unverified or {}),
+            "statuses": statuses,
+            **stats}

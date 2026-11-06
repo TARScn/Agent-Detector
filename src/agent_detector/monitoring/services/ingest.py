@@ -61,10 +61,12 @@ from agent_detector.monitoring.services.collector_status import write_collector_
 from agent_detector.core.enums import RiskLevel
 from agent_detector.core.models import ProcessInfo
 from agent_detector.discovery.fingerprints.loader import load_rules
-from agent_detector.storage.models import BehaviorEventRow, utc_now_iso
+from sqlalchemy import select
+
+from agent_detector.storage.models import (AgentInstanceRow, BehaviorEventRow,
+                                           EntityAttributeRow, utc_now_iso)
 from agent_detector.interception.policy.engine import risk_at_least
-from agent_detector.storage import (AgentInventoryRepository, AlertRepository,
-                                    AssetRepository)
+from agent_detector.storage import AlertRepository
 
 logger = logging.getLogger(__name__)
 
@@ -595,34 +597,30 @@ class BehaviorIngestService:
         container_map: dict[str, tuple[str, str]] = {}
         try:
             with Session(self.engine) as session:
-                for snapshot in AssetRepository(session).latest_snapshots():
-                    asset_id = snapshot["asset_id"]
-                    known.add(asset_id)
-                    for pid in snapshot.get("running_pids") or []:
-                        try:
-                            pid_map.setdefault(int(pid), asset_id)
-                        except (TypeError, ValueError):
-                            continue
-                # Container-origin assets (Docker channel): match eBPF events
-                # by container-ID prefix instead of pids (different namespaces).
-                inventory = AgentInventoryRepository(session)
-                for asset in inventory.list_assets():
-                    stored = (asset.get("container_id") or "").strip().lower()
+                attrs = {row.entity_id: row for row in session.scalars(
+                    select(EntityAttributeRow))}
+                for instance in session.scalars(
+                        select(AgentInstanceRow).where(
+                            AgentInstanceRow.status == "running")):
+                    entity_id = instance.entity_id or instance.asset_id
+                    if not entity_id:
+                        continue
+                    known.add(entity_id)
+                    try:
+                        pid_map.setdefault(int(instance.pid), entity_id)
+                    except (TypeError, ValueError):
+                        continue
+                    stored = (instance.container_id or "").strip().lower()
                     if stored:
-                        container_map[stored] = (asset["asset_id"], asset["name"])
+                        name = attrs[entity_id].name if entity_id in attrs else entity_id
+                        container_map[stored] = (entity_id, name)
+                        container_map.setdefault(stored[:12], (entity_id, name))
+                for attr in attrs.values():
+                    stored = (attr.container_id or "").strip().lower()
+                    if stored:
+                        container_map.setdefault(stored, (attr.entity_id, attr.name))
                         container_map.setdefault(stored[:12],
-                                                 (asset["asset_id"], asset["name"]))
-                    # Compose-merged assets carry one container_id per running
-                    # INSTANCE (api/worker/sandbox/...): map every instance's
-                    # container to the one asset so any container of the
-                    # project attributes (the asset row stores the primary only).
-                    for instance in inventory.list_instances(asset["asset_id"]):
-                        cid = (instance.get("container_id") or "").strip().lower()
-                        if not cid:
-                            continue
-                        container_map[cid] = (asset["asset_id"], asset["name"])
-                        container_map.setdefault(cid[:12],
-                                                 (asset["asset_id"], asset["name"]))
+                                                 (attr.entity_id, attr.name))
         except Exception:
             logger.exception("asset attribution lookup failed")
         return AgentAttributor(hostname=platform.node() or "localhost", graph=self.graph,
@@ -734,6 +732,7 @@ class BehaviorIngestService:
             agent_label=(attribution.agent_label or f"pid-{fact.pid}")[:80],
             asset_id=attribution.asset_id,
             actor_asset_id=attribution.asset_id,
+            actor_entity_id=attribution.asset_id,
             actor_process_key=self._process_key(fact),
             scope_key=self._scope_key,
             attribution_method=method,
@@ -783,6 +782,7 @@ class BehaviorIngestService:
                 "agent_label": attribution.agent_label or f"pid-{fact.pid}",
                 "asset_id": attribution.asset_id,
                 "actor_asset_id": attribution.asset_id,
+                "actor_entity_id": attribution.asset_id,
                 "attribution_method": method,
                 "attribution_state": BehaviorIngestService._attribution_state(method),
                 "pid": fact.pid,
@@ -823,6 +823,7 @@ class BehaviorIngestService:
                         reason=f"系统行为风险分级 {item['risk_level']}",
                         risk_level=item["risk_level"], decision="audit",
                         asset_id=item.get("asset_id"),
+                        entity_id=item.get("actor_entity_id"),
                         agent_label=item["agent_label"], agent_type=None,
                         detail={"source": item.get("source"),
                                 "event_type": item.get("event_type"),

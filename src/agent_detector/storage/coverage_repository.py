@@ -6,7 +6,7 @@ import json
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agent_detector.coverage.model import CoverageGraph, CoverageScope
+from agent_detector.coverage.model import CoverageGraph, CoverageScope, CoverageStatus
 from agent_detector.storage.models import (CoveragePredicateStatusRow,
                                            CoverageScopeEdgeRow,
                                            CoverageScopeRow,
@@ -124,6 +124,48 @@ class CoverageRepository:
                  "truncated": bool(row.truncated),
                  "error_codes": json.loads(row.error_codes_json or "[]")}
                 for row in rows]
+
+    def load_graph(self, run_id: int) -> CoverageGraph:
+        """Rebuild the effective-status DAG from persisted rows."""
+        rows = list(self._session.scalars(
+            select(CoverageScopeRow).where(
+                CoverageScopeRow.run_id == run_id).order_by(CoverageScopeRow.id)))
+        if not rows:
+            return CoverageGraph()
+        by_id = {row.id: row for row in rows}
+        key_by_id = {row.id: (row.scope_type, row.scope_key) for row in rows}
+        predicates: dict[int, list[tuple[str, CoverageStatus]]] = {}
+        for item in self._session.scalars(
+                select(CoveragePredicateStatusRow).where(
+                    CoveragePredicateStatusRow.scope_id.in_(list(by_id)))):
+            try:
+                status = CoverageStatus(item.own_status)
+            except ValueError:
+                status = CoverageStatus.NOT_RUN
+            predicates.setdefault(item.scope_id, []).append(
+                (item.predicate, status))
+        parents: dict[int, list[tuple[str, str]]] = {}
+        for edge in self._session.scalars(
+                select(CoverageScopeEdgeRow).where(
+                    CoverageScopeEdgeRow.child_id.in_(list(by_id)))):
+            parent_key = key_by_id.get(edge.parent_id)
+            if parent_key:
+                parents.setdefault(edge.child_id, []).append(parent_key)
+        graph = CoverageGraph()
+        for row in rows:
+            try:
+                own = CoverageStatus(row.own_status)
+            except ValueError:
+                own = CoverageStatus.NOT_RUN
+            graph.add(CoverageScope(
+                scope_type=row.scope_type, scope_key=row.scope_key,
+                source=row.source, own_status=own, budget=row.budget,
+                scanned_count=row.scanned_count,
+                truncated=bool(row.truncated),
+                error_codes=tuple(json.loads(row.error_codes_json or "[]")),
+                predicates=tuple(predicates.get(row.id, [])),
+                parents=tuple(parents.get(row.id, []))))
+        return graph
 
     def list_candidates(self, run_id: int) -> list[dict]:
         rows = self._session.scalars(

@@ -11,7 +11,7 @@ from agent_detector.discovery.scanner import scan as scan_service
 from agent_detector.interception.hooks.normalizer import mcp_server_name
 from agent_detector.storage import (AgentInventoryRepository,
                                     BehaviorEventRepository,
-                                    IdentityRepository)
+                                    EntityRepository, IdentityRepository)
 from agent_detector.storage.database import make_engine
 from agent_detector.storage.models import (BehaviorEventRow, ClaimRow,
                                            EntitySnapshotRow)
@@ -62,7 +62,8 @@ def test_controlled_trace_records_e5_evidence_and_sessions(tmp_path, monkeypatch
         mcp = next(event for event in events if event["protocol"] == "MCP")
         assert mcp["mcp_server"] == "filesystem"
         assert mcp["session_id"] == "s1"
-        assert mcp["actor_asset_id"] == "claude--1"
+        assert mcp["actor"]["entity_id"] == IdentityRepository(session).resolve_alias(
+            "claude--1")
         runtime = BehaviorEventRepository(session).list_events(
             source="runtime_trace")[0]
         assert runtime["event_type"] == "framework.execution"
@@ -70,7 +71,8 @@ def test_controlled_trace_records_e5_evidence_and_sessions(tmp_path, monkeypatch
         assert runtime["agent_label"] == "Claude Code"
         sessions = AgentInventoryRepository(session).list_sessions()
         assert any(item["session_id"] == "s1" for item in sessions)
-        asset = AgentInventoryRepository(session).get_asset("claude--1")
+        asset = EntityRepository(session).get_agent(
+            IdentityRepository(session).resolve_alias("claude--1"))
         assert asset["agent_status"] == "RUNNING"
         assert "AGENT_EXECUTION_OBSERVED" in asset["capability_tags"]
         claims = {row.predicate for row in session.scalars(select(ClaimRow))}

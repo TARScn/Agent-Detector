@@ -1,7 +1,7 @@
 import json
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from agent_detector.storage.models import BehaviorEventRow, EntityAliasRow
@@ -21,9 +21,12 @@ class BehaviorEventRepository:
                     asset_id: str | None = None, event_type: str | None = None,
                     session_id: str | None = None, risk_level: str | None = None,
                     decision: str | None = None, since: str | None = None,
-                    before_id: int | None = None) -> list[dict]:
-        """Newest first. ``before_id`` walks further back in history: the feed
-        asks for one page at a time instead of loading the whole table."""
+                    until: str | None = None, before_id: int | None = None,
+                    after_id: int | None = None,
+                    entity_id: str | None = None,
+                    execution_status: str | None = None) -> list[dict]:
+        """Newest first by default. ``before_id`` walks back; ``after_id``
+        walks forward (oldest first) and is the reliable SSE catch-up path."""
         actor_alias = aliased(EntityAliasRow)
         target_alias = aliased(EntityAliasRow)
         statement = (select(BehaviorEventRow, actor_alias.entity_id,
@@ -51,18 +54,48 @@ class BehaviorEventRepository:
             statement = statement.where(BehaviorEventRow.decision == decision)
         if since:
             statement = statement.where(BehaviorEventRow.observed_at >= since)
+        if until:
+            statement = statement.where(BehaviorEventRow.observed_at <= until)
         if before_id:
             statement = statement.where(BehaviorEventRow.id < int(before_id))
-        statement = statement.order_by(BehaviorEventRow.id.desc()).limit(
-            min(max(int(limit), 1), 500))
+        if after_id:
+            statement = statement.where(BehaviorEventRow.id > int(after_id))
+        if entity_id:
+            statement = statement.where(or_(
+                BehaviorEventRow.actor_entity_id == entity_id,
+                and_(actor_alias.entity_id == entity_id,
+                     actor_alias.status == "OK")))
+        if execution_status:
+            statement = statement.where(
+                BehaviorEventRow.execution_status == execution_status)
+        statement = statement.order_by(
+            BehaviorEventRow.id.asc() if after_id else BehaviorEventRow.id.desc()
+        ).limit(min(max(int(limit), 1), 500))
         return [self._to_dict(row, actor_entity, actor_status,
                               target_entity, target_status)
                 for row, actor_entity, actor_status, target_entity, target_status
                 in self._session.execute(statement)]
 
+    def get_event(self, event_id: int) -> dict | None:
+        actor_alias = aliased(EntityAliasRow)
+        target_alias = aliased(EntityAliasRow)
+        statement = (select(BehaviorEventRow, actor_alias.entity_id,
+                            actor_alias.status, target_alias.entity_id,
+                            target_alias.status)
+                     .outerjoin(actor_alias,
+                                BehaviorEventRow.asset_id == actor_alias.old_id)
+                     .outerjoin(target_alias,
+                                BehaviorEventRow.target_asset_id == target_alias.old_id)
+                     .where(BehaviorEventRow.id == int(event_id)))
+        row = self._session.execute(statement).first()
+        if row is None:
+            return None
+        return self._to_dict(*row)
+
     def record_tool_call(self, *, observed_at: str, agent_label: str, tool: str,
                          operation: str, target: str | None = None,
                          asset_id: str | None = None,
+                         entity_id: str | None = None,
                          session_id: str | None = None,
                          instance_id: str | None = None,
                          decision: str | None = None,
@@ -83,7 +116,9 @@ class BehaviorEventRepository:
         source_event_uid = f"hook-{uuid.uuid4().hex}"
         row = BehaviorEventRow(
             observed_at=observed_at, source="native_hook", agent_label=agent_label,
-            asset_id=asset_id, actor_asset_id=asset_id,
+            asset_id=asset_id or entity_id,
+            actor_asset_id=asset_id or entity_id,
+            actor_entity_id=entity_id,
             actor_instance_id=instance_id,
             attribution_method="verified_session",
             attribution_state="verified",
@@ -101,9 +136,13 @@ class BehaviorEventRepository:
         self._session.flush()
         return row.id
 
-    def stats(self, source: str | None = None) -> dict:
+    def stats(self, source: str | None = None, since: str | None = None) -> dict:
         def filtered(statement):
-            return statement.where(BehaviorEventRow.source == source) if source else statement
+            if source:
+                statement = statement.where(BehaviorEventRow.source == source)
+            if since:
+                statement = statement.where(BehaviorEventRow.observed_at >= since)
+            return statement
 
         count = self._session.scalar(
             select(func.count()).select_from(
@@ -114,13 +153,59 @@ class BehaviorEventRepository:
             select(BehaviorEventRow.agent_label, func.count()).group_by(BehaviorEventRow.agent_label)))}
         by_operation = {operation: n for operation, n in self._session.execute(filtered(
             select(BehaviorEventRow.operation, func.count()).group_by(BehaviorEventRow.operation)))}
-        by_source = {name: n for name, n in self._session.execute(
-            select(BehaviorEventRow.source, func.count()).group_by(BehaviorEventRow.source))}
+        by_source = {name: n for name, n in self._session.execute(filtered(
+            select(BehaviorEventRow.source, func.count()).group_by(BehaviorEventRow.source)))}
         by_risk = {risk or "unrated": n for risk, n in self._session.execute(filtered(
             select(BehaviorEventRow.risk_level, func.count()).group_by(
                 BehaviorEventRow.risk_level)))}
+        by_decision = {decision or "none": n for decision, n in self._session.execute(
+            filtered(select(BehaviorEventRow.decision, func.count()).group_by(
+                BehaviorEventRow.decision)))}
+        by_execution = {
+            status or "unknown": n for status, n in self._session.execute(
+                filtered(select(BehaviorEventRow.execution_status, func.count())
+                         .group_by(BehaviorEventRow.execution_status)))}
         return {"event_count": count, "by_protocol": by_protocol, "by_agent": by_agent,
-                "by_operation": by_operation, "by_source": by_source, "by_risk": by_risk}
+                "by_operation": by_operation, "by_source": by_source,
+                "by_risk": by_risk, "by_decision": by_decision,
+                "by_execution_status": by_execution}
+
+    def timeseries_counts(self, *, since: str, until: str,
+                          bucket: str = "hour", source: str | None = None,
+                          risk_level: str | None = None,
+                          entity_id: str | None = None) -> dict[str, dict]:
+        """Counts keyed by UTC bucket start (substring of observed_at)."""
+        length = 13 if bucket == "hour" else 10
+        bucket_expr = func.substr(BehaviorEventRow.observed_at, 1, length)
+        actor_alias = aliased(EntityAliasRow)
+        statement = (select(
+            bucket_expr,
+            func.count(),
+            func.sum(case((BehaviorEventRow.decision == "deny", 1), else_=0)),
+        ).select_from(BehaviorEventRow)
+            .outerjoin(actor_alias,
+                       BehaviorEventRow.asset_id == actor_alias.old_id)
+            .where(BehaviorEventRow.observed_at >= since,
+                   BehaviorEventRow.observed_at < until))
+        if source:
+            statement = statement.where(BehaviorEventRow.source == source)
+        if risk_level:
+            statement = statement.where(BehaviorEventRow.risk_level == risk_level)
+        if entity_id:
+            statement = statement.where(or_(
+                BehaviorEventRow.actor_entity_id == entity_id,
+                and_(actor_alias.entity_id == entity_id,
+                     actor_alias.status == "OK")))
+        statement = statement.group_by(bucket_expr)
+        return {bucket: {"events": int(events), "blocked": int(blocked or 0)}
+                for bucket, events, blocked in self._session.execute(statement)}
+
+    def count_after(self, after_id: int, source: str | None = None) -> int:
+        statement = select(func.count()).select_from(BehaviorEventRow).where(
+            BehaviorEventRow.id > int(after_id))
+        if source:
+            statement = statement.where(BehaviorEventRow.source == source)
+        return int(self._session.scalar(statement) or 0)
 
     def summary(self, since: str) -> dict:
         """Counters for the dashboard: events since ``since`` plus blocked calls."""
@@ -147,21 +232,17 @@ class BehaviorEventRepository:
                  actor_alias_status: str | None = None,
                  target_entity_id: str | None = None,
                  target_alias_status: str | None = None) -> dict:
-        actor_entity = (actor_entity_id
-                        if (actor_alias_status or "OK") == "OK" else None)
-        target_entity = (target_entity_id
-                         if (target_alias_status or "OK") == "OK" else None)
+        actor_entity = actor_entity_id or row.actor_entity_id
+        target_entity = target_entity_id or row.target_entity_id
         return {"id": row.id, "observed_at": row.observed_at, "source": row.source,
                 "entity_id": actor_entity,
-                "entity_alias_status": actor_alias_status,
+                "entity_alias_status": "OK" if actor_entity else "MISSING",
                 "target_entity_id": target_entity,
-                "target_alias_status": target_alias_status,
-                "agent_label": row.agent_label, "asset_id": row.asset_id,
+                "target_alias_status": "OK" if target_entity else "MISSING",
+                "agent_label": row.agent_label,
                 "scope_key": row.scope_key,
-                "actor_asset_id": row.actor_asset_id,
                 "actor_instance_id": row.actor_instance_id,
                 "actor_process_key": row.actor_process_key,
-                "target_asset_id": row.target_asset_id,
                 "target_endpoint_id": row.target_endpoint_id,
                 "target_instance_id": row.target_instance_id,
                 "attribution_method": row.attribution_method,
@@ -180,4 +261,18 @@ class BehaviorEventRepository:
                 "process_guid": row.process_guid, "risk_level": row.risk_level,
                 "decision": row.decision, "execution_status": row.execution_status,
                 "policy_id": row.policy_id, "container_id": row.container_id,
+                "actor": {
+                    "entity_id": actor_entity,
+                    "instance_id": row.actor_instance_id or row.instance_id,
+                    "label": row.agent_label or "未归属",
+                    "alias_status": "OK" if actor_entity else "MISSING",
+                    "attribution_state": row.attribution_state or "unattributed",
+                },
+                "target_ref": {
+                    "entity_id": target_entity,
+                    "endpoint_id": row.target_endpoint_id,
+                    "instance_id": row.target_instance_id,
+                    "label": None,
+                    "alias_status": "OK" if target_entity else "MISSING",
+                },
                 "evidence": json.loads(row.evidence_json or "[]")}

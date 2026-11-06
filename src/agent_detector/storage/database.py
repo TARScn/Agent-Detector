@@ -44,16 +44,7 @@ _ADDITIVE_COLUMNS["behavior_events"].update({
     "execution_status": "VARCHAR(24)",
     "policy_id": "VARCHAR(64)",
 })
-# V0.2.x: LLM base-model inventory per Agent asset
-_ADDITIVE_COLUMNS["agent_assets"] = {"llm_endpoints_json": "TEXT"}
-# Self-built agent discovery: framework assets link to their application
-_ADDITIVE_COLUMNS["agent_assets"]["app_id"] = "VARCHAR(96)"
-# Post-scan verification lifecycle (re-install flips back to active on upsert)
-_ADDITIVE_COLUMNS["agent_assets"]["status"] = "VARCHAR(24) DEFAULT 'active'"
-_ADDITIVE_COLUMNS["applications"] = {"status": "VARCHAR(24) DEFAULT 'active'"}
-# Docker channel (Docker Core): container-origin assets and instances
-_ADDITIVE_COLUMNS["agent_assets"]["origin"] = "VARCHAR(16) DEFAULT 'host'"
-_ADDITIVE_COLUMNS["agent_assets"]["container_id"] = "VARCHAR(96)"
+# Docker channel (Docker Core): container-origin instances
 _ADDITIVE_COLUMNS["agent_instances"] = {"origin": "VARCHAR(16) DEFAULT 'host'",
                                         "container_id": "VARCHAR(96)"}
 # eBPF channel (Tetragon): container hex-ID prefix on behavior events
@@ -75,6 +66,21 @@ _ADDITIVE_COLUMNS["behavior_events"].update({
 
 _ADDITIVE_COLUMNS["entity_aliases"] = {"status": "VARCHAR(16) DEFAULT 'OK'"}
 
+# V1.2 canonical cutover: entity keys on operational rows. Legacy asset_id
+# columns stay for historical rows; new writers populate the entity columns.
+_ADDITIVE_COLUMNS.setdefault("agent_instances", {})["entity_id"] = "VARCHAR(96)"
+_ADDITIVE_COLUMNS.setdefault("agent_sessions", {})["entity_id"] = "VARCHAR(96)"
+_ADDITIVE_COLUMNS["behavior_events"].update({
+    "actor_entity_id": "VARCHAR(96)",
+    "target_entity_id": "VARCHAR(96)",
+})
+_ADDITIVE_COLUMNS.setdefault("security_alerts", {})["entity_id"] = "VARCHAR(96)"
+_ADDITIVE_COLUMNS.setdefault("removal_candidates", {})["entity_id"] = "VARCHAR(96)"
+_ADDITIVE_COLUMNS.setdefault("entity_attributes", {})["inventory_kind"] = (
+    "VARCHAR(16) DEFAULT 'agent'")
+_ADDITIVE_COLUMNS.setdefault("entity_attributes", {})["listening_ports_json"] = (
+    "TEXT DEFAULT '[]'")
+
 _ADDITIVE_INDEXES = (
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_behavior_source_event "
     "ON behavior_events(source, source_event_uid)",
@@ -84,6 +90,16 @@ _ADDITIVE_INDEXES = (
     "ON behavior_events(target_asset_id)",
     "CREATE INDEX IF NOT EXISTS ix_behavior_actor_process "
     "ON behavior_events(actor_process_key)",
+    "CREATE INDEX IF NOT EXISTS ix_behavior_actor_entity "
+    "ON behavior_events(actor_entity_id)",
+    "CREATE INDEX IF NOT EXISTS ix_behavior_target_entity "
+    "ON behavior_events(target_entity_id)",
+    "CREATE INDEX IF NOT EXISTS ix_agent_instance_entity "
+    "ON agent_instances(entity_id)",
+    "CREATE INDEX IF NOT EXISTS ix_agent_session_entity "
+    "ON agent_sessions(entity_id)",
+    "CREATE INDEX IF NOT EXISTS ix_alert_entity "
+    "ON security_alerts(entity_id)",
 )
 
 
@@ -125,7 +141,12 @@ def ensure_schema(engine: Engine) -> list[str]:
                     continue  # another process added it first
                 added.append(f"{table}.{name}")
         for statement in _ADDITIVE_INDEXES:
-            connection.exec_driver_sql(statement)
+            try:
+                connection.exec_driver_sql(statement)
+            except OperationalError as exc:
+                if "no such table" in str(exc).lower():
+                    continue  # partial legacy DB: table not created yet
+                raise
     return added
 
 

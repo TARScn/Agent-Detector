@@ -1,0 +1,41 @@
+:root {
+  --brand: #0052d9;
+  --brand-hover: #266fe8;
+  --brand-weak: #e8f3ff;
+  --brand-soft: #f2f7ff;
+  --bg: #f5f7fa;
+  --surface: #ffffff;
+  --border: #e6e8eb;
+  --border-strong: #d5d9df;
+  --text: #1f2329;
+  --text-2: #4e5969;
+  --text-3: #6b7785;
+  --text-4: #86909c;
+  --success: #00a870;
+  --success-weak: #e8f8f2;
+  --warning: #ed7b2f;
+  --warning-weak: #fff3e8;
+  --danger: #e34d59;
+  --danger-weak: #fdecee;
+  --info: #0594fa;
+  --info-weak: #e8f6ff;
+  --critical: #b91c1c;
+  --radius: 8px;
+  --radius-sm: 6px;
+  --shadow: 0 1px 2px rgba(31, 35, 41, 0.04), 0 6px 18px rgba(31, 35, 41, 0.04);
+  --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --mono: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  --td-brand-color: #0052d9;
+  --td-brand-color-hover: #266fe8;
+  --td-brand-color-light: #e8f3ff;
+  --td-bg-color-page: #f5f7fa;
+  --td-bg-color-container: #ffffff;
+  --td-text-color-primary: #1f2329;
+  --td-text-color-secondary: #4e5969;
+  --td-text-color-placeholder: #86909c;
+  --td-border-level-1-color: #e6e8eb;
+  --td-radius-default: 8px;
+  --td-radius-medium: 8px;
+  --td-font-family: var(--font);
+}

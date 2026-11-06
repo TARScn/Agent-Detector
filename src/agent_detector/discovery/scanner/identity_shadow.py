@@ -72,14 +72,23 @@ def write_identity_shadow(session: Session, engine, assets: list[DetectedAsset],
                                     or asset.identity_scope.startswith("container:"))
                 scope_key = (engine_identity.engine_key if container_scoped
                              else host.scope_key)
-                legacy = legacy_identity_for_asset(asset, scope_key)
-                entity_id = repo.ensure_entity(
-                    legacy.entity_kind, legacy.key_type, legacy.canonical_key,
-                    scope_key=scope_key,
-                    confidence_basis=legacy.confidence_basis)
-                repo.alias_legacy(
-                    asset.asset_id, entity_id,
-                    reason=f"shadow:{asset.scope_kind or 'unknown'}")
+                # Backfill may already have bound this legacy id to a canonical
+                # entity (possibly with a LEGACY_ASSET key). Adopt that entity
+                # instead of minting a strong-key twin, which would immediately
+                # mark the alias AMBIGUOUS.
+                existing = repo.get_alias(asset.asset_id)
+                if existing is not None and (existing.status or "OK") == "OK":
+                    entity_id = existing.entity_id
+                else:
+                    legacy = legacy_identity_for_asset(asset, scope_key)
+                    entity_id = repo.ensure_entity(
+                        legacy.entity_kind, legacy.key_type,
+                        legacy.canonical_key,
+                        scope_key=scope_key,
+                        confidence_basis=legacy.confidence_basis)
+                    repo.alias_legacy(
+                        asset.asset_id, entity_id,
+                        reason=f"shadow:{asset.scope_kind or 'unknown'}")
                 entity_ids.add(entity_id)
                 aliases += 1
 

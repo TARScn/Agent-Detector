@@ -26,9 +26,10 @@ from agent_detector.monitoring.collectors.host.dns_cache import DnsCache
 from agent_detector.monitoring.collectors.host.netflow import (NetObservation, collect_outbound, match_llm_call,
                                             resolve_known_hosts, resolve_process_names)
 from agent_detector.monitoring.detection.llm_intel import load_rules
-from agent_detector.storage.models import (BehaviorEventRow, ProcessBirthRow,
+from agent_detector.storage.models import (AgentInstanceRow, BehaviorEventRow,
+                                           EntityAttributeRow, ProcessBirthRow,
                                            utc_now_iso)
-from agent_detector.storage import AssetRepository, EndpointRepository
+from agent_detector.storage import EndpointRepository
 
 logger = logging.getLogger(__name__)
 
@@ -207,8 +208,10 @@ class MonitorManager:
             # Legacy column keeps the actor only; a target service never goes here.
             asset_id=observation.actor_asset_id,
             actor_asset_id=observation.actor_asset_id,
+            actor_entity_id=observation.actor_asset_id,
             actor_process_key=observation.actor_process_key,
             target_asset_id=observation.target_asset_id,
+            target_entity_id=observation.target_asset_id,
             target_endpoint_id=target_endpoint_id,
             scope_key=self._scope_key,
             attribution_method=observation.attribution_method,
@@ -282,19 +285,22 @@ class MonitorManager:
         known_births: set[str] = set()
         try:
             with Session(self.engine) as session:
-                for snapshot in AssetRepository(session).latest_snapshots():
-                    asset_id = snapshot["asset_id"]
-                    for pid in snapshot.get("running_pids") or []:
+                for instance in session.scalars(
+                        select(AgentInstanceRow).where(
+                            AgentInstanceRow.status == "running")):
+                    entity_id = instance.entity_id or instance.asset_id
+                    if not entity_id:
+                        continue
+                    try:
+                        pid_map.setdefault(int(instance.pid), entity_id)
+                    except (TypeError, ValueError):
+                        continue
+                for attr in session.scalars(select(EntityAttributeRow)):
+                    for port in json.loads(attr.listening_ports_json or "[]"):
                         try:
-                            pid_map.setdefault(int(pid), asset_id)
+                            port_map.setdefault(int(port), attr.entity_id)
                         except (TypeError, ValueError):
                             continue
-                    if snapshot.get("asset_type") == "LLM_SERVICE":
-                        for port in snapshot.get("listening_ports") or []:
-                            try:
-                                port_map.setdefault(int(port), asset_id)
-                            except (TypeError, ValueError):
-                                continue
                 if pid_map:
                     rows = session.scalars(
                         select(ProcessBirthRow).where(

@@ -29,46 +29,6 @@ class ScanTaskRow(Base):
     stats_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
-class AssetRow(Base):
-    """Stable asset identity across scans (plan section 5.3)."""
-
-    __tablename__ = "assets"
-
-    asset_id: Mapped[str] = mapped_column(String(96), primary_key=True)
-    name: Mapped[str] = mapped_column(String(120))
-    asset_type: Mapped[str] = mapped_column(String(32))
-    first_seen_at: Mapped[str] = mapped_column(String(48))
-    last_seen_at: Mapped[str] = mapped_column(String(48))
-
-
-class AssetSnapshotRow(Base):
-    __tablename__ = "asset_snapshots"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    scan_id: Mapped[int] = mapped_column(ForeignKey("scan_tasks.id"), index=True)
-    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.asset_id"), index=True)
-    states_json: Mapped[str] = mapped_column(Text)
-    confidence: Mapped[float] = mapped_column(Float)
-    version: Mapped[str] = mapped_column(String(64))
-    version_source: Mapped[str] = mapped_column(String(32))
-    running_pids_json: Mapped[str] = mapped_column(Text, default="[]")
-    listening_ports_json: Mapped[str] = mapped_column(Text, default="[]")
-    detector: Mapped[str] = mapped_column(String(64))
-
-
-class EvidenceRow(Base):
-    __tablename__ = "evidence"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    scan_id: Mapped[int] = mapped_column(ForeignKey("scan_tasks.id"), index=True)
-    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.asset_id"), index=True)
-    kind: Mapped[str] = mapped_column(String(32))
-    summary: Mapped[str] = mapped_column(Text)
-    detail_json: Mapped[str] = mapped_column(Text, default="{}")
-    confidence: Mapped[float] = mapped_column(Float, default=0.5)
-    created_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
-
-
 class BehaviorEventRow(Base):
     """Unified behavior/telemetry event feed (design section 7).
 
@@ -122,9 +82,11 @@ class BehaviorEventRow(Base):
     # must never be written to asset_id.
     scope_key: Mapped[str | None] = mapped_column(String(96), index=True)
     actor_asset_id: Mapped[str | None] = mapped_column(String(96), index=True)
+    actor_entity_id: Mapped[str | None] = mapped_column(String(96), index=True)
     actor_instance_id: Mapped[str | None] = mapped_column(String(96))
     actor_process_key: Mapped[str | None] = mapped_column(String(96), index=True)
     target_asset_id: Mapped[str | None] = mapped_column(String(96), index=True)
+    target_entity_id: Mapped[str | None] = mapped_column(String(96), index=True)
     target_endpoint_id: Mapped[str | None] = mapped_column(String(96), index=True)
     target_instance_id: Mapped[str | None] = mapped_column(String(96))
     attribution_method: Mapped[str | None] = mapped_column(String(64))
@@ -140,85 +102,6 @@ class BehaviorEventRow(Base):
     )
 
 
-class AgentAssetRow(Base):
-    """Logical Agent asset (design section 3.4): one row per discovered Agent.
-
-    Shares ``assets.asset_id`` with the discovery snapshot tables so the
-    detector stays the single source of identity; this table adds what the
-    dashboard needs — capability matrix, hook state and protection status.
-    """
-
-    __tablename__ = "agent_assets"
-
-    asset_id: Mapped[str] = mapped_column(String(96), primary_key=True)
-    agent_type: Mapped[str] = mapped_column(String(48), index=True)
-    name: Mapped[str] = mapped_column(String(120))
-    vendor: Mapped[str] = mapped_column(String(80), default="")
-    version: Mapped[str] = mapped_column(String(64), default="UNKNOWN")
-    version_source: Mapped[str] = mapped_column(String(32), default="unknown")
-    states_json: Mapped[str] = mapped_column(Text, default="[]")
-    confidence: Mapped[float] = mapped_column(Float, default=0.0)
-    executable: Mapped[str | None] = mapped_column(String(512))
-    config_paths_json: Mapped[str] = mapped_column(Text, default="[]")
-    mcp_servers_json: Mapped[str] = mapped_column(Text, default="[]")
-    llm_endpoints_json: Mapped[str] = mapped_column(Text, default="[]")
-    app_id: Mapped[str | None] = mapped_column(String(96))
-    # Docker channel (Docker Core): where this asset lives. origin stays
-    # "host" for everything the classic channels found.
-    origin: Mapped[str] = mapped_column(String(16), default="host")
-    container_id: Mapped[str | None] = mapped_column(String(96))
-    # Post-scan verification (design §6.3): active = seen in the latest scan,
-    # inactive = self-built whose project dir still exists but no live process,
-    # removed = re-verified gone (uninstalled / path deleted / sighting over).
-    status: Mapped[str] = mapped_column(String(24), default="active")
-    capabilities_json: Mapped[str] = mapped_column(Text, default="{}")
-    protection_status: Mapped[str] = mapped_column(String(24), default="UNKNOWN")
-    hook_state: Mapped[str] = mapped_column(String(24), default="UNKNOWN")
-    hook_detail_json: Mapped[str] = mapped_column(Text, default="{}")
-    notes_json: Mapped[str] = mapped_column(Text, default="[]")
-    first_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
-    last_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
-
-
-class ApplicationRow(Base):
-    """Self-built agent application (design §6.3): one resolved project directory.
-
-    The Application sits between Host and Agent: one process runs one app, the
-    app may embed several frameworks. ``app_id`` is shared with the discovery
-    snapshot tables by convention (like agent_assets.asset_id), no SQL FK.
-    """
-
-    __tablename__ = "applications"
-
-    app_id: Mapped[str] = mapped_column(String(96), primary_key=True)
-    name: Mapped[str] = mapped_column(String(120))
-    root_path: Mapped[str] = mapped_column(String(512))
-    runtime: Mapped[str] = mapped_column(String(32), default="unknown")
-    environment_path: Mapped[str | None] = mapped_column(String(512))
-    entrypoint: Mapped[str | None] = mapped_column(String(512))
-    entry_kind: Mapped[str] = mapped_column(String(32), default="cwd")
-    container_id: Mapped[str | None] = mapped_column(String(96))
-    # Same lifecycle as agent_assets.status: active / inactive / removed.
-    status: Mapped[str] = mapped_column(String(24), default="active")
-    first_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
-    last_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
-
-
-class ApplicationComponentRow(Base):
-    """One AI-relevant package seen in an application's dependency metadata."""
-
-    __tablename__ = "application_components"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    app_id: Mapped[str] = mapped_column(String(96), index=True)
-    name: Mapped[str] = mapped_column(String(120))
-    version: Mapped[str] = mapped_column(String(64), default="UNKNOWN")
-    version_source: Mapped[str] = mapped_column(String(32), default="unknown")
-    source_path: Mapped[str | None] = mapped_column(String(512))
-    first_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
-    last_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
-
-
 class AgentInstanceRow(Base):
     """One running Agent process. Windows reuses PIDs, so identity is
     ``instance_id`` = hash(asset_id, pid, process start time)."""
@@ -227,6 +110,7 @@ class AgentInstanceRow(Base):
 
     instance_id: Mapped[str] = mapped_column(String(96), primary_key=True)
     asset_id: Mapped[str] = mapped_column(String(96), index=True)
+    entity_id: Mapped[str | None] = mapped_column(String(96), index=True)
     agent_type: Mapped[str] = mapped_column(String(48), index=True)
     pid: Mapped[int] = mapped_column(Integer, index=True)
     ppid: Mapped[int | None] = mapped_column(Integer)
@@ -252,6 +136,7 @@ class AgentSessionRow(Base):
 
     session_id: Mapped[str] = mapped_column(String(96), primary_key=True)
     asset_id: Mapped[str | None] = mapped_column(String(96), index=True)
+    entity_id: Mapped[str | None] = mapped_column(String(96), index=True)
     agent_type: Mapped[str] = mapped_column(String(48), index=True)
     instance_id: Mapped[str | None] = mapped_column(String(96))
     source: Mapped[str] = mapped_column(String(32), default="native_hook")
@@ -288,6 +173,7 @@ class SecurityAlertRow(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     created_at: Mapped[str] = mapped_column(String(48), index=True, default=utc_now_iso)
     asset_id: Mapped[str | None] = mapped_column(String(96), index=True)
+    entity_id: Mapped[str | None] = mapped_column(String(96), index=True)
     agent_type: Mapped[str | None] = mapped_column(String(48))
     agent_label: Mapped[str] = mapped_column(String(80), default="")
     session_id: Mapped[str | None] = mapped_column(String(96))
@@ -303,9 +189,9 @@ class SecurityAlertRow(Base):
 
 
 # ---------------------------------------------------------------------------
-# P0-A identity foundation. These tables are written in shadow mode: the
-# legacy read path (assets / agent_assets / applications) is untouched until
-# P0-D switches readers through entity_aliases.
+# Canonical V1.2 model. The console, scanner and hook paths read and write
+# these tables only; legacy asset tables were dropped and their content
+# exported to data/backups/legacy-tables-*.json.gz.
 # ---------------------------------------------------------------------------
 
 
@@ -727,3 +613,76 @@ class ProcessBirthRow(Base):
     process_guid: Mapped[str | None] = mapped_column(String(96))
     first_seen: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
     last_seen: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+
+
+class EntityAttributeRow(Base):
+    """Canonical inventory attributes (one row per entity).
+
+    Replaces the display/operational columns of the former ``agent_assets``
+    table: several detector sightings can fold into one entity.
+    """
+
+    __tablename__ = "entity_attributes"
+
+    entity_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    agent_type: Mapped[str] = mapped_column(String(64), default="")
+    name: Mapped[str] = mapped_column(String(200), default="")
+    vendor: Mapped[str] = mapped_column(String(120), default="")
+    version: Mapped[str] = mapped_column(String(64), default="UNKNOWN")
+    version_source: Mapped[str] = mapped_column(String(32), default="unknown")
+    origin: Mapped[str] = mapped_column(String(16), default="host")
+    container_id: Mapped[str | None] = mapped_column(String(96))
+    executable: Mapped[str | None] = mapped_column(String(512))
+    config_paths_json: Mapped[str] = mapped_column(Text, default="[]")
+    mcp_servers_json: Mapped[str] = mapped_column(Text, default="[]")
+    llm_endpoints_json: Mapped[str] = mapped_column(Text, default="[]")
+    listening_ports_json: Mapped[str] = mapped_column(Text, default="[]")
+    notes_json: Mapped[str] = mapped_column(Text, default="[]")
+    capabilities_json: Mapped[str] = mapped_column(Text, default="{}")
+    inventory_kind: Mapped[str] = mapped_column(String(16), default="agent")
+    status: Mapped[str] = mapped_column(String(24), default="active")
+    first_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+    last_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+
+
+class EntityLocationRow(Base):
+    """Application/container location used for static re-verification."""
+
+    __tablename__ = "entity_locations"
+
+    entity_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    root_path: Mapped[str] = mapped_column(String(512), default="")
+    environment_path: Mapped[str | None] = mapped_column(String(512))
+    runtime: Mapped[str] = mapped_column(String(32), default="unknown")
+    entrypoint: Mapped[str | None] = mapped_column(String(512))
+    entry_kind: Mapped[str] = mapped_column(String(32), default="cwd")
+    container_id: Mapped[str | None] = mapped_column(String(96))
+    status: Mapped[str] = mapped_column(String(24), default="active")
+    first_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+    last_seen_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+
+
+class IdentityReviewCaseRow(Base):
+    """Preserves unresolved legacy identities before old tables are dropped."""
+
+    __tablename__ = "identity_review_cases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    legacy_id: Mapped[str] = mapped_column(String(96), unique=True, index=True)
+    entity_id: Mapped[str | None] = mapped_column(String(96), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="MISSING")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    candidates_json: Mapped[str] = mapped_column(Text, default="[]")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+    resolved_at: Mapped[str | None] = mapped_column(String(48))
+
+
+class SchemaMigrationRow(Base):
+    """One-shot migration ledger (no Alembic in this project)."""
+
+    __tablename__ = "schema_migrations"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    applied_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+    detail_json: Mapped[str] = mapped_column(Text, default="{}")

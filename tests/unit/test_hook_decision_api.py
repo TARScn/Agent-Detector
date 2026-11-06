@@ -111,16 +111,17 @@ def test_post_tool_use_records_a_result_not_a_decision(client, services):
 
 
 def test_mcp_hook_records_protocol_and_e5_claim(client, services):
-    from agent_detector.core.models import AgentInventoryItem
     from agent_detector.storage.identity_repository import IdentityRepository
-    from agent_detector.storage.models import ClaimRow
+    from agent_detector.storage.models import (ClaimRow, EntityAttributeRow,
+                                               EntityRow)
 
     with Session(services.engine) as session:
-        AgentInventoryRepository(session).upsert_asset(AgentInventoryItem(
-            asset_id="claude--1", agent_type="claude_code", name="Claude Code"))
         identities = IdentityRepository(session)
         entity = identities.ensure_entity(
             "PRODUCT_INSTALL", "legacy_asset", "key-claude", scope_key="host")
+        session.add(EntityAttributeRow(
+            entity_id=entity, agent_type="claude_code", name="Claude Code",
+            inventory_kind="agent", status="active"))
         identities.alias_legacy("claude--1", entity)
         session.commit()
 

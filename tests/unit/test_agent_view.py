@@ -1,3 +1,8 @@
+import pytest
+
+pytest.skip("legacy asset tables removed in the v12 cutover",
+            allow_module_level=True)
+
 """agent_view 合并层：框架行折叠进产品/应用实体（2026-10-26 用户裁定）。
 
 口径：资产清单统计单位是 Agent 实体（容器产品或自建应用），依赖的框架

@@ -18,9 +18,8 @@ from agent_detector import __version__
 from agent_detector.core.config import DB_PATH
 from agent_detector.discovery.scanner.scan import run_scan
 from agent_detector.storage.database import make_engine
-from agent_detector.storage import (AgentInventoryRepository, AlertRepository,
-                                    AssetRepository, BehaviorEventRepository,
-                                    ScanRepository)
+from agent_detector.storage import (AlertRepository, BehaviorEventRepository,
+                                    EntityRepository, ScanRepository)
 
 EXIT_OK, EXIT_USAGE, EXIT_ERROR = 0, 2, 3
 
@@ -202,12 +201,12 @@ def _scan(args, engine) -> int:
           f"{docker_stats.get('candidates', 0)} candidates, "
           f"{docker_stats.get('agents', 0)} agents"
           + (f" ({docker_stats.get('error')})" if docker_stats.get("error") else ""))
-    for agent in result.get("agent_assets", []):
+    for agent in result.get("entity_inventory", []):
         print(f"  [Agent] {agent['name']:<16} {agent['agent_type']:<14} "
               f"protection={agent['protection_status']:<13} "
               f"hook={agent['hook_state']:<13} instances={agent['instance_count']}")
-    for asset in result.get("asset_summaries", []):
-        _print_asset_row(asset, indent="  ")
+    for entity in result.get("entity_summaries", []):
+        _print_entity_row(entity, indent="  ")
     for error in result.get("errors", []):
         print(f"  error: {error['detector']}: {error['error']}", file=sys.stderr)
     return EXIT_OK
@@ -215,56 +214,43 @@ def _scan(args, engine) -> int:
 
 def _assets(args, engine) -> int:
     with Session(engine) as session:
-        repository = AssetRepository(session)
-        rows = (repository.list_snapshots(args.scan_id) if args.scan_id
-                else repository.latest_snapshots())
+        rows = EntityRepository(session).list_agents(include_hidden=True)
     if not rows:
         print("no assets recorded; run `agent-detector scan` first")
         return EXIT_OK
     for asset in rows:
-        _print_asset_row(asset)
+        print(f"{asset['entity_id']}  {asset['name']:<20} "
+              f"{asset['agent_type']:<14} version={asset['version']:<12} "
+              f"status={asset.get('agent_status') or 'UNKNOWN'}")
     return EXIT_OK
 
 
 def _agents(args, engine) -> int:
     with Session(engine) as session:
-        repository = AgentInventoryRepository(session)
+        repository = EntityRepository(session)
         if args.agents_command == "list":
-            instances = repository.list_instances()
-            counts: dict[str, int] = {}
-            for instance in instances:
-                counts[instance["asset_id"]] = counts.get(instance["asset_id"], 0) + 1
-            from agent_detector.console.api.agent_view import (app_name_map,
-                                                               app_state_map,
-                                                               merge_agent_rows)
-            assets = merge_agent_rows(repository.list_assets(),
-                                      app_name_map(session), counts,
-                                      app_states=app_state_map(session))
+            assets = repository.list_agents(include_hidden=False)
             if not assets:
                 print("尚未建立 Agent 清单；先运行 `agent-detector scan`")
                 return EXIT_OK
             for asset in assets:
-                container = (asset.get("container_id") or "")[:12]
-                print(f"{asset['name']:<16} {asset['agent_type']:<14} "
+                print(f"{asset['entity_id']}  {asset['name']:<16} "
+                      f"{asset['agent_type']:<14} "
                       f"version={asset['version']:<12} "
-                      f"protection={asset['protection_status']:<13} "
-                      f"hook={asset['hook_state']:<13} "
-                      f"instances={counts.get(asset['asset_id'], 0):<2} "
-                      f"mcp={len(asset['mcp_servers'])}"
-                      + (f" container={container}" if container else ""))
-                for dependency in asset.get("dependencies", []):
-                    print(f"    依赖: {dependency['name']} {dependency['version']}"
-                          f"（{dependency['asset_type']}）")
-                for note in asset["notes"]:
+                      f"status={asset.get('agent_status') or 'UNKNOWN':<12} "
+                      f"instances={asset['instance_count']:<2} "
+                      f"components={asset['component_count']}")
+                for note in asset.get("notes", []):
                     print(f"    note: {note}")
             return EXIT_OK
-        detail = repository.get_asset(args.asset_id)
+        detail = repository.get_agent(args.asset_id)
         if detail is None:
-            print(f"未找到 Agent 资产 {args.asset_id}", file=sys.stderr)
+            print(f"未找到 Agent 实体 {args.asset_id}", file=sys.stderr)
             return EXIT_ERROR
         print(json.dumps({**detail,
-                          "instances": repository.list_instances(args.asset_id, True),
-                          "sessions": repository.list_sessions(asset_id=args.asset_id)},
+                          "instances": repository.list_instances(
+                              args.asset_id, include_stopped=True),
+                          "sessions": repository.list_sessions(args.asset_id)},
                          ensure_ascii=False, indent=2))
         return EXIT_OK
 
@@ -547,17 +533,16 @@ def _hooks(args, engine) -> int:
 
 def _identity(args, engine) -> int:
     from sqlalchemy.orm import Session
-    from agent_detector.identity.backfill import backfill_identity
-    from agent_detector.identity.host import HostIdentityStore
     from agent_detector.storage.identity_repository import IdentityRepository
 
-    host = HostIdentityStore.for_engine(engine).resolve()
     with Session(engine) as session:
         repo = IdentityRepository(session)
         if args.identity_command == "backfill":
-            stats = backfill_identity(session, scope_key=host.scope_key)
-            session.commit()
-            print(json.dumps(stats, ensure_ascii=False, indent=2))
+            print(json.dumps({
+                "deprecated": True,
+                "message": "v12 canonical migration is already applied; "
+                           "legacy asset tables are no longer used",
+            }, ensure_ascii=False, indent=2))
             return EXIT_OK
         row = repo.get_alias(args.asset_id)
         if row is None:
@@ -600,12 +585,14 @@ def _purge(args, engine) -> int:
     return EXIT_OK
 
 
-def _print_asset_row(asset: dict, indent: str = "") -> None:
-    states = ",".join(asset["states"]) or "UNKNOWN"
-    version = asset["version"]
-    source = f" ({asset['version_source']})" if version != "UNKNOWN" else ""
-    print(f"{indent}{asset['name']:<24} {asset['asset_type']:<16} [{states}] "
-          f"version={version}{source} confidence={asset['confidence']:.2f}")
+def _print_entity_row(entity: dict, indent: str = "") -> None:
+    states = ",".join(entity["states"]) or "UNKNOWN"
+    version = entity["version"]
+    source = f" ({entity['version_source']})" if version != "UNKNOWN" else ""
+    key = entity.get("entity_id") or "未归属"
+    print(f"{indent}{entity['name']:<24} {entity['asset_type']:<16} [{states}] "
+          f"version={version}{source} confidence={entity['confidence']:.2f} "
+          f"entity={key}")
 
 
 if __name__ == "__main__":

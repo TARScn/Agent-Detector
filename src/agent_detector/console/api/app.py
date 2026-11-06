@@ -4,7 +4,7 @@ Route layout:
 
 * ``/api/v1/...``        console API (read-mostly, JSON)
 * ``/internal/v1/...``   synchronous hook decision API (token protected)
-* ``/``                  the Vue-free console shell (``web/`` static assets)
+* ``/``                  the console shell (``web/next`` React build, legacy fallback)
 
 The console is served from the same process as the API so a single
 ``uvicorn agent_detector.console.api.app:app`` is all a user needs (design section 2).
@@ -12,6 +12,7 @@ The console is served from the same process as the API so a single
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -20,12 +21,29 @@ from fastapi.staticfiles import StaticFiles
 
 from agent_detector import __version__
 from agent_detector.console.api.deps import get_services
-from agent_detector.console.api import (agents, alerts, discovery, events, hooks, internal,
-                                        policies, system, telemetry)
+from agent_detector.console.api import (agents, alerts, attention, discovery, events,
+                                        evidence, hooks, internal, policies, system,
+                                        telemetry)
 
 logger = logging.getLogger(__name__)
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+NEXT_DIR = WEB_DIR / "next"
+
+
+def console_root() -> Path:
+    """Select the built React console, falling back to the legacy shell.
+
+    ``CONSOLE_UI=legacy|next`` forces a variant; otherwise the React build is
+    used when present. This keeps one rollback switch without mounting two
+    consoles at ``/``.
+    """
+    choice = os.getenv("CONSOLE_UI", "").strip().lower()
+    if choice == "legacy":
+        return WEB_DIR
+    if choice == "next":
+        return NEXT_DIR
+    return NEXT_DIR if (NEXT_DIR / "index.html").is_file() else WEB_DIR
 
 
 def create_app(*, serve_console: bool = True) -> FastAPI:
@@ -35,6 +53,8 @@ def create_app(*, serve_console: bool = True) -> FastAPI:
     app.include_router(agents.router)
     app.include_router(discovery.router)
     app.include_router(events.router)
+    app.include_router(attention.router)
+    app.include_router(evidence.router)
     app.include_router(policies.router)
     app.include_router(alerts.router)
     app.include_router(telemetry.router)
@@ -59,17 +79,22 @@ def create_app(*, serve_console: bool = True) -> FastAPI:
                         "not_implemented": ["gemini_cli", "opencode",
                                             "github_copilot_cli"]}}}
 
-    if serve_console and WEB_DIR.is_dir():
-        app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="console")
+    root = console_root()
+    if serve_console and root.is_dir():
+        app.mount("/", StaticFiles(directory=str(root), html=True), name="console")
 
         @app.middleware("http")
         async def _revalidate_console(request, call_next):
-            # 控制台静态资源永远重验证（配合 etag 只是廉价的 304）：
-            # 没有这个头，浏览器会对 JS 做启发式缓存，前端改完用户看到的还是旧界面。
+            # index.html must revalidate (a stale shell hides a new build);
+            # Vite's content-hashed assets can be cached immutably.
             response = await call_next(request)
             path = request.url.path
             if not path.startswith("/api") and not path.startswith("/internal"):
-                response.headers["Cache-Control"] = "no-cache"
+                if root == NEXT_DIR and path.startswith("/assets/"):
+                    response.headers["Cache-Control"] = (
+                        "public, max-age=31536000, immutable")
+                else:
+                    response.headers["Cache-Control"] = "no-cache"
             return response
 
     @app.exception_handler(RuntimeError)

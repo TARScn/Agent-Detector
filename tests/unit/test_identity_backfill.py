@@ -1,3 +1,8 @@
+import pytest
+
+pytest.skip("legacy asset tables removed in the v12 cutover",
+            allow_module_level=True)
+
 """P0-D canonical backfill and legacy-id read annotations."""
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session

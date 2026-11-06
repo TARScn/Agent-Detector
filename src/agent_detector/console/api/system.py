@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import platform
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from agent_detector import __version__
-from agent_detector.console.api.agent_view import (app_name_map, app_state_map,
-                                                  merge_agent_rows)
+from agent_detector.console.api.agent_view import attach_protection
 from agent_detector.console.api.deps import Services, get_services
 from agent_detector.monitoring.collectors.host.sysmon import sysmon_available
 from agent_detector.core.config import (ALERT_RISK_LEVEL, BEHAVIOR_PATH_POLICY,
@@ -18,9 +17,9 @@ from agent_detector.core.config import (ALERT_RISK_LEVEL, BEHAVIOR_PATH_POLICY,
 from agent_detector.discovery.sources.agents import load_agent_matrix
 from agent_detector.discovery.fingerprints.loader import load_rules
 from agent_detector.interception.hooks.installer import inspect_all
-from agent_detector.storage import (AgentInventoryRepository, AlertRepository,
-                                                 AssetRepository, BehaviorEventRepository,
-                                                 ScanRepository)
+from agent_detector.storage import (AlertRepository, BehaviorEventRepository,
+                                                 EntityRepository, ScanRepository)
+from agent_detector.storage.models import ComponentRow
 
 router = APIRouter(prefix="/api/v1", tags=["system"])
 
@@ -34,37 +33,65 @@ def overview(services: Services = Depends(_services)):
     """仪表盘：Agent 清单摘要 + 今日行为 + 已阻断 + 通道状态 + 最近事件/告警。"""
     since = _today_iso()
     with Session(services.engine) as session:
-        agents = AgentInventoryRepository(session).list_assets()
-        instances = AgentInventoryRepository(session).list_instances()
+        entities = EntityRepository(session).list_agents()
         events = BehaviorEventRepository(session)
         summary = events.summary(since)
         recent_events = events.list_events(limit=12)
         recent_alerts = AlertRepository(session).list_alerts(limit=6)
         alert_stats = AlertRepository(session).stats()
-        components = AssetRepository(session).latest_snapshots()
+        component_rows = list(session.query(ComponentRow).all())
+        components_by_type: dict[str, int] = {}
+        for component in component_rows:
+            key = component.kind or "UNKNOWN"
+            components_by_type[key] = components_by_type.get(key, 0) + 1
         latest_scan = ScanRepository(session).latest_id()
-        # 与资产清单同一合并口径（框架折叠进产品/应用实体），数字不打架。
-        counts: dict[str, int] = {}
-        for instance in instances:
-            counts[instance["asset_id"]] = counts.get(instance["asset_id"], 0) + 1
-        entities = merge_agent_rows(agents, app_name_map(session), counts,
-                                    app_states=app_state_map(session))
-        # 只数未移除实体名下的实例：removed 资产的实例行要等下一次扫描才被
-        # 退役（inventory 的收尾清理），两次扫描之间不能把幽灵算成运行中。
-    protection: dict[str, int] = {}
+    telemetry_running, telemetry_scope = services.telemetry_context()
+    attach_protection(entities, telemetry_running=telemetry_running,
+                      telemetry_scope=telemetry_scope)
+    protection = {}
     for agent in entities:
-        key = agent["protection_status"]
+        key = agent["protection"]["summary"]
         protection[key] = protection.get(key, 0) + 1
-    running = sum(1 for agent in entities if agent["instance_count"] > 0)
+    running_legacy = sum(1 for agent in entities if agent["instance_count"] > 0)
+
+    protection_summary = _zeroed(
+        ("PROTECTED", "MONITOR_ONLY", "UNPROTECTED", "UNKNOWN"),
+        [agent["protection"]["summary"] for agent in entities])
+    hook_states = _counts(agent["protection"]["hook_state"] for agent in entities)
+    statuses = [agent.get("agent_status") for agent in entities]
+    running_confirmed = sum(1 for status in statuses if status == "RUNNING")
+    running_unconfirmed = sum(
+        1 for agent in entities
+        if agent.get("agent_status") is None and agent["instance_count"] > 0)
+    unknown_status = sum(
+        1 for status in statuses if status in (None, "UNKNOWN"))
+    if not statuses or all(status is None for status in statuses):
+        running_basis = "unavailable"
+    elif all(status is not None for status in statuses):
+        running_basis = "agent_status"
+    else:
+        running_basis = "mixed"
+    new_24h = sum(1 for agent in entities if _within_hours(agent.get("first_seen_at"), 24))
     return {
-        "agents": {"total": len(entities), "running": running,
-                   "protection": protection},
+        "agents": {"total": len(entities), "running": running_legacy,
+                   "protection": protection,
+                   "running_confirmed": running_confirmed,
+                   "running_unconfirmed": running_unconfirmed,
+                   "running_basis": running_basis,
+                   "new_24h": new_24h,
+                   "unknown_status": unknown_status,
+                   "by_entity_kind": _counts(
+                       agent.get("entity_kind") or "UNKNOWN" for agent in entities),
+                   "by_type": _counts(
+                       agent.get("agent_type") or "UNKNOWN" for agent in entities),
+                   "protection_summary": protection_summary,
+                   "hook_states": hook_states},
         "behavior": {"events_today": summary["events_since"],
                      "blocked_today": summary["blocked_since"],
                      "by_source": summary["by_source"],
                      "last_event_at": summary["last_event_at"]},
-        "components": {"total": len(components),
-                       "by_type": _count_by(components, "asset_type")},
+        "components": {"total": len(component_rows),
+                       "by_type": components_by_type},
         "alerts": alert_stats,
         "recent_events": recent_events,
         "recent_alerts": recent_alerts,
@@ -83,6 +110,31 @@ def _count_by(items: list[dict], key: str) -> dict[str, int]:
         value = str(item.get(key) or "UNKNOWN")
         counts[value] = counts.get(value, 0) + 1
     return counts
+
+
+def _counts(values) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        key = str(value or "UNKNOWN")
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _zeroed(keys: tuple[str, ...], values: list[str]) -> dict[str, int]:
+    counts = _counts(values)
+    return {key: counts.get(key, 0) for key in keys}
+
+
+def _within_hours(iso: str | None, hours: int) -> bool:
+    if not iso:
+        return False
+    try:
+        stamp = datetime.fromisoformat(iso)
+    except ValueError:
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp >= datetime.now(timezone.utc) - timedelta(hours=hours)
 
 
 def _channels(services: Services) -> list[dict]:

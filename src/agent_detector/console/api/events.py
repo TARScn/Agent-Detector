@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -30,53 +31,136 @@ def list_events(limit: int = Query(default=100, ge=1, le=500),
                 source: str | None = None, agent_label: str | None = None,
                 asset_id: str | None = None, event_type: str | None = None,
                 session_id: str | None = None, risk_level: str | None = None,
-                decision: str | None = None, since: str | None = None,
+                decision: str | None = None, execution_status: str | None = None,
+                since: str | None = None, until: str | None = None,
+                entity_id: str | None = None,
                 before_id: int | None = Query(default=None, ge=1),
+                after_id: int | None = Query(default=None, ge=1),
                 services: Services = Depends(_services)):
-    """``before_id`` pages backwards: pass the oldest id you already hold."""
+    """``before_id`` pages backwards; ``after_id`` pages forward for SSE catch-up."""
+    if before_id is not None and after_id is not None:
+        raise HTTPException(status_code=422,
+                            detail="before_id 与 after_id 不能同时使用")
     with Session(services.engine) as session:
         items = BehaviorEventRepository(session).list_events(
             limit=limit, source=source, agent_label=agent_label, asset_id=asset_id,
             event_type=event_type, session_id=session_id, risk_level=risk_level,
-            decision=decision, since=since, before_id=before_id)
+            decision=decision, execution_status=execution_status, since=since,
+            until=until, before_id=before_id, after_id=after_id,
+            entity_id=entity_id)
+    next_before = (items[-1]["id"]
+                   if (after_id is None and len(items) == limit) else None)
+    next_after = (items[-1]["id"]
+                  if (after_id is not None and len(items) == limit) else None)
     return {"items": items, "total": len(items),
-            "next_before_id": items[-1]["id"] if len(items) == limit else None}
+            "next_before_id": next_before, "next_after_id": next_after}
 
 
 @router.get("/events/stats")
-def event_stats(source: str | None = None, services: Services = Depends(_services)):
+def event_stats(source: str | None = None, since: str | None = None,
+                services: Services = Depends(_services)):
     with Session(services.engine) as session:
-        return BehaviorEventRepository(session).stats(source=source)
+        return BehaviorEventRepository(session).stats(source=source, since=since)
+
+
+@router.get("/events/timeseries")
+def event_timeseries(window: str = Query(default="24h", pattern="^(1h|6h|24h|7d)$"),
+                     bucket: str = Query(default="hour", pattern="^(hour|day)$"),
+                     source: str | None = None, risk_level: str | None = None,
+                     entity_id: str | None = None,
+                     since: str | None = None, until: str | None = None,
+                     services: Services = Depends(_services)):
+    delta = {"1h": timedelta(hours=1), "6h": timedelta(hours=6),
+             "24h": timedelta(hours=24), "7d": timedelta(days=7)}[window]
+    end = _parse_iso(until) if until else datetime.now(timezone.utc)
+    step = timedelta(hours=1) if bucket == "hour" else timedelta(days=1)
+    # Include the bucket containing "now" (or the explicit until) so a 24h
+    # window always renders 24 hourly points, not 25.
+    end_bucket = _floor(end, bucket) + step
+    start = (_floor(_parse_iso(since), bucket)
+             if since else end_bucket - delta)
+    if start >= end_bucket:
+        raise HTTPException(status_code=422, detail="since 必须早于 until")
+    points = []
+    cursor = start
+    with Session(services.engine) as session:
+        counts = BehaviorEventRepository(session).timeseries_counts(
+            since=start.isoformat(timespec="seconds"),
+            until=end_bucket.isoformat(timespec="seconds"), bucket=bucket,
+            source=source, risk_level=risk_level, entity_id=entity_id)
+    while cursor < end_bucket:
+        nxt = cursor + step
+        key = (cursor.strftime("%Y-%m-%dT%H")
+               if bucket == "hour" else cursor.strftime("%Y-%m-%d"))
+        item = counts.get(key, {"events": 0, "blocked": 0})
+        points.append({"start": cursor.isoformat(timespec="seconds"),
+                       "end": nxt.isoformat(timespec="seconds"),
+                       "events": item["events"], "blocked": item["blocked"]})
+        cursor = nxt
+        if len(points) > 168:
+            raise HTTPException(status_code=422, detail="时间范围超过 168 个桶")
+    return {"bucket": bucket, "timezone": "UTC", "points": points}
+
+
+def _parse_iso(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"时间格式无效：{value}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _floor(value: datetime, bucket: str) -> datetime:
+    if bucket == "hour":
+        return value.replace(minute=0, second=0, microsecond=0)
+    return value.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 @router.get("/events/stream")
 def event_stream(source: str | None = None, initial: int = Query(default=0, ge=0, le=200),
                  max_events: int = Query(default=0, ge=0),
                  timeout: float = Query(default=0, ge=0, le=600),
+                 last_event_id: str | None = Header(default=None,
+                                                   alias="Last-Event-ID"),
                  services: Services = Depends(_services)):
     """Server-sent events for the live feed.
 
-    ``initial`` sends the newest N events first so a freshly opened console is
-    not blank until something happens; ``max_events`` / ``timeout`` bound the
-    stream for scripts and tests (the console leaves both at 0 and reconnects).
+    ``Last-Event-ID`` wins over ``initial``: the browser sends it on reconnect
+    and the server replays only the missing range. A backlog larger than
+    ``max_replay`` becomes an explicit ``gap`` event instead of silent loss.
     """
-    last_id = _latest_event_id(services)
+    resume_from = _parse_cursor(last_event_id)
+    last_id = resume_from if resume_from is not None else _latest_event_id(
+        services, source)
     started = time.monotonic()
 
     def frames():
         nonlocal last_id
         sent = 0
         idle = 0
-        if initial:
+        yield "retry: 2000\n\n"
+        if resume_from is not None:
+            backlog = _count_after(services, last_id, source)
+            if backlog > 1000:
+                latest = _latest_event_id(services, source)
+                payload = json.dumps({"from_id": last_id + 1, "to_id": latest,
+                                      "count": backlog}, ensure_ascii=False)
+                yield f"event: gap\ndata: {payload}\n\n"
+                last_id = latest
+        elif initial:
             backlog = _initial_events(services, initial, source)
             for item in backlog:
                 sent += 1
-                yield f"event: event\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+                yield (f"id: {item['id']}\nevent: event\n"
+                       f"data: {json.dumps(item, ensure_ascii=False)}\n\n")
         while True:
             items, last_id = _events_since(services, last_id, source)
             for item in items:
                 sent += 1
-                yield f"event: event\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+                yield (f"id: {item['id']}\nevent: event\n"
+                       f"data: {json.dumps(item, ensure_ascii=False)}\n\n")
             if not items:
                 idle += 1
                 yield ": keep-alive\n\n"
@@ -93,25 +177,46 @@ def event_stream(source: str | None = None, initial: int = Query(default=0, ge=0
                                       "X-Accel-Buffering": "no"})
 
 
+@router.get("/events/{event_id}")
+def event_detail(event_id: int, services: Services = Depends(_services)):
+    with Session(services.engine) as session:
+        item = BehaviorEventRepository(session).get_event(event_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="未找到该事件")
+    return item
+
+
+def _parse_cursor(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        return max(0, int(value))
+    except ValueError:
+        return None
+
+
 def _initial_events(services: Services, count: int, source: str | None) -> list[dict]:
     with Session(services.engine) as session:
         newest = BehaviorEventRepository(session).list_events(limit=count, source=source)
     return sorted(newest, key=lambda item: item["id"])
 
 
-def _latest_event_id(services: Services) -> int:
+def _latest_event_id(services: Services, source: str | None = None) -> int:
     with Session(services.engine) as session:
-        events = BehaviorEventRepository(session).list_events(limit=1, source=None)
+        events = BehaviorEventRepository(session).list_events(limit=1, source=source)
     return events[0]["id"] if events else 0
+
+
+def _count_after(services: Services, last_id: int, source: str | None) -> int:
+    with Session(services.engine) as session:
+        return BehaviorEventRepository(session).count_after(last_id, source=source)
 
 
 def _events_since(services: Services, last_id: int,
                   source: str | None) -> tuple[list[dict], int]:
     with Session(services.engine) as session:
         events = BehaviorEventRepository(session).list_events(
-            limit=50, source=source, since=None)
-    fresh = [item for item in events if item["id"] > last_id]
-    if not fresh:
+            limit=500, source=source, after_id=last_id)
+    if not events:
         return [], last_id
-    return sorted(fresh, key=lambda item: item["id"]), max(
-        item["id"] for item in fresh)
+    return events, max(item["id"] for item in events)

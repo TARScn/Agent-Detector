@@ -41,8 +41,21 @@ uvicorn agent_detector.console.api.app:app --host 127.0.0.1 --port 8787
 
 ## 控制台
 
-无构建步骤的前端（`index.html` + 原生 ES 模块），风格参考 Microsoft 365 admin center / Agent 365：
-白色命令栏、分组左导航、卡片式内容区与状态徽章。
+生产默认使用 `console/web/next/`（React 18 + TypeScript + Vite + TDesign React），源码在
+[`frontend/`](frontend/)。控制台已切换到 V1.2 canonical `entity_id`：资产路由、事件过滤和 API
+响应不再暴露 legacy `asset_id`/`app_id`。React 控制台遵循
+[Web 控制台 API 契约](docs/web-console-contract.md)：状态/保护/覆盖/身份语义由后端裁决，
+前端只负责呈现。
+
+首次构建前端：
+
+```powershell
+cd frontend
+npm install
+npm run build
+```
+
+风格参考 Microsoft 365 admin center / Agent 365：白色命令栏、分组左导航、卡片式内容区与状态徽章。
 
 | 页面 | 内容 |
 | --- | --- |
@@ -97,8 +110,12 @@ agent-detector purge [--older-than-days N] [--all]   保留策略清理
 ```
 GET  /api/v1/overview                          仪表盘汇总
 GET  /api/v1/agents | /{id} | /{id}/mcp         Agent 资产与详情
+GET  /api/v1/agents/{id}/claims|coverage|relations     证据、覆盖与关系
 POST /api/v1/discovery/scan                     发起扫描
-GET  /api/v1/events | /events/stats | /events/stream   事件查询（before_id 游标分页）与 SSE 实时流
+GET  /api/v1/discovery/scan/status              当前扫描是否在运行（页面刷新后仍可判断）
+GET  /api/v1/events | /{id} | /events/stats | /events/timeseries | /events/stream
+                                                事件查询（before_id/after_id 游标）、趋势与 SSE
+GET  /api/v1/attention                          待关注事项 API（当前控制台未展示）
 GET  /api/v1/policies | PUT /{id} | POST /reload        策略查询与覆盖
 GET  /api/v1/alerts | PATCH /{id}               告警
 GET  /api/v1/telemetry/status | /audit-rules    通道状态与 auditd 规则模板
@@ -111,10 +128,18 @@ POST /internal/v1/hooks/decide                  Hook 决策（内部控制接口
 
 ## 数据模型
 
-`scan_tasks` / `assets` / `asset_snapshots` / `evidence`（发现）；
-`agent_assets` / `agent_instances` / `agent_sessions`（Agent 资产与运行实例）；
+`scan_tasks`（扫描代次）；
+`entities` / `entity_keys` / `entity_aliases` / `entity_attributes` / `entity_locations`（canonical 资产身份与属性）；
+`entity_snapshots` / `observations` / `claims` / `claim_evidence`（状态投影与证据账本）；
+`components` / `component_relations`（组件依赖图）；
+`agent_instances` / `agent_sessions`（运行实例与 Hook 会话）；
 `behavior_events`（统一行为事件，`source` 区分通道）；
-`security_policies` / `security_alerts`（策略覆盖与告警）。
+`security_policies` / `security_alerts`（策略覆盖与告警）；
+`coverage_scopes` / `coverage_scope_*` / `removal_candidates`（覆盖与缺席候选）。
+
+V1.2 迁移后，旧的 `assets` / `asset_snapshots` / `evidence` / `agent_assets` / `applications` / `application_components`
+已删除；数据已进入上述 canonical 表，旧表内容另存于 `data/backups/legacy-tables-*.json.gz`。
+`entity_aliases` 永久保留，用于历史事件/告警的只读 ID 桥。
 
 - 资产身份与 PID 无关；实例身份含启动时间（Windows 会复用 PID）。
 - 事件只存元数据与脱敏摘要：不含对话内容、文件内容与凭据原文。
@@ -123,6 +148,7 @@ POST /internal/v1/hooks/decide                  Hook 决策（内部控制接口
 ## 环境变量（摘要）
 
 `AGENT_DETECTOR_DB`（数据库路径）、`_HOST` / `_PORT`（监听地址，默认 127.0.0.1:8787）、
+`CONSOLE_UI`（保留变量；当前只提供 `next` React 控制台）、
 `_HOOK_TOKEN` / `_HOOK_TOKEN_FILE`、`_HOOK_FAILURE_MODE`（block|allow）、`_HOOK_TIMEOUT`、`_POLICY_DIR`、
 `_AGENTS_FILE`、`_SYSMON_CHANNEL`、`_ALERT_RISK_LEVEL`、`_RULES_DIR`、`_BEHAVIOR_RULES_DIR`、
 `_AUDIT_LOG`、`_TETRA_LOG`（Tetragon JSON 导出文件，默认 `/var/log/tetragon/events.json`）、
@@ -147,7 +173,8 @@ POST /internal/v1/hooks/decide                  Hook 决策（内部控制接口
 [policy.md](docs/policy.md) · [rules.md](docs/rules.md)（检测规则） · [behavior.md](docs/behavior.md)（网络调用观察） ·
 [syscall-monitoring.md](docs/syscall-monitoring.md)（系统行为监测） ·
 [ebpf-monitoring.md](docs/ebpf-monitoring.md)（eBPF/Tetragon 通道） ·
-[docker-discovery.md](docs/docker-discovery.md)（容器发现）
+[docker-discovery.md](docs/docker-discovery.md)（容器发现） ·
+[web-console-contract.md](docs/web-console-contract.md)（Web 控制台 API 契约）
 
 ## 测试
 

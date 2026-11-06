@@ -17,6 +17,7 @@ import hashlib
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agent_detector.discovery.sources.agents import LoadedMatrix, load_agent_matrix
@@ -36,7 +37,10 @@ from agent_detector.core.models import (AgentInstance, AgentInventoryItem, Detec
 from agent_detector.interception.hooks.installer import inspect as inspect_hook
 from agent_detector.interception.hooks.registry import get_adapter
 from agent_detector.core.security import redact
-from agent_detector.storage import AgentInventoryRepository, ApplicationRepository
+from agent_detector.storage import AgentInventoryRepository
+from agent_detector.storage.identity_repository import IdentityRepository
+from agent_detector.storage.models import (AgentInstanceRow, EntityAttributeRow,
+                                           EntityLocationRow)
 
 # Where our own hook entry is expected relative to a home directory; used to
 # tell "never installed" from "was installed and disappeared".
@@ -67,7 +71,11 @@ def protection_for(hook_state: HookState, asset_states: set[AssetState],
 
 
 class InventoryBuilder:
-    """Turns scan results into the agent_assets / agent_instances tables."""
+    """Turns scan results into canonical entities/instances.
+
+    Detector ids (``asset_id``) stay internal here: identity shadowing maps them
+    to ``entity_id`` before anything is persisted or reported.
+    """
 
     def __init__(self, *, home: Path | None = None, matrix: LoadedMatrix | None = None,
                  telemetry_sources: tuple[str, ...] = ("netmon",),
@@ -95,6 +103,10 @@ class InventoryBuilder:
         # P0-B: absence candidates recorded by the stale verification; the
         # scan coordinator persists them after apply_scan returns.
         self.removal_candidates: list[dict] = []
+        # Entities this scan could not check at all (docker engine unreachable,
+        # rule crashed). The projection must not fall back to older evidence
+        # for them, otherwise a long-gone container keeps reading RUNNING.
+        self.unverified: dict[str, str] = {}
         self._coverage = None
 
     def refresh_mcp(self) -> None:
@@ -123,6 +135,7 @@ class InventoryBuilder:
         """
         repository = AgentInventoryRepository(session)
         self.removal_candidates = []
+        self.unverified = {}
         self._coverage = coverage
         self.refresh_mcp()
         processes = {proc.pid: proc for proc in facts.processes}
@@ -147,7 +160,8 @@ class InventoryBuilder:
             container = container_links.get(asset.asset_id)
             item = self._inventory_item(asset, agent_type, entry, link=link,
                                         container=container)
-            repository.upsert_asset(item)
+            # Canonical attributes/locations are written by write_scan_evidence
+            # after identity shadow; this builder only constructs instances.
             seen_asset_ids.add(asset.asset_id)
             instances.extend(self._instances(asset, processes, agent_type,
                                              container=container))
@@ -168,44 +182,21 @@ class InventoryBuilder:
                       seen_asset_ids: set[str], app_links: dict[str, dict],
                       failed_detectors: tuple[str, ...] | set[str],
                       docker_context: dict | None = None) -> None:
-        """Re-verify assets that did not show up in this scan (重扫复核).
-
-        Four verification rules, one per asset kind:
-
-        * 终端 agent (client rule): the scan already ran the rule's
-          install/config probes, so absence from the results means the
-          probes found nothing — removed. Exception: the detector itself
-          errored this scan, in which case absence proves nothing.
-        * 自建 agent (framework asset with an app link): re-check the
-          application on disk — project dir gone → hard delete (user
-          decision: deleted agents must not linger); **venv gone or the
-          framework's packages no longer installed → hard delete too**
-          (user decision 2026-10-23: 空壳目录不算 agent 资产); deps still
-          installed but no live process → inactive. Only *installed*
-          evidence counts — a pyproject declaration alone does not keep
-          an asset alive.
-        * Sighting-only assets (process sightings with no app link): their
-          whole existence claim was the process; gone → removed.
-        * 容器资产 (container_id set): the host-path rules above do not
-          apply — project roots are container-internal and unreachable
-          without the daemon. The Docker channel's own result is the
-          verdict: container gone → hard delete; deep-scanned this round
-          but the asset did not come back → the framework left the
-          container → hard delete (宿主"依赖已卸载"的容器等价); container
-          present but not deep-scanned → inactive (no verdict possible).
-          When the docker channel failed or was disabled, container assets
-          get no verdict at all — same guard as a crashed detector.
-        """
+        """Re-verify canonical entities that did not appear in this scan."""
         from agent_detector.discovery.sources.frameworks import rule_matches
         docker = docker_context or {}
         docker_failed = bool(docker.get("failed"))
         containers_seen = set(docker.get("containers_seen") or ())
         candidates_seen = set(docker.get("candidates_seen") or ())
-        applications = ApplicationRepository(session)
-        apps_by_id = {app["app_id"]: app
-                      for app in applications.all_for_verification()}
         failed = {name.replace("-", "_") for name in failed_detectors}
         frameworks_failed = "frameworks" in failed
+
+        identities = IdentityRepository(session)
+        seen_entities = {
+            entity_id
+            for asset_id in seen_asset_ids
+            if (entity_id := identities.resolve_alias(asset_id))
+        }
 
         docker_scope_key = docker.get("scope_key") or "local"
         engine_required = (("docker_engine_enumeration", docker_scope_key,
@@ -217,21 +208,18 @@ class InventoryBuilder:
                                "docker_engine_enumeration", docker_scope_key,
                                "container_presence"))
 
-        unseen_framework: dict[str, list[dict]] = {}
-        for row in repository.list_assets(include_removed=True):
-            if row["asset_id"] in seen_asset_ids:
+        for attr in session.scalars(select(EntityAttributeRow).where(
+                EntityAttributeRow.inventory_kind == "agent")):
+            if attr.entity_id in seen_entities:
                 continue
-            if row.get("container_id"):
+            if attr.container_id:
                 if docker_failed:
-                    continue  # docker channel silent: no verdict for containers
-                container_id = row["container_id"]
+                    self._mark_unverified(
+                        attr.entity_id, "容器状态：docker 引擎本轮不可达")
+                    continue
+                container_id = attr.container_id
                 if legacy_delete_enabled():
-                    # Preserve the pre-P0-B verdict exactly when opted in.
-                    if container_id not in containers_seen \
-                            or container_id in candidates_seen:
-                        repository.delete_asset(row["asset_id"])
-                    else:
-                        repository.set_status(row["asset_id"], "inactive")
+                    attr.status = "inactive"
                     continue
                 deep_status = (self._coverage.predicate_status(
                     "container_deep_scan", container_id, "component_presence")
@@ -246,125 +234,80 @@ class InventoryBuilder:
                     required = engine_required + (
                         ("container_deep_scan", container_id,
                          "component_presence"),)
-                self._record_absence(
-                    repository, row["asset_id"], predicate="container_presence",
+                self._record_entity_absence(
+                    attr, predicate="container_presence",
                     required_scopes=required, verdict=verdict.verdict,
                     reason=verdict.reason, entity_kind="container")
                 continue
-            if row["agent_type"].replace("-", "_") in failed:
-                continue  # its detector crashed: absence proves nothing
-            is_framework = row["agent_type"] in self._framework_ids and row.get("app_id")
-            if is_framework and frameworks_failed:
-                continue  # dependency re-check impossible this scan: no verdict
-            if is_framework:
-                unseen_framework.setdefault(row["app_id"], []).append(row)
-            else:
-                paths = list(row.get("config_paths") or [])
-                if row.get("executable"):
-                    paths.append(row["executable"])
-                verdict = reconfirm_paths(paths)
-                self._record_absence(
-                    repository, row["asset_id"], predicate="product_presence",
-                    required_scopes=self._product_required_scopes(row["agent_type"]),
-                    verdict=verdict.verdict, reason=verdict.reason,
-                    entity_kind="product", legacy_delete=False)
-
-        seen_apps = {link.get("app_id") for link in app_links.values()
-                     if link.get("app_id")}
-        for app_id, rows in unseen_framework.items():
-            app = apps_by_id.get(app_id)
-            root_path = app.get("root_path") if app else None
-            root_verdict = reconfirm_application(root_path)
-            if app is None or root_verdict.verdict == ABSENT:
-                for row in rows:
-                    self._record_absence(
-                        repository, row["asset_id"],
-                        predicate="component_presence",
+            if attr.agent_type.replace("-", "_") in failed:
+                self._mark_unverified(
+                    attr.entity_id, f"产品规则 {attr.agent_type} 本轮失败")
+                continue
+            location = session.get(EntityLocationRow, attr.entity_id)
+            if location is not None:
+                if frameworks_failed and attr.agent_type in self._framework_ids:
+                    self._mark_unverified(
+                        attr.entity_id, "自建框架扫描本轮失败")
+                    continue
+                root_verdict = reconfirm_application(location.root_path)
+                if root_verdict.verdict == ABSENT:
+                    self._record_entity_absence(
+                        attr, predicate="component_presence",
                         required_scopes=project_required,
                         verdict=root_verdict.verdict,
-                        reason=root_verdict.reason,
-                        entity_kind="application", legacy_delete=True)
-                self._record_application_absence(
-                    applications, app_id, required_scopes=project_required,
-                    verdict=root_verdict.verdict, reason=root_verdict.reason)
-                continue
-            installed = self._installed_dependencies(app)
-            if installed is None:
-                # environment not re-checkable (system python): path verdict only
-                for row in rows:
-                    repository.set_status(row["asset_id"], "inactive")
-                applications.set_status(app_id, "inactive")
-                continue
-            for row in rows:
-                rule = self._framework_rules.get(row["agent_type"])
+                        reason=root_verdict.reason, entity_kind="application")
+                    continue
+                app = {
+                    "app_id": attr.entity_id,
+                    "root_path": location.root_path,
+                    "environment_path": location.environment_path,
+                    "runtime": location.runtime,
+                }
+                installed = self._installed_dependencies(app)
+                if installed is None:
+                    attr.status = "inactive"
+                    continue
+                rule = self._framework_rules.get(attr.agent_type)
                 if rule is not None and not rule_matches(rule, installed):
-                    self._record_absence(
-                        repository, row["asset_id"],
-                        predicate="component_presence",
+                    self._record_entity_absence(
+                        attr, predicate="component_presence",
                         required_scopes=project_required, verdict=ABSENT,
-                        reason=f"installed packages no longer match {row['agent_type']}",
-                        entity_kind="application", legacy_delete=True)
+                        reason=f"installed packages no longer match {attr.agent_type}",
+                        entity_kind="application")
                 else:
-                    repository.set_status(row["asset_id"], "inactive")
-            if installed:
-                if app_id not in seen_apps:
-                    applications.set_status(app_id, "inactive")
-            else:
-                self._record_application_absence(
-                    applications, app_id, required_scopes=project_required,
-                    verdict=ABSENT,
-                    reason="no installed AI dependencies remain")
+                    attr.status = "inactive"
+                continue
+            try:
+                import json
+                paths = list(json.loads(attr.config_paths_json or "[]"))
+            except ValueError:
+                paths = []
+            if attr.executable:
+                paths.append(attr.executable)
+            verdict = reconfirm_paths(paths)
+            self._record_entity_absence(
+                attr, predicate="product_presence",
+                required_scopes=self._product_required_scopes(attr.agent_type),
+                verdict=verdict.verdict, reason=verdict.reason,
+                entity_kind="product")
 
-        for app_id, app in apps_by_id.items():
-            if app_id in seen_apps or app_id in unseen_framework:
-                continue
-            container_id = app.get("container_id")
-            if container_id:
-                # Container application with no asset rows re-seen: the asset
-                # verdicts above already handled the assets; here the
-                # application row follows the container, not the host path.
-                if docker_failed:
-                    continue
-                if container_id in containers_seen:
-                    # 容器在而框架资产未再现：可能仅剩 SDK 依赖，置 inactive；
-                    # 依赖彻底清空的容器由下一扫描的 upsert 语义自然重建或维持。
-                    applications.set_status(app_id, "inactive")
-                    continue
-                verdict = reconfirm_container(
-                    container_id, engine_complete=engine_complete,
-                    containers_seen=containers_seen,
-                    candidates_seen=candidates_seen,
-                    deep_scan_status=(self._coverage.predicate_status(
-                        "container_deep_scan", container_id,
-                        "component_presence") if self._coverage is not None
-                        else None))
-                self._record_application_absence(
-                    applications, app_id, required_scopes=engine_required,
-                    verdict=verdict.verdict, reason=verdict.reason)
-                continue
-            if frameworks_failed:
-                continue
-            root_verdict = reconfirm_application(app.get("root_path"))
-            if root_verdict.verdict == ABSENT:
-                self._record_application_absence(
-                    applications, app_id, required_scopes=project_required,
-                    verdict=ABSENT, reason=root_verdict.reason)
-                continue
-            installed = self._installed_dependencies(app)
-            if installed is None or installed:
-                applications.set_status(app_id, "inactive")
-            else:
-                self._record_application_absence(
-                    applications, app_id, required_scopes=project_required,
-                    verdict=ABSENT,
-                    reason="no installed AI dependencies remain")
+        active = {attr.entity_id for attr in session.scalars(
+            select(EntityAttributeRow).where(
+                EntityAttributeRow.status == "active"))}
+        for instance in session.scalars(select(AgentInstanceRow)):
+            if instance.entity_id not in active and instance.status == "running":
+                instance.status = "stopped"
+        # Unverified entities keep their attributes but their instances were
+        # not observed this round; "running" would be an assumption.
+        if self.unverified:
+            for instance in session.scalars(select(AgentInstanceRow).where(
+                    AgentInstanceRow.entity_id.in_(list(self.unverified)),
+                    AgentInstanceRow.status == "running")):
+                instance.status = "unverified"
 
-        # Verdicts are in: removed/inactive assets have no live process by
-        # definition, so their instance rows must not stay "running" (they
-        # feed the dashboard's 运行中 count — leaving them produces ghost
-        # 运行中 entries). Assets skipped over a crashed detector keep both
-        # their active status and their instances.
-        repository.stop_instances_of_unrunnable_assets()
+    def _mark_unverified(self, entity_id: str, reason: str) -> None:
+        """Record that this run could not check the entity (no absence proof)."""
+        self.unverified.setdefault(entity_id, reason)
 
     # -- P0-B absence helpers ------------------------------------------------
 
@@ -396,59 +339,24 @@ class InventoryBuilder:
         return tuple((scope.scope_type, scope.scope_key, "product_presence")
                      for scope in scopes)
 
-    def _record_absence(self, repository: AgentInventoryRepository, asset_id: str,
-                        *, predicate: str,
-                        required_scopes: tuple[tuple[str, str, str], ...],
-                        verdict: str, reason: str, entity_kind: str,
-                        legacy_delete: bool = True) -> None:
-        """Archive/mark an unseen asset; never deletes unless legacy mode is on."""
+    def _record_entity_absence(self, attr: EntityAttributeRow, *,
+                               predicate: str,
+                               required_scopes: tuple[tuple[str, str, str], ...],
+                               verdict: str, reason: str,
+                               entity_kind: str) -> None:
+        """Archive a canonical entity; never hard-deletes it."""
+        attr.status = "inactive"
         if legacy_delete_enabled():
-            if legacy_delete:
-                repository.delete_asset(asset_id)
-            else:
-                repository.set_status(asset_id, "removed")
             return
-        if verdict == PRESENT:
-            repository.set_status(asset_id, "inactive")
-            return
-        repository.set_status(asset_id, "inactive")
         if self._coverage is None:
-            return  # no coverage means no negative-evidence record at all
-        if verdict == ABSENT \
-                and not self._coverage_complete(required_scopes):
-            return  # incomplete coverage never yields a removal candidate
+            return
+        if verdict == ABSENT and not self._coverage_complete(required_scopes):
+            return
         self.removal_candidates.append({
-            "asset_id": asset_id,
+            "asset_id": attr.entity_id,
+            "entity_id": attr.entity_id,
             "entity_kind": entity_kind,
             "predicate": predicate,
-            "status": ("CONFIRMED_ABSENT" if verdict == ABSENT
-                       else "UNVERIFIED"),
-            "reason": reason,
-            "coverage_refs": [f"{scope_type}:{scope_key}:{predicate_name}"
-                              for scope_type, scope_key, predicate_name
-                              in required_scopes],
-        })
-
-    def _record_application_absence(self, applications: ApplicationRepository,
-                                    app_id: str, *,
-                                    required_scopes: tuple[tuple[str, str, str], ...],
-                                    verdict: str, reason: str) -> None:
-        if legacy_delete_enabled():
-            applications.delete_application(app_id)
-            return
-        if verdict == PRESENT:
-            applications.set_status(app_id, "inactive")
-            return
-        applications.set_status(app_id, "inactive")
-        if self._coverage is None:
-            return
-        if verdict == ABSENT \
-                and not self._coverage_complete(required_scopes):
-            return
-        self.removal_candidates.append({
-            "asset_id": app_id,
-            "entity_kind": "application",
-            "predicate": "application_presence",
             "status": ("CONFIRMED_ABSENT" if verdict == ABSENT
                        else "UNVERIFIED"),
             "reason": reason,

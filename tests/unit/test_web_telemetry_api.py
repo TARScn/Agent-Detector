@@ -65,7 +65,9 @@ def seeded(services):
     with Session(services.engine) as session:
         session.add(BehaviorEventRow(
             observed_at="2026-10-19T00:00:00+00:00", source="auditd", agent_label="claude",
-            asset_id="claude--abc", flow_id="auditd-1", upstream_host="", protocol="SYS",
+            asset_id="claude--abc", actor_asset_id="claude--abc",
+            actor_entity_id="claude--abc", flow_id="auditd-1",
+            upstream_host="", protocol="SYS",
             event_type="proc.exec", operation="SCRIPT_EXEC", confidence="high", endpoint="",
             target="/home/u/agent-lab/train.py", pid=4242, ppid=4000, process_name="python3",
             result="success", risk_level="medium", decision="audit",
@@ -180,7 +182,7 @@ def test_event_feed_pages_backwards_with_a_cursor(telemetry_client, services):
 def test_agent_scoped_event_query(telemetry_client, seeded):
     payload = telemetry_client.get("/api/v1/agents/claude--abc/events").json()
     assert len(payload["items"]) == 1
-    assert payload["items"][0]["asset_id"] == "claude--abc"
+    assert payload["items"][0]["entity_id"] == "claude--abc"
 
 
 def test_sse_stream_sends_the_initial_tail_then_keeps_alive(telemetry_client, seeded):

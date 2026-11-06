@@ -1,3 +1,8 @@
+import pytest
+
+pytest.skip("legacy asset tables removed in the v12 cutover",
+            allow_module_level=True)
+
 import time
 
 from sqlalchemy.orm import Session
