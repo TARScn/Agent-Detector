@@ -14,7 +14,13 @@ from sqlalchemy import select
 from agent_detector.aggregation.evidence_ledger import (EvidenceLedger,
                                                         running_claim_valid_to,
                                                         static_claim_valid_to)
-from agent_detector.aggregation.status_projection import project_entity
+from agent_detector.aggregation.state_resolver import (ABSENT, FAILED,
+                                                       NOT_CHECKED, PRESENT,
+                                                       ScopeRef,
+                                                       entity_context,
+                                                       invalidate_on_absence,
+                                                       resolve)
+from agent_detector.aggregation.status_projection import write_resolved
 from agent_detector.core.enums import AssetState, AssetType, HookState
 from agent_detector.core.models import DetectedAsset
 from agent_detector.identity.entity import legacy_identity_for_asset
@@ -164,7 +170,12 @@ def _write_canonical_inventory(session, assets: list[DetectedAsset],
         entity_id = entity_by_asset.get(asset.asset_id)
         if not entity_id:
             continue
-        item = items.get(asset.asset_id) or {}
+        # Only Agent-level assets own an inventory row. Services (LLM/MCP) and
+        # application bundles are evidence, not list entries; writing them
+        # here would smuggle them into the Agent list as inventory_kind=agent.
+        item = items.get(asset.asset_id)
+        if item is None:
+            continue
         attr = session.get(EntityAttributeRow, entity_id)
         if attr is None:
             attr = EntityAttributeRow(entity_id=entity_id)
@@ -179,9 +190,15 @@ def _write_canonical_inventory(session, assets: list[DetectedAsset],
         attr.version = asset.version.value
         attr.version_source = asset.version.source.value
         attr.origin = "docker" if docker else "host"
-        attr.container_id = (item.get("container_id")
-                             or (asset.identity_scope
-                                 if asset.scope_kind == "container" else None))
+        # A compose aggregate has no single container id of its own: keep the
+        # primary container recorded earlier instead of erasing the only key
+        # the container branch could later re-verify.
+        container_id = item.get("container_id")
+        if not container_id and asset.scope_kind == "container":
+            container_id = asset.identity_scope
+        if not container_id and docker:
+            container_id = attr.container_id
+        attr.container_id = container_id
         attr.executable = asset.executable
         attr.config_paths_json = json.dumps(asset.config_paths,
                                             ensure_ascii=False)
@@ -223,14 +240,48 @@ def _write_canonical_inventory(session, assets: list[DetectedAsset],
             stats["instance_refs"] = stats.get("instance_refs", 0) + 1
 
 
+def _write_presence_claim(ledger: EvidenceLedger, *, scan_id: int,
+                          entity_id: str, scope_key: str, presence: str,
+                          evidence_class: str, method: str,
+                          source_ref: str,
+                          coverage_scope_id: int | None = None) -> str:
+    """PRESENT/ABSENT are per-run observations, not durable state claims."""
+    now = utc_now_iso()
+    uid = f"scan:{scan_id}:{entity_id}:entity_presence:{presence}"
+    observation_id = ledger.record_observation(
+        source="discovery", source_event_uid=uid, scope_key=scope_key,
+        fact_type="entity_presence",
+        payload={"entity_id": entity_id, "presence": presence,
+                 "source_ref": source_ref},
+        observed_at=now, collection_run_id=scan_id)
+    return ledger.add_claim(
+        subject_ref=entity_id, predicate="entity_presence", object_ref="entity",
+        polarity=("support" if presence == PRESENT else "refute"),
+        evidence_class=evidence_class, verification_method=method,
+        rule_id="", rule_digest="", rule_generation=scan_id,
+        collection_run_id=scan_id, coverage_scope_id=coverage_scope_id,
+        observed_at=now, valid_from=now, valid_to=static_claim_valid_to(),
+        observation_id=observation_id)
+
+
+def _snapshot_hook_state(entity_hook: dict[str, set[str]],
+                         ledger: EvidenceLedger, entity_id: str) -> str:
+    states = entity_hook.get(entity_id)
+    if states:
+        hook_state = next((state for state in _HOOK_ORDER if state in states),
+                          HookState.UNKNOWN.value)
+        return _SNAPSHOT_HOOK_STATE.get(hook_state, "UNKNOWN")
+    previous = ledger.latest_snapshot(entity_id)
+    return previous.hook_state if previous is not None else "UNKNOWN"
+
+
 def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
                         inventory: list[dict], coverage_summary: dict,
                         rule_digests: dict[str, str],
                         framework_ids: set[str], host_key: str,
                         engine_key: str, docker_scope_key: str,
                         coverage_scope_ids: dict[tuple[str, str], int] | None = None,
-                        removal_candidates: list[dict] | None = None,
-                        unverified: dict[str, str] | None = None,
+                        observations: list[dict] | None = None,
                         coverage=None
                         ) -> dict:
     ledger = EvidenceLedger(session)
@@ -239,22 +290,12 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
     inventory_by_asset = {item["asset_id"]: item for item in inventory}
     scope_ids = coverage_scope_ids or {}
     entity_hook: dict[str, set[str]] = {}
-    entity_removal: dict[str, str] = {}
     entity_by_asset: dict[str, str] = {}
-    for candidate in removal_candidates or ():
-        asset_id = str(candidate.get("asset_id") or "")
-        entity_id = identities.resolve_alias(asset_id) if asset_id else None
-        if not entity_id:
-            continue
-        verdict = ("CONFIRMED" if candidate.get("status") == "CONFIRMED_ABSENT"
-                   else "CANDIDATE")
-        if entity_removal.get(entity_id) != "CONFIRMED":
-            entity_removal[entity_id] = verdict
     seen_entities: set[str] = set()
     active_components: dict[str, set[str]] = {}
     entity_container_ids: dict[str, set[str]] = {}
     entity_host_scoped: set[str] = set()
-    observations = 0
+    observations_count = 0
     claims = 0
     stats: dict = {}
     running_valid_to = running_claim_valid_to()
@@ -296,7 +337,18 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
                     else "scan_rule"),
             asset=asset, rule_digests=rule_digests,
             coverage_scope_id=coverage_id, valid_to=static_valid_to)
-        observations += 1
+        observations_count += 1
+        claims += 1
+
+        # This scan saw the entity: record presence for this generation.
+        _write_presence_claim(
+            ledger, scan_id=scan_id, entity_id=entity_id, scope_key=scope_key,
+            presence=PRESENT,
+            evidence_class=("E3" if asset.scope_kind in ("compose", "container")
+                            or asset.scope_kind == "project" else "E2"),
+            method="scan_rule", source_ref=asset.asset_id,
+            coverage_scope_id=coverage_id)
+        observations_count += 1
         claims += 1
 
         for state in sorted(asset.states, key=lambda item: item.value):
@@ -316,7 +368,7 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
                                           relation_type="DEPENDS_ON",
                                           status="confirmed")
                     active_components.setdefault(entity_id, set()).add(key)
-                observations += 1
+                observations_count += 1
                 claims += 1
             elif state is AssetState.CONFIGURED:
                 predicate = ("component_configured" if is_component
@@ -335,7 +387,7 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
                                           relation_type="DECLARES",
                                           status="candidate")
                     active_components.setdefault(entity_id, set()).add(key)
-                observations += 1
+                observations_count += 1
                 claims += 1
             elif state is AssetState.RUNNING:
                 if is_component:
@@ -354,7 +406,7 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
                     method=method, asset=asset, rule_digests=rule_digests,
                     coverage_scope_id=coverage_id,
                     valid_to=running_valid_to)
-                observations += 1
+                observations_count += 1
                 claims += 1
             elif state is AssetState.EXECUTION_CONFIRMED:
                 _write_claim(
@@ -364,7 +416,7 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
                     method="execution_evidence", asset=asset,
                     rule_digests=rule_digests,
                     coverage_scope_id=coverage_id, valid_to=static_valid_to)
-                observations += 1
+                observations_count += 1
                 claims += 1
 
         # Capability tags: conservative minimum evidence sets.
@@ -392,7 +444,7 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
                         else "capability_rule"),
                 asset=asset, rule_digests=rule_digests,
                 coverage_scope_id=coverage_id, valid_to=static_valid_to)
-            observations += 1
+            observations_count += 1
             claims += 1
 
         if hook_state not in ("", HookState.UNKNOWN.value,
@@ -405,7 +457,7 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
                 method="hook_config", asset=asset,
                 rule_digests=rule_digests, coverage_scope_id=coverage_id,
                 valid_to=static_valid_to)
-            observations += 1
+            observations_count += 1
             claims += 1
         entity_hook.setdefault(entity_id, set()).add(hook_state)
 
@@ -423,7 +475,7 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
                 components, entity_id, server_name, "MCP_SERVER", claim_id,
                 relation_type="DECLARES", status="candidate")
             active_components.setdefault(entity_id, set()).add(key)
-            observations += 1
+            observations_count += 1
             claims += 1
 
     for entity_id in sorted(seen_entities):
@@ -435,35 +487,170 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
     _write_canonical_inventory(session, assets, inventory, entity_by_asset,
                                stats)
 
+    # Presence observations from the re-confirmation loop: the only path that
+    # may conclude ABSENT for an entity this scan did not see.
+    observations_by_entity: dict[str, dict] = {}
+    for observation in observations or ():
+        asset_id = str(observation.get("asset_id") or "")
+        entity_id = (observation.get("entity_id")
+                     or (identities.resolve_alias(asset_id) if asset_id else None))
+        if not entity_id:
+            continue
+        observations_by_entity[entity_id] = observation
+        presence = str(observation.get("presence") or "").upper()
+        if presence not in (PRESENT, ABSENT):
+            continue
+        context = entity_context(session, entity_id)
+        scope_key = (engine_key if context.entity_kind in (
+            "COMPOSE_DEPLOYMENT", "CONTAINER_DEPLOYMENT") else host_key)
+        _write_presence_claim(
+            ledger, scan_id=scan_id, entity_id=entity_id, scope_key=scope_key,
+            presence=presence,
+            evidence_class=("E3" if context.entity_kind in (
+                "COMPOSE_DEPLOYMENT", "CONTAINER_DEPLOYMENT") else "E2"),
+            method="static_reconfirm", source_ref=asset_id or entity_id)
+        observations_count += 1
+        claims += 1
+
+    for entity_id, observation in observations_by_entity.items():
+        if observation.get("presence") != ABSENT:
+            continue
+        refs = [ref for ref in observation.get("required_scopes") or ()
+                if isinstance(ref, dict)]
+        confirmed = (coverage is not None and bool(refs) and all(
+            coverage.is_complete(ref.get("scope_type", ""),
+                                 ref.get("scope_key", ""),
+                                 ref.get("predicate", "")) for ref in refs))
+        if confirmed:
+            invalidate_on_absence(session, entity_id, generation_id=scan_id)
+
     for rule_id, rule_digest in rule_digests.items():
         ledger.upsert_rule_revision(rule_id, rule_digest, "packaged")
 
-    statuses: dict[str, int] = {}
-    for entity_id in sorted(seen_entities | set(entity_removal)):
-        states = entity_hook.get(entity_id) or {HookState.UNKNOWN.value}
-        hook_state = next((state for state in _HOOK_ORDER if state in states),
-                          HookState.UNKNOWN.value)
-        snapshot_hook = _SNAPSHOT_HOOK_STATE.get(hook_state, "UNKNOWN")
-        result = project_entity(
-            session, entity_id, scan_id, hook_state=snapshot_hook,
-            coverage_summary=coverage_summary,
-            removal_verdict=entity_removal.get(entity_id, "NONE"))
-        statuses[result["agent_status"]] = statuses.get(
-            result["agent_status"], 0) + 1
-    # Entities this run could not check still get a snapshot: without one the
-    # console would fall back to the last generation and keep the old status.
-    for entity_id, reason in sorted((unverified or {}).items()):
-        if entity_id in seen_entities or entity_id in entity_removal:
+    # Resolve every entity this run has an opinion about: what was seen, what
+    # was re-confirmed, and what could not be checked (kept with a marker).
+    project_inputs: dict[str, dict] = {}
+    for entity_id in seen_entities:
+        project_inputs[entity_id] = {"marker": None, "required": None}
+    for entity_id, observation in observations_by_entity.items():
+        if entity_id in project_inputs:
             continue
-        result = project_entity(
-            session, entity_id, scan_id, coverage_summary=coverage_summary,
-            removal_verdict=entity_removal.get(entity_id, "NONE"),
-            unverified=reason)
-        statuses[result["agent_status"]] = statuses.get(
-            result["agent_status"], 0) + 1
+        presence = str(observation.get("presence") or "").upper()
+        marker = None
+        if presence not in (PRESENT, ABSENT):
+            marker = {
+                "reason": observation.get("reason") or "本轮无法复核",
+                "verification": observation.get("verification") or "FAILED",
+                "reason_code": observation.get("reason_code") or "scope_failed",
+            }
+        elif observation.get("verification") in (FAILED, NOT_CHECKED):
+            # Degraded re-confirm (T2): the enumeration proved the object is
+            # still there, but the round could not verify its interior (e.g.
+            # a docker stall). The PRESENT claim goes out as usual above; the
+            # marker carries the specific Chinese reason onto the snapshot so
+            # the console shows "容器仍在…深探测失联未复核" instead of the
+            # generic scope failure text.
+            marker = {
+                "reason": observation.get("reason") or "本轮无法复核",
+                "verification": observation.get("verification") or "FAILED",
+                "reason_code": observation.get("reason_code") or "scope_failed",
+            }
+        refs = tuple(ScopeRef(ref["scope_type"], ref["scope_key"],
+                              ref["predicate"])
+                     for ref in observation.get("required_scopes") or ()
+                     if isinstance(ref, dict))
+        project_inputs[entity_id] = {"marker": marker,
+                                     "required": refs or None}
+
+    statuses: dict[str, int] = {}
+    resolved: dict[str, object] = {}
+    for entity_id in sorted(project_inputs):
+        spec = project_inputs[entity_id]
+        snapshot_hook = _snapshot_hook_state(entity_hook, ledger, entity_id)
+        state = resolve(
+            session, entity_id=entity_id, generation_id=scan_id,
+            context=entity_context(session, entity_id), coverage=coverage,
+            coverage_summary=coverage_summary,
+            docker_scope_key=docker_scope_key,
+            required=spec["required"], unverified=spec["marker"],
+            hook_state=snapshot_hook)
+        write_resolved(session, state, generation_id=scan_id,
+                       coverage_summary=coverage_summary)
+        resolved[entity_id] = state
+        statuses[state.agent_status] = statuses.get(state.agent_status, 0) + 1
+
+    candidates = _absence_candidates(resolved, observations_by_entity)
+    _apply_instance_states(session, resolved, entity_by_asset,
+                           observations_by_entity)
+    _apply_attribute_states(session, resolved)
     session.flush()
-    return {"observations": observations, "claims": claims,
+    return {"observations": observations_count, "claims": claims,
             "entities": len(seen_entities),
-            "unverified": len(unverified or {}),
+            "resolved": len(resolved),
+            "unverified": sum(1 for state in resolved.values()
+                              if state.verification in ("FAILED", "NOT_CHECKED",
+                                                        "STALE")),
             "statuses": statuses,
+            "removal_candidates": candidates,
             **stats}
+
+
+def _absence_candidates(resolved: dict, observations: dict[str, dict]
+                        ) -> list[dict]:
+    candidates: list[dict] = []
+    for entity_id, state in sorted(resolved.items()):
+        if state.presence != ABSENT:
+            continue
+        observation = observations.get(entity_id) or {}
+        refs = [ref for ref in observation.get("required_scopes") or ()
+                if isinstance(ref, dict)]
+        candidates.append({
+            "asset_id": entity_id,
+            "entity_id": entity_id,
+            "entity_kind": observation.get("entity_kind") or "UNKNOWN",
+            "predicate": observation.get("predicate") or "entity_presence",
+            "status": ("CONFIRMED_ABSENT"
+                       if state.lifecycle == "ARCHIVED" else "UNVERIFIED"),
+            "reason": state.reason or observation.get("reason") or "",
+            "coverage_refs": [
+                f"{ref.get('scope_type')}:{ref.get('scope_key')}:"
+                f"{ref.get('predicate')}" for ref in refs],
+        })
+    return candidates
+
+
+def _apply_instance_states(session, resolved: dict, entity_by_asset: dict,
+                           observations: dict[str, dict]) -> None:
+    """Close instance rows in one place instead of trusting attr.status.
+
+    A seen entity is already handled by ``upsert_instances``. Everything else
+    follows the resolved presence: gone → stopped, not re-verifiable →
+    unverified, present but no process observed → stopped.
+    """
+    seen_entities = set(entity_by_asset.values())
+    for entity_id, state in resolved.items():
+        if entity_id in seen_entities:
+            continue
+        rows = session.scalars(select(AgentInstanceRow).where(
+            AgentInstanceRow.entity_id == entity_id,
+            AgentInstanceRow.status.in_(("running", "unverified"))))
+        for row in rows:
+            if state.presence == ABSENT:
+                row.status = "stopped"
+            elif state.presence == PRESENT:
+                row.status = ("stopped" if state.verification == "VERIFIED"
+                              else "unverified")
+            else:
+                row.status = "unverified"
+
+
+def _apply_attribute_states(session, resolved: dict) -> None:
+    for entity_id, state in resolved.items():
+        attr = session.get(EntityAttributeRow, entity_id)
+        if attr is None:
+            continue
+        if state.presence == ABSENT:
+            attr.status = "inactive"
+        elif state.presence == PRESENT:
+            attr.status = "active"
+        # UNKNOWN keeps the last recorded status: the run proved nothing.

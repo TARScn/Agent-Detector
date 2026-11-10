@@ -211,13 +211,19 @@ export function OverviewPage() {
           meta={
             <span>
               占 {percent(agents.running_confirmed, agents.total)}
-              {agents.running_unconfirmed > 0
-                ? ` · 待确认 ${agents.running_unconfirmed}`
+              {agents.needs_verification > 0
+                ? ` · 待复核 ${agents.needs_verification}`
                 : " · 已核验"}
             </span>
           }
           tone="success"
-          onClick={() => navigate("/assets?agent_status=RUNNING")}
+          onClick={() => {
+            navigate(
+              agents.needs_verification > 0
+                ? "/assets?needs_verification=true"
+                : "/assets?agent_status=RUNNING",
+            );
+          }}
         />
         <KpiCard
           icon={<NotificationIcon size="22px" />}

@@ -30,13 +30,17 @@ import {
   ENTITY_KIND,
   HOOK_STATE,
   INSTANCE_STATUS,
+  LIFECYCLE,
+  PRESENCE,
   PREDICATE_LABEL,
   PROTECTION,
+  VERIFICATION,
   number,
   relative,
   shortId,
   text,
   time,
+  unverifiedSuffix,
 } from "../lib/format";
 
 const TABS = [
@@ -71,6 +75,10 @@ export function AssetDetailPage() {
   const status = data.agent_status ? AGENT_STATUS[data.agent_status] : null;
   const protection = PROTECTION[data.protection.summary];
   const hook = HOOK_STATE[data.protection.hook_state];
+  const verification = VERIFICATION[data.verification] || VERIFICATION.STALE;
+  const presence = PRESENCE[data.presence] || PRESENCE.UNKNOWN;
+  const lifecycle = LIFECYCLE[data.lifecycle] || LIFECYCLE.ACTIVE;
+  const suffix = unverifiedSuffix(data.verification);
   const relationComponents = relations.data?.groups.components || [];
   const componentKeys = new Set(
     relationComponents.map((item) => item.component_key),
@@ -115,16 +123,25 @@ export function AssetDetailPage() {
         }
       />
       <div className="detail-tags">
-        {status ? <Tag tone={status.tone}>{status.label}</Tag> : <Tag tone="neutral">状态待确认</Tag>}
+        {status ? (
+          <Tag tone={status.tone} title={verification.label}>
+            {status.label}
+            {suffix}
+          </Tag>
+        ) : (
+          <Tag tone="neutral">状态待确认</Tag>
+        )}
         <Tag tone={protection.tone} title={data.protection.basis.reason}>
           {protection.label}
         </Tag>
         <Tag tone={hook.tone}>{hook.label}</Tag>
+        <Tag tone={presence.tone}>{presence.label}</Tag>
+        {data.lifecycle !== "ACTIVE" ? (
+          <Tag tone={lifecycle.tone}>{lifecycle.label}</Tag>
+        ) : null}
         {data.entity_alias_status !== "OK" ? (
           <Tag tone="warning">身份待复核</Tag>
         ) : null}
-        {data.removal_verdict === "CANDIDATE" ? <Tag tone="warning">移除候选</Tag> : null}
-        {data.removal_verdict === "CONFIRMED" ? <Tag tone="neutral">已确认不存在</Tag> : null}
       </div>
 
       <div className="detail-summary">
@@ -158,11 +175,14 @@ export function AssetDetailPage() {
             <SectionCard title="身份与状态">
               <KeyValue
                 items={[
-                  { label: "Agent 状态", value: status ? status.label : "状态待确认" },
+                  { label: "Agent 状态", value: `${status ? status.label : "状态待确认"}${suffix}` },
+                  { label: "存在性", value: presence.label },
+                  { label: "本轮复核", value: verification.label },
+                  { label: "判定依据", value: data.reason || data.reason_code || "—" },
                   { label: "资产类别", value: ENTITY_KIND[data.entity_kind || "UNKNOWN"] || "未知" },
                   { label: "Entity ID", value: <span className="mono">{shortId(data.entity_id, 18)}</span> },
                   { label: "身份别名", value: data.entity_alias_status },
-                  { label: "移除裁决", value: data.removal_verdict || "NONE" },
+                  { label: "上次快照", value: relative(data.snapshot_projected_at) },
                 ]}
               />
               {(data.status_basis.conflicts || []).length ? (

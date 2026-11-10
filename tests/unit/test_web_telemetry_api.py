@@ -13,12 +13,15 @@ from agent_detector.storage.models import BehaviorEventRow
 class FakeBehaviorService:
     """Stands in for the ingest service so no real channel has to run."""
 
+    MODES = ("sysmon", "auditd", "poll", "tetragon", "replay")
+
     def __init__(self):
         self.running = False
+        self.mode = "auditd"
         self.started = []
 
     def status(self):
-        return {"running": self.running, "mode": "auditd",
+        return {"running": self.running, "mode": self.mode,
                 "log_path": "/var/log/audit/audit.log", "log_readable": False,
                 "keys": ["agent_detector_exec"], "interval": 2.0,
                 "suppress_seconds": 300, "path_policy": "full", "store_argv": False,
@@ -30,10 +33,15 @@ class FakeBehaviorService:
                 "rule_count": 13, "rules_errors": [], "graph_nodes": 0, "last_error": None}
 
     def start(self, *, mode=None, log_path=None, from_start=None):
-        if self.running:
-            raise BehaviorIngestError("behavior ingest already running")
-        self.running = True
+        if mode:
+            mode = mode.lower()
+            if mode not in self.MODES or mode == "replay":
+                raise BehaviorIngestError(f"unknown behavior mode: {mode}")
+            self.mode = mode
+        # Mirrors BehaviorIngestService.start: channels are mutually
+        # exclusive, starting one silently stops the previous one.
         self.started.append((mode, log_path, from_start))
+        self.running = True
         return self.status()
 
     def stop(self):
@@ -86,14 +94,63 @@ def test_channel_status_and_behavior_lifecycle(telemetry_client):
     assert status["behavior"]["running"] is False
     assert status["behavior"]["source"] == "local"
     channels = {item["id"] for item in status["channels"]}
-    assert {"sysmon", "auditd", "tetragon", "poll", "netmon", "native_hook"} == channels
+    assert {"sysmon", "auditd", "tetragon", "poll", "netmon"} == channels
+    states = {item["id"]: item["state"] for item in status["channels"]}
+    assert states["poll"] == "STOPPED" and states["netmon"] == "STOPPED"
 
     started = telemetry_client.post("/api/v1/telemetry/behavior/start",
                                     json={"mode": "auditd"}).json()
     assert started["running"] is True
-    conflict = telemetry_client.post("/api/v1/telemetry/behavior/start", json={})
-    assert conflict.status_code == 409
+    status = telemetry_client.get("/api/v1/telemetry/status").json()
+    states = {item["id"]: item["state"] for item in status["channels"]}
+    assert states["poll"] == "STANDBY"          # available but not the active one
+
+    # Channels are mutually exclusive: starting another one switches, it does
+    # not conflict.
+    switched = telemetry_client.post("/api/v1/telemetry/behavior/start",
+                                     json={"mode": "poll"}).json()
+    assert switched["running"] is True and switched["mode"] == "poll"
+    status = telemetry_client.get("/api/v1/telemetry/status").json()
+    states = {item["id"]: item["state"] for item in status["channels"]}
+    assert states["poll"] == "RUNNING"
+
+    invalid = telemetry_client.post("/api/v1/telemetry/behavior/start",
+                                    json={"mode": "bogus"})
+    assert invalid.status_code == 409
     assert telemetry_client.post("/api/v1/telemetry/behavior/stop").json()["running"] is False
+
+
+def test_linux_channels_are_mutually_exclusive(telemetry_client, monkeypatch):
+    """On Linux the group is tetragon/auditd/poll: one RUNNING, the rest STANDBY."""
+    import agent_detector.console.api.telemetry as tel
+
+    monkeypatch.setattr(tel.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(tel, "sysmon_available",
+                        lambda channel: SimpleNamespace(available=False,
+                                                        reason="仅 Windows"))
+    monkeypatch.setattr(tel, "tetragon_available",
+                        lambda path: SimpleNamespace(available=True,
+                                                     last_write_age_seconds=1.0))
+    started = telemetry_client.post("/api/v1/telemetry/behavior/start",
+                                    json={"mode": "tetragon"}).json()
+    assert started["running"] is True and started["mode"] == "tetragon"
+    channels = {item["id"]: item
+                for item in telemetry_client.get(
+                    "/api/v1/telemetry/status").json()["channels"]}
+    assert channels["tetragon"]["state"] == "RUNNING"
+    assert channels["auditd"]["state"] == "STANDBY"
+    assert channels["poll"]["state"] == "STANDBY"
+    assert channels["sysmon"]["state"] == "UNAVAILABLE"
+
+    # auditd takes over from tetragon within one request (mutual exclusion).
+    switched = telemetry_client.post("/api/v1/telemetry/behavior/start",
+                                     json={"mode": "auditd"}).json()
+    assert switched["mode"] == "auditd" and switched["running"] is True
+    channels = {item["id"]: item
+                for item in telemetry_client.get(
+                    "/api/v1/telemetry/status").json()["channels"]}
+    assert channels["auditd"]["state"] == "RUNNING"
+    assert channels["tetragon"]["state"] == "STANDBY"
 
 
 def test_status_prefers_collector_file_when_local_idle(telemetry_client, monkeypatch):

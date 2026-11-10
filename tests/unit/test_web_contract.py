@@ -31,9 +31,11 @@ def _seed(services):
         session.add(EntitySnapshotRow(
             entity_id="ent-1", generation_id=1, agent_status="RUNNING",
             status_basis_json=json.dumps({
-                "basis_version": 2, "installed": True, "configured": True,
+                "basis_version": 3, "installed": True, "configured": True,
                 "running": True, "conflicts": ["running"], "claim_ids": {}}),
             hook_state="CONFIGURED", removal_verdict="NONE",
+            presence="PRESENT", verification="VERIFIED", lifecycle="ACTIVE",
+            last_known_status="CONFIGURED", reason_code="running_verified",
             coverage_summary_json=json.dumps({"scopes": 1, "PARTIAL": 1})))
         session.add(EntityRow(entity_id="ent-2", entity_kind="PRODUCT_INSTALL",
                               scope_key="host"))
@@ -45,7 +47,9 @@ def _seed(services):
         session.add(EntitySnapshotRow(
             entity_id="ent-2", generation_id=1, agent_status="UNKNOWN",
             status_basis_json="{}", hook_state="UNKNOWN",
-            removal_verdict="NONE", coverage_summary_json="{}"))
+            removal_verdict="NONE", presence="PRESENT",
+            verification="VERIFIED", lifecycle="ACTIVE",
+            last_known_status="UNKNOWN", coverage_summary_json="{}"))
         session.add(EntityAliasRow(old_id="asset-1", entity_id="ent-1",
                                    status="OK"))
         session.add(AgentInstanceRow(
@@ -105,6 +109,11 @@ def test_overview_exposes_contract_counts(client, services):
     assert payload["running"] == 1
     assert payload["running_confirmed"] == 1
     assert payload["running_unconfirmed"] == 0
+    assert payload["inventory_total"] == 2
+    assert payload["current_detected"] == 2
+    assert payload["confirmed_present"] == 2
+    assert payload["needs_verification"] == 0
+    assert payload["archived_total"] == 0
     assert payload["protection_summary"]["MONITOR_ONLY"] == 1
     assert payload["protection_summary"]["UNKNOWN"] == 1
     assert payload["hook_states"]["CONFIGURED"] == 1
@@ -164,12 +173,14 @@ def test_relations_endpoint_groups_components_and_endpoints(client, services):
     assert payload["groups"]["instances"][0]["pid"] == 4242
 
 
-def test_asset_list_hides_removal_verdicts_by_default(client, services):
+def test_asset_list_shows_candidates_and_hides_confirmed(client, services):
+    """WATCH (unconfirmed absence) stays visible; only confirmed-absent hides."""
     _seed(services)
     stamp = utc_now_iso()
     with Session(services.engine) as session:
-        for suffix, verdict in (("candidate", "CANDIDATE"),
-                                ("confirmed", "CONFIRMED")):
+        for suffix, verdict, lifecycle, presence, check in (
+                ("candidate", "CANDIDATE", "WATCH", "ABSENT", "NOT_CHECKED"),
+                ("confirmed", "CONFIRMED", "ARCHIVED", "ABSENT", "VERIFIED")):
             entity_id = f"ent-{suffix}"
             session.add(EntityRow(entity_id=entity_id,
                                   entity_kind="PRODUCT_INSTALL", scope_key="host"))
@@ -180,14 +191,23 @@ def test_asset_list_hides_removal_verdicts_by_default(client, services):
             session.add(EntitySnapshotRow(
                 entity_id=entity_id, generation_id=1, agent_status="UNKNOWN",
                 status_basis_json="{}", hook_state="UNKNOWN",
-                removal_verdict=verdict, coverage_summary_json="{}"))
+                removal_verdict=verdict, presence=presence,
+                verification=check, lifecycle=lifecycle,
+                coverage_summary_json="{}"))
         session.commit()
     visible = client.get("/api/v1/agents").json()
-    assert {item["entity_id"] for item in visible["items"]} == {"ent-1", "ent-2"}
-    assert visible["total"] == 2
+    assert {item["entity_id"] for item in visible["items"]} == {
+        "ent-1", "ent-2", "ent-candidate"}
+    assert visible["total"] == 3
+    watch = next(item for item in visible["items"]
+                 if item["entity_id"] == "ent-candidate")
+    assert watch["lifecycle"] == "WATCH"
     everything = client.get("/api/v1/agents?include_removed=true").json()
     assert {"ent-candidate", "ent-confirmed"} <= {
         item["entity_id"] for item in everything["items"]}
+    archived = next(item for item in everything["items"]
+                    if item["entity_id"] == "ent-confirmed")
+    assert archived["lifecycle"] == "ARCHIVED"
 
 
 def test_events_after_id_detail_stats_and_timeseries(client, services):
@@ -264,8 +284,8 @@ def test_telemetry_health_contract(client, services):
     payload = client.get("/api/v1/telemetry/status").json()
     assert payload["health"]["state"] in ("OK", "DEGRADED", "NOT_RUNNING", "UNKNOWN")
     channels = {item["id"]: item for item in payload["channels"]}
-    assert channels["native_hook"]["state"] in ("OK", "DEGRADED")
-    assert channels["poll"]["state"] in ("OK", "DOWN")
+    assert "native_hook" not in channels
+    assert channels["poll"]["state"] in ("STOPPED", "STANDBY", "RUNNING")
 
 
 def test_scan_status_is_idle_between_scans(client):

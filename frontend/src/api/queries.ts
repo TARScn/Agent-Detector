@@ -124,6 +124,25 @@ export function useTelemetry() {
   });
 }
 
+export function useChannelControl() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      control,
+      id,
+      action,
+    }: {
+      control: "monitor" | "behavior";
+      id: string;
+      action: "start" | "stop";
+    }) =>
+      control === "monitor"
+        ? api.monitorControl(action)
+        : api.behaviorControl(action, action === "start" ? id : undefined),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["telemetry"] }),
+  });
+}
+
 export function useHooks() {
   return useQuery({
     queryKey: ["hooks"],
@@ -262,6 +281,19 @@ export function useHookInstall() {
   return useMutation({
     mutationFn: ({ agentType, apply }: { agentType: string; apply: boolean }) =>
       api.hookInstall(agentType, apply),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ["hooks"] });
+      client.invalidateQueries({ queryKey: ["agents"] });
+      client.invalidateQueries({ queryKey: ["overview"] });
+    },
+  });
+}
+
+export function useHookUninstall() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ agentType, apply }: { agentType: string; apply: boolean }) =>
+      api.hookUninstall(agentType, apply),
     onSuccess: () => {
       client.invalidateQueries({ queryKey: ["hooks"] });
       client.invalidateQueries({ queryKey: ["agents"] });

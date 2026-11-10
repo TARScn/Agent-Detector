@@ -719,6 +719,10 @@ a {
   text-decoration: underline;
 }
 
+.link-button-danger {
+  color: var(--danger);
+}
+
 .back-link {
   display: inline-flex;
   align-items: center;

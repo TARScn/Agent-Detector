@@ -46,6 +46,7 @@ import queue
 import re
 import tarfile
 import threading
+import time
 from dataclasses import dataclass
 
 from requests.exceptions import Timeout as RequestsTimeout
@@ -142,6 +143,10 @@ class ContainerBrief:
     command: str = ""
     created: int = 0
     labels: dict[str, str] | None = None
+    # Image config digest from the list response (``ImageID``), free of
+    # charge. Key for the deep-probe cache; empty on old daemons/fakes,
+    # which simply bypass the cache.
+    image_id: str = ""
 
     @property
     def short_id(self) -> str:
@@ -214,16 +219,25 @@ def build_client(timeout: float):
     """Low-level APIClient from the environment (npipe on Windows, socket on
     Linux). Raises DockerUnavailable when the SDK is missing or the daemon
     does not answer — callers treat that as "no docker channel", not an error.
+
+    The SDK handshake (version negotiation) is retried once: on a starved
+    daemon it is the first call to stall, and one retry absorbs the transient
+    case without masking a genuinely dead daemon.
     """
     try:
         import docker
     except ImportError as exc:
         raise DockerUnavailable("docker SDK 未安装") from exc
-    try:
-        api = docker.from_env(timeout=timeout).api
-    except Exception as exc:  # daemon down / no pipe / bad DOCKER_HOST
-        raise DockerUnavailable(f"docker daemon 不可达: {exc}") from exc
-    return BoundedClient(api, timeout)
+    last: Exception | None = None
+    for attempt in range(2):
+        try:
+            api = docker.from_env(timeout=timeout).api
+            return BoundedClient(api, timeout)
+        except Exception as exc:  # daemon down / no pipe / bad DOCKER_HOST
+            last = exc
+            if attempt == 0:
+                time.sleep(2.0)
+    raise DockerUnavailable(f"docker daemon 不可达: {last}") from last
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +262,7 @@ def _list_all_containers_raw(client, limit: int) -> list[ContainerBrief]:
             command=str(item.get("Command") or ""),
             created=int(item.get("Created") or 0),
             labels=dict(item.get("Labels") or {}),
+            image_id=str(item.get("ImageID") or ""),
         ))
     return containers
 

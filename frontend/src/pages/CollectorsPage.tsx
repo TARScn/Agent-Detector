@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { DialogPlugin, MessagePlugin } from "tdesign-react";
 import { CloseIcon, PlayCircleIcon, RefreshIcon, ServerIcon } from "tdesign-icons-react";
-import { useHookInstall, useHookPlan, useHooks, useTelemetry } from "../api/queries";
-import type { HookInstallation, HookPlanResponse } from "../api/types";
+import { useChannelControl, useHookInstall, useHookPlan, useHookUninstall, useHooks, useTelemetry } from "../api/queries";
+import type { ChannelView, HookInstallation, HookPlanResponse } from "../api/types";
 import {
   EmptyState,
   ErrorState,
@@ -27,14 +27,65 @@ export function CollectorsPage() {
   const hooks = useHooks();
   const plan = useHookPlan();
   const install = useHookInstall();
+  const uninstall = useHookUninstall();
+  const control = useChannelControl();
   const [preview, setPreview] = useState<HookPlanResponse | null>(null);
+  const [previewMode, setPreviewMode] = useState<"install" | "uninstall">("install");
 
   const health = telemetry.data?.health;
   const healthSpec = HEALTH_STATE[health?.state || "UNKNOWN"];
 
+  const activeBehavior = (telemetry.data?.channels || []).find(
+    (channel) => channel.control === "behavior" && channel.state === "RUNNING",
+  );
+
+  const startChannel = (channel: ChannelView) => {
+    const controlKind = channel.control as "monitor" | "behavior";
+    const doStart = () =>
+      control.mutate(
+        { control: controlKind, id: channel.id, action: "start" },
+        {
+          onSuccess: () =>
+            MessagePlugin.success(
+              activeBehavior && activeBehavior.id !== channel.id && controlKind === "behavior"
+                ? `已切换至 ${channel.name}`
+                : "已启动",
+            ),
+          onError: (error) => MessagePlugin.error((error as Error).message),
+        },
+      );
+    if (controlKind === "behavior" && activeBehavior && activeBehavior.id !== channel.id) {
+      const dialog = DialogPlugin.confirm({
+        header: "切换行为通道",
+        body: `行为通道同时只能运行一个：启动 ${channel.name} 将先停止 ${activeBehavior.name}。`,
+        confirmBtn: "切换",
+        cancelBtn: "取消",
+        onConfirm: () => {
+          dialog.hide();
+          doStart();
+        },
+        onCancel: () => dialog.hide(),
+        onClose: () => dialog.hide(),
+      });
+      return;
+    }
+    doStart();
+  };
+
+  const stopChannel = (channel: ChannelView) => {
+    control.mutate(
+      { control: channel.control as "monitor" | "behavior", id: channel.id, action: "stop" },
+      {
+        onSuccess: () => MessagePlugin.success("已停止"),
+        onError: (error) => MessagePlugin.error((error as Error).message),
+      },
+    );
+  };
+
   const showPlan = async (hook: HookInstallation) => {
     try {
       const result = await plan.mutateAsync(hook.agent_type);
+      setPreviewMode("install");
       setPreview(result);
     } catch (error) {
       MessagePlugin.error((error as Error).message);
@@ -42,7 +93,7 @@ export function CollectorsPage() {
   };
 
   const applyInstall = (hook: HookInstallation) => {
-    DialogPlugin.confirm({
+    const dialog = DialogPlugin.confirm({
       header: "确认安装 Hook",
       body: `将向 ${hook.config_path} 写入 Agent Detector 条目，并在写入前备份。是否继续？`,
       confirmBtn: "安装",
@@ -50,12 +101,47 @@ export function CollectorsPage() {
       onConfirm: async () => {
         try {
           const result = await install.mutateAsync({ agentType: hook.agent_type, apply: true });
+          setPreviewMode("install");
           setPreview(result);
           MessagePlugin.success(result.written ? "Hook 已安装" : "配置没有变化，未写入");
         } catch (error) {
           MessagePlugin.error((error as Error).message);
+        } finally {
+          dialog.hide();
         }
       },
+      onCancel: () => dialog.hide(),
+      onClose: () => dialog.hide(),
+    });
+  };
+
+  const applyUninstall = (hook: HookInstallation) => {
+    const dialog = DialogPlugin.confirm({
+      header: "确认卸载 Hook",
+      theme: "warning",
+      body: hook.entries
+        ? `将从 ${hook.config_path} 移除 Agent Detector 写入的 ${hook.entries} 个条目，写入前先备份。是否继续？`
+        : `没有检测到 Agent Detector 写入的条目，卸载不会修改 ${hook.config_path}。是否继续？`,
+      confirmBtn: "卸载",
+      cancelBtn: "取消",
+      onConfirm: async () => {
+        try {
+          const result = await uninstall.mutateAsync({ agentType: hook.agent_type, apply: true });
+          setPreviewMode("uninstall");
+          setPreview(result);
+          MessagePlugin.success(
+            result.written
+              ? `Hook 已卸载（移除 ${result.removed ?? 0} 个条目）`
+              : "没有本工具写入的条目，未修改配置",
+          );
+        } catch (error) {
+          MessagePlugin.error((error as Error).message);
+        } finally {
+          dialog.hide();
+        }
+      },
+      onCancel: () => dialog.hide(),
+      onClose: () => dialog.hide(),
     });
   };
 
@@ -115,9 +201,8 @@ export function CollectorsPage() {
                 <th>通道</th>
                 <th>平台</th>
                 <th>状态</th>
-                <th>运行</th>
-                <th>最近事件</th>
                 <th>说明</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -133,14 +218,26 @@ export function CollectorsPage() {
                     <td>
                       <Tag tone={spec.tone}>{spec.label}</Tag>
                     </td>
-                    <td>
-                      <Tag tone={channel.running ? "success" : "neutral"}>
-                        {channel.running ? "运行中" : "未运行"}
-                      </Tag>
-                    </td>
-                    <td className="muted">{relative(channel.last_event_at)}</td>
                     <td className="muted truncate" title={channel.detail}>
                       {channel.detail}
+                    </td>
+                    <td>
+                      {channel.control ? (
+                        <button
+                          type="button"
+                          className="link-button"
+                          disabled={control.isPending}
+                          onClick={() =>
+                            channel.state === "RUNNING"
+                              ? stopChannel(channel)
+                              : startChannel(channel)
+                          }
+                        >
+                          {channel.state === "RUNNING" ? "停止" : "启动"}
+                        </button>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
                     </td>
                   </tr>
                 );
@@ -202,6 +299,13 @@ export function CollectorsPage() {
                         >
                           安装
                         </button>
+                        <button
+                          type="button"
+                          className="link-button link-button-danger"
+                          onClick={() => applyUninstall(hook)}
+                        >
+                          卸载
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -223,7 +327,9 @@ export function CollectorsPage() {
           <aside className="drawer">
             <header className="drawer-head">
               <div>
-                <div className="eyebrow">Hook 配置预览</div>
+                <div className="eyebrow">
+                  {previewMode === "uninstall" ? "Hook 卸载结果" : "Hook 配置预览"}
+                </div>
                 <h2>{preview.agent_type}</h2>
                 <div className="secondary-line mono">{preview.config_path}</div>
               </div>
@@ -234,18 +340,27 @@ export function CollectorsPage() {
             <div className="drawer-body">
               <div className="drawer-tags">
                 <Tag tone={preview.written ? "success" : "info"}>
-                  {preview.written ? "已写入" : "仅预览"}
+                  {previewMode === "uninstall"
+                    ? preview.written
+                      ? "已卸载"
+                      : "未修改"
+                    : preview.written
+                      ? "已写入"
+                      : "仅预览"}
                 </Tag>
                 <Tag tone={preview.changed ? "warning" : "neutral"}>
                   {preview.changed ? "有变更" : "无变更"}
                 </Tag>
+                {previewMode === "uninstall" && preview.removed !== undefined ? (
+                  <Tag tone="warning">移除 {preview.removed} 个条目</Tag>
+                ) : null}
                 {preview.backup ? <Tag tone="neutral">已备份</Tag> : null}
               </div>
-              <p className="note-text mono">{preview.command}</p>
+              {preview.command ? <p className="note-text mono">{preview.command}</p> : null}
               {preview.backup ? (
                 <p className="note-text">备份文件：{preview.backup}</p>
               ) : null}
-              <h3>合并后的配置</h3>
+              <h3>{previewMode === "uninstall" ? "剩余配置" : "合并后的配置"}</h3>
               <pre className="code-block">{JSON.stringify(preview.merged, null, 2)}</pre>
             </div>
             <footer className="drawer-foot">

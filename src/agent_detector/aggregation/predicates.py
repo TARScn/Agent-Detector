@@ -35,6 +35,10 @@ _POLICIES: dict[str, PredicatePolicy] = {
         "component_running", "ttl", ("E4", "E3"), "prefer_positive"),
     "product_identity": PredicatePolicy(
         "product_identity", "static_scan", ("E3", "E2"), "prefer_positive"),
+    # Whether the entity still exists at all. Collected every run; an
+    # absence refutation only reaches the ledger when coverage allows it.
+    "entity_presence": PredicatePolicy(
+        "entity_presence", "static_scan", ("E3", "E2"), "prefer_positive"),
     "service_running": PredicatePolicy(
         "service_running", "ttl", ("E4", "E3"), "prefer_positive"),
     "agent_capability": PredicatePolicy(

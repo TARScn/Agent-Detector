@@ -13,9 +13,12 @@ import { EmptyState, ErrorState, LoadingBlock, PageHeader, Tag } from "../compon
 import {
   AGENT_STATUS,
   ENTITY_KIND,
+  LIFECYCLE,
   PROTECTION,
+  VERIFICATION,
   number,
   relative,
+  unverifiedSuffix,
 } from "../lib/format";
 
 const PAGE_SIZE = 15;
@@ -28,18 +31,29 @@ export function AssetsPage() {
   const [status, setStatus] = useState(params.get("agent_status") || "");
   const [protection, setProtection] = useState(params.get("protection") || "");
   const [alias, setAlias] = useState(params.get("alias_status") || "");
+  // 清单下拉值即 lifecycle；"ALL" 是前端哨兵（含归档的完整清单），默认在用。
+  const [lifecycle, setLifecycle] = useState(
+    params.get("lifecycle") || "ACTIVE",
+  );
 
-  const query = useMemo(
-    () => ({
+  const query = useMemo(() => {
+    const lifecycleParam = params.get("lifecycle") || "ACTIVE";
+    return {
       q: params.get("q") || undefined,
       agent_status: params.get("agent_status") || undefined,
       protection: params.get("protection") || undefined,
       alias_status: params.get("alias_status") || undefined,
+      lifecycle: lifecycleParam === "ALL" ? undefined : lifecycleParam,
+      needs_verification:
+        params.get("needs_verification") === "true" || undefined,
+      include_removed:
+        lifecycleParam === "ALL" || lifecycleParam === "ARCHIVED"
+          ? true
+          : undefined,
       limit: 500,
       offset: 0,
-    }),
-    [params],
-  );
+    };
+  }, [params]);
   const agents = useAgents(query);
   const scan = useScan();
   const scanRunning = useScanning();
@@ -65,6 +79,10 @@ export function AssetsPage() {
     if (status) next.set("agent_status", status);
     if (protection) next.set("protection", protection);
     if (alias) next.set("alias_status", alias);
+    if (lifecycle) next.set("lifecycle", lifecycle);
+    if (params.get("needs_verification") === "true") {
+      next.set("needs_verification", "true");
+    }
     setPage(1);
     setParams(next);
   };
@@ -74,6 +92,7 @@ export function AssetsPage() {
     setStatus("");
     setProtection("");
     setAlias("");
+    setLifecycle("ACTIVE");
     setPage(1);
     setParams({});
   };
@@ -138,6 +157,15 @@ export function AssetsPage() {
             <option value="AMBIGUOUS">待复核</option>
             <option value="CONFLICT">身份冲突</option>
             <option value="MISSING">未映射</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>清单</span>
+          <select value={lifecycle} onChange={(event) => setLifecycle(event.target.value)}>
+            <option value="ALL">全部</option>
+            <option value="ACTIVE">在用</option>
+            <option value="WATCH">待复核</option>
+            <option value="ARCHIVED">已归档</option>
           </select>
         </label>
         <button type="submit" className="btn btn-primary">
@@ -210,8 +238,12 @@ export function AssetsPage() {
 
 function AssetRow({ agent, onClick }: { agent: AgentRow; onClick: () => void }) {
   const status = agent.agent_status ? AGENT_STATUS[agent.agent_status] : null;
+  const verification = VERIFICATION[agent.verification] || VERIFICATION.STALE;
+  const lifecycle = LIFECYCLE[agent.lifecycle] || LIFECYCLE.ACTIVE;
   const protection = PROTECTION[agent.protection.summary];
+  const suffix = unverifiedSuffix(agent.verification);
   const attention: string[] = [];
+  if (suffix) attention.push("未复核");
   if (agent.entity_alias_status !== "OK") attention.push("身份待复核");
   if ((agent.status_basis.conflicts || []).length) attention.push("证据冲突");
   if (agent.component_count) attention.push(`组件 ${agent.component_count}`);
@@ -228,10 +260,16 @@ function AssetRow({ agent, onClick }: { agent: AgentRow; onClick: () => void }) 
       </td>
       <td>
         {status ? (
-          <Tag tone={status.tone}>{status.label}</Tag>
+          <Tag tone={status.tone} title={verification.label}>
+            {status.label}
+            {suffix}
+          </Tag>
         ) : (
           <Tag tone="neutral">状态待确认</Tag>
         )}
+        {agent.lifecycle !== "ACTIVE" ? (
+          <Tag tone={lifecycle.tone}>{lifecycle.label}</Tag>
+        ) : null}
       </td>
       <td>
         <Tag tone={protection.tone} title={agent.protection.basis.reason}>

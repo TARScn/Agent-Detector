@@ -1,108 +1,102 @@
-"""Project current claims into the four-value user-facing status."""
+"""Persist the resolved state for one entity and one scan generation.
+
+The decision itself lives in :mod:`agent_detector.aggregation.state_resolver`;
+this module only keeps the long-standing ``project_entity`` entry point and
+writes the snapshot row.
+"""
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
 from agent_detector.aggregation.evidence_ledger import EvidenceLedger
-from agent_detector.aggregation.predicates import policy
-from agent_detector.core.enums import AgentStatus
+from agent_detector.aggregation.state_resolver import (ResolvedState, ScopeRef,
+                                                       entity_context,
+                                                       removal_for, resolve)
+from agent_detector.core.enums import AgentStatus  # noqa: F401 (re-exported)
 
 
 def project_entity(session: Session, entity_id: str, generation_id: int, *,
                    hook_state: str = "UNKNOWN",
                    coverage_summary: dict | None = None,
                    removal_verdict: str = "NONE",
-                   unverified: str | None = None) -> dict:
-    """Derive RUNNING/CONFIGURED/INSTALLED/UNKNOWN and persist a snapshot.
+                   unverified: dict | str | None = None,
+                   coverage=None, docker_scope_key: str = "local",
+                   required: tuple[ScopeRef, ...] | None = None,
+                   presence_verdict: str | None = None) -> dict:
+    """Resolve and persist one entity's user-facing state.
 
     ``unverified`` marks a generation that could not check the entity at all
     (docker engine unreachable, product rule crashed). Nothing was observed,
-    so no older claim may stand in for this run: the snapshot records UNKNOWN
-    plus the reason instead of repeating a stale RUNNING.
+    so no older claim may stand in for this run: the snapshot keeps the last
+    durable status, records why it could not be re-verified, and never says
+    RUNNING.
     """
-    ledger = EvidenceLedger(session)
-    claims = [] if unverified else ledger.current_claims(entity_id)
-    by_predicate: dict[str, list] = {}
-    for claim in claims:
-        by_predicate.setdefault(claim.predicate, []).append(claim)
+    state = resolve(
+        session, entity_id=entity_id, generation_id=generation_id,
+        context=entity_context(session, entity_id), coverage=coverage,
+        coverage_summary=coverage_summary,
+        docker_scope_key=docker_scope_key, required=required,
+        presence_verdict=presence_verdict, unverified=unverified,
+        removal_verdict=removal_verdict, hook_state=hook_state)
+    return write_resolved(session, state, generation_id=generation_id,
+                          coverage_summary=coverage_summary)
 
-    conflicts: list[str] = []
 
-    def claim_state(predicate: str) -> bool | None:
-        """Tri-state: True supported, False refuted, None no evidence/conflict.
+def write_resolved(session: Session, state: ResolvedState, *,
+                   generation_id: int,
+                   coverage_summary: dict | None = None) -> dict:
+    """Persist an already-resolved state (scan_evidence resolves once)."""
+    capability_tags = _capability_tags(session, state.entity_id)
+    verdict = removal_for(state)
+    EvidenceLedger(session).upsert_snapshot(
+        entity_id=state.entity_id, generation_id=generation_id,
+        agent_status=state.agent_status, status_basis=state.basis,
+        capability_tags=capability_tags, hook_state=state.hook_state,
+        removal_verdict=verdict,
+        coverage_summary=coverage_summary,
+        presence=state.presence, verification=state.verification,
+        lifecycle=state.lifecycle, reason_code=state.reason_code,
+        last_known_status=state.last_known_status,
+        owner_scope_type=state.owner_scope_type,
+        owner_scope_key=state.owner_scope_key,
+        verified_scopes=[check.as_dict() for check in state.scope_checks])
+    return {"entity_id": state.entity_id,
+            "agent_status": state.agent_status,
+            "presence": state.presence,
+            "verification": state.verification,
+            "lifecycle": state.lifecycle,
+            "reason_code": state.reason_code,
+            "reason": state.reason,
+            "last_known_status": state.last_known_status,
+            "removal_verdict": verdict,
+            "capability_tags": capability_tags, "hook_state": state.hook_state,
+            "conflicts": state.basis.get("conflicts", [])}
 
-        The projection status keeps using the policy conflict preference; the
-        user-facing ``status_basis`` must not turn "no evidence" into False.
-        """
-        items = by_predicate.get(predicate, [])
-        support = [c for c in items if c.polarity == "support"]
-        refute = [c for c in items if c.polarity == "refute"]
-        if support and refute:
-            if predicate not in conflicts:
-                conflicts.append(predicate)
-            conflict = policy(predicate).conflict
-            if conflict == "prefer_positive":
-                return True
-            if conflict == "prefer_negative":
-                return False
-            return None
-        if support:
-            return True
-        if refute:
-            return False
-        return None
 
-    def combine(*values: bool | None) -> bool | None:
-        if any(value is True for value in values):
-            return True
-        if values and all(value is False for value in values):
-            return False
-        return None
+def resolve_entity(session: Session, entity_id: str, generation_id: int, *,
+                   hook_state: str = "UNKNOWN",
+                   coverage_summary: dict | None = None,
+                   removal_verdict: str = "NONE",
+                   unverified: dict | str | None = None,
+                   coverage=None, docker_scope_key: str = "local",
+                   required: tuple[ScopeRef, ...] | None = None,
+                   presence_verdict: str | None = None) -> ResolvedState:
+    """Resolve without persisting; the caller writes one consistent batch."""
+    return resolve(
+        session, entity_id=entity_id, generation_id=generation_id,
+        context=entity_context(session, entity_id), coverage=coverage,
+        coverage_summary=coverage_summary,
+        docker_scope_key=docker_scope_key, required=required,
+        presence_verdict=presence_verdict, unverified=unverified,
+        removal_verdict=removal_verdict, hook_state=hook_state)
 
-    states = {predicate: claim_state(predicate) for predicate in by_predicate}
-    running_basis = combine(states.get("running"), states.get("service_running"))
-    configured_basis = states.get("configured")
-    installed_basis = states.get("installed")
-    running = running_basis is True
-    configured = configured_basis is True
-    installed = installed_basis is True
-    if running:
-        status = AgentStatus.RUNNING
-    elif configured:
-        status = AgentStatus.CONFIGURED
-    elif installed:
-        status = AgentStatus.INSTALLED
-    else:
-        status = AgentStatus.UNKNOWN
 
-    capability_tags = sorted({
+def _capability_tags(session: Session, entity_id: str) -> list[str]:
+    claims = EvidenceLedger(session).current_claims(entity_id)
+    return sorted({
         claim.object_ref for claim in claims
         if claim.predicate == "agent_capability"
         and claim.polarity == "support" and claim.object_ref})
-    claim_ids: dict[str, list[str]] = {}
-    for predicate, items in by_predicate.items():
-        claim_ids[predicate] = [c.claim_id for c in items
-                                if c.polarity == "support"]
-    basis = {
-        "basis_version": 2,
-        "installed": installed_basis,
-        "configured": configured_basis,
-        "running": running_basis,
-        "claim_ids": claim_ids,
-        "conflicts": conflicts,
-    }
-    if unverified:
-        basis["verified"] = False
-        basis["unverified_reason"] = unverified
-    ledger.upsert_snapshot(
-        entity_id=entity_id, generation_id=generation_id,
-        agent_status=status.value, status_basis=basis,
-        capability_tags=capability_tags, hook_state=hook_state,
-        removal_verdict=removal_verdict,
-        coverage_summary=coverage_summary)
-    return {"entity_id": entity_id, "agent_status": status.value,
-            "capability_tags": capability_tags, "hook_state": hook_state,
-            "conflicts": conflicts}
 
 
 def project_scan_entities(session: Session, generation_id: int,

@@ -135,6 +135,45 @@ class EvidenceLedger:
         return [row for row in rows
                 if row.valid_to is None or row.valid_to > now]
 
+    def claims_for_run(self, subject_ref: str, predicate: str,
+                       collection_run_id: int, *,
+                       now: str | None = None) -> list[ClaimRow]:
+        """Claims observed by exactly this run (presence is per-run evidence)."""
+        now = now or utc_now_iso()
+        rows = self._session.scalars(
+            select(ClaimRow).where(
+                ClaimRow.subject_ref == subject_ref,
+                ClaimRow.predicate == predicate,
+                ClaimRow.collection_run_id == collection_run_id,
+                ClaimRow.status == "supported",
+                ClaimRow.valid_from <= now,
+            ).order_by(ClaimRow.observed_at.desc()))
+        return [row for row in rows
+                if row.valid_to is None or row.valid_to > now]
+
+    def invalidate_claims(self, subject_ref: str, *,
+                          predicates: tuple[str, ...] | list[str] | set[str],
+                          reason: str = "") -> int:
+        """Retire live claims after a negative verdict proved them wrong.
+
+        The ledger stays append-only in spirit: claims are closed, not
+        deleted; the absence observation explains why.
+        """
+        wanted = set(predicates)
+        now = utc_now_iso()
+        rows = self._session.scalars(
+            select(ClaimRow).where(
+                ClaimRow.subject_ref == subject_ref,
+                ClaimRow.status == "supported",
+                ClaimRow.predicate.in_(list(wanted)),
+            ))
+        closed = 0
+        for row in rows:
+            row.status = "invalidated"
+            row.valid_to = now
+            closed += 1
+        return closed
+
     # -- rules / snapshots --------------------------------------------------
 
     def upsert_rule_revision(self, rule_id: str, digest_value: str,
@@ -152,7 +191,15 @@ class EvidenceLedger:
                         agent_status: str, status_basis: dict,
                         capability_tags: list[str], hook_state: str,
                         removal_verdict: str = "NONE",
-                        coverage_summary: dict | None = None) -> None:
+                        coverage_summary: dict | None = None,
+                        presence: str = "UNKNOWN",
+                        verification: str = "STALE",
+                        lifecycle: str = "ACTIVE",
+                        reason_code: str = "",
+                        last_known_status: str = "UNKNOWN",
+                        owner_scope_type: str | None = None,
+                        owner_scope_key: str | None = None,
+                        verified_scopes: list[dict] | None = None) -> None:
         row = self._session.scalars(
             select(EntitySnapshotRow).where(
                 EntitySnapshotRow.entity_id == entity_id,
@@ -166,6 +213,15 @@ class EvidenceLedger:
             "agent_status": agent_status,
             "hook_state": hook_state,
             "removal_verdict": removal_verdict,
+            "presence": presence,
+            "verification": verification,
+            "lifecycle": lifecycle,
+            "reason_code": reason_code,
+            "last_known_status": last_known_status,
+            "owner_scope_type": owner_scope_type,
+            "owner_scope_key": owner_scope_key,
+            "verified_scopes_json": json.dumps(verified_scopes or [],
+                                               ensure_ascii=False),
             "projected_at": utc_now_iso(),
         }
         if row is None:

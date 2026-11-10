@@ -80,6 +80,10 @@ export interface AgentFilters {
   protection?: string;
   alias_status?: string;
   origin?: string;
+  lifecycle?: string;
+  verification?: string;
+  needs_verification?: boolean;
+  include_removed?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -155,6 +159,16 @@ export const api = {
     request<{ status: Record<string, unknown> }>("/policies/reload", { method: "POST" }),
 
   telemetry: () => request<TelemetryView>("/telemetry/status"),
+  monitorControl: (action: "start" | "stop") =>
+    request<Record<string, unknown>>(`/telemetry/monitor/${action}`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  behaviorControl: (action: "start" | "stop", mode?: string) =>
+    request<Record<string, unknown>>(`/telemetry/behavior/${action}`, {
+      method: "POST",
+      body: JSON.stringify(mode ? { mode } : {}),
+    }),
   hooks: () => request<HooksResponse>("/hooks"),
   hookPlan: (agentType: string, body: Record<string, unknown> = {}) =>
     request<HookPlanResponse>(`/hooks/${encodeURIComponent(agentType)}/plan`, {

@@ -220,14 +220,26 @@ class BehaviorIngestService:
     # -------------------------------------------------------------- lifecycle
     def start(self, *, mode: str | None = None, log_path=None,
               from_start: bool | None = None) -> dict:
-        with self._lock:
-            if self.running:
-                raise BehaviorIngestError("behavior ingest already running")
+        if mode:
+            mode = mode.lower()
+            if mode not in MODES or mode == "replay":
+                raise BehaviorIngestError(f"unknown behavior mode: {mode}")
+        if self.running:
+            # Behavior channels are mutually exclusive: starting one channel
+            # switches away from the channel that is currently active. Probe
+            # the target first — a broken target must not cost the channel
+            # that is still running.
             if mode:
-                mode = mode.lower()
-                if mode not in MODES or mode == "replay":
-                    raise BehaviorIngestError(f"unknown behavior mode: {mode}")
+                self._preflight_switch(mode, log_path)
+            self.stop()
+        with self._lock:
+            if mode:
                 self.mode = mode
+                if not log_path:
+                    # mode can switch after __init__ (start(mode=...)); the
+                    # default log file must follow the new mode.
+                    self.log_path = Path(TETRA_LOG if self.mode == "tetragon"
+                                         else BEHAVIOR_AUDIT_LOG)
             if log_path:
                 self.log_path = Path(log_path)
             if from_start is not None:
@@ -253,11 +265,39 @@ class BehaviorIngestService:
         if self._sysmon is not None:
             self._sysmon.close()
         self.started_at = None
+        # The periodic writer lives in the worker loop; once the thread is
+        # gone the file would keep advertising a running collector until it
+        # ages out, so publish the stopped state immediately.
+        write_collector_status(self.status(), path=COLLECTOR_STATUS_PATH)
         return self.status()
 
     def close(self) -> None:
         if self._reader is not None:
             self._reader.close()
+
+    def _preflight_switch(self, mode: str, log_path) -> None:
+        """Read-only readiness probe used before stopping the active channel.
+
+        Must raise a helpful error without creating readers or threads: the
+        channel that is currently running survives a failed switch.
+        """
+        if mode in ("replay", "poll"):
+            return
+        if mode == "sysmon":
+            probe = sysmon_available(self.sysmon_channel)
+            if not probe.available:
+                raise BehaviorIngestError(
+                    f"Sysmon 通道不可用：{probe.reason or '未安装'}")
+            return
+        path = Path(log_path) if log_path else (
+            TETRA_LOG if mode == "tetragon" else BEHAVIOR_AUDIT_LOG)
+        try:
+            with path.open("r", encoding="utf-8", errors="replace"):
+                pass
+        except OSError as exc:
+            if mode == "tetragon":
+                raise BehaviorIngestError(self._tetra_hint(exc, path)) from exc
+            raise BehaviorIngestError(self._log_hint(exc, path)) from exc
 
     def _ensure_ready(self) -> None:
         if self.mode == "replay":
@@ -308,13 +348,15 @@ class BehaviorIngestService:
             self._last_event_epoch = time.time()
             self._seed_graph()
 
-    def _log_hint(self, exc: OSError) -> str:
-        return (f"cannot read audit log {self.log_path}: {exc}. auditd logs are "
+    def _log_hint(self, exc: OSError, path: Path | None = None) -> str:
+        target = path or self.log_path
+        return (f"cannot read audit log {target}: {exc}. auditd logs are "
                 "usually root-only: run the collector as root, or set log_group in "
                 "/etc/audit/auditd.conf to a group this user belongs to.")
 
-    def _tetra_hint(self, exc: OSError) -> str:
-        return (f"cannot read Tetragon export {self.log_path}: {exc}. the file "
+    def _tetra_hint(self, exc: OSError, path: Path | None = None) -> str:
+        target = path or self.log_path
+        return (f"cannot read Tetragon export {target}: {exc}. the file "
                 "appears when the tetragon service runs with --export-filename "
                 "(default 600 root:root) — start the service or run the collector "
                 "as root / relax the permission.")

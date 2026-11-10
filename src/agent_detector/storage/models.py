@@ -314,6 +314,27 @@ class EngineHostBindingRow(Base):
     )
 
 
+class DockerProbeCacheRow(Base):
+    """Deep-probe result cache keyed by (engine, image digest, op, spec).
+
+    Same image config digest => same image layers => identical file content,
+    so archive reads, existence probes and site-packages enumeration can be
+    reused across scans until their TTL lapses. Identity anchors (container
+    ids, pids, StartedAt) are never cached — they are re-minted per round.
+    """
+
+    __tablename__ = "docker_probe_cache"
+
+    cache_key: Mapped[str] = mapped_column(String(96), primary_key=True)
+    engine_key: Mapped[str] = mapped_column(String(96), index=True)
+    image_id: Mapped[str] = mapped_column(String(96), index=True)
+    kind: Mapped[str] = mapped_column(String(24))
+    spec: Mapped[str] = mapped_column(Text, default="")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    probed_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+    last_hit_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+
+
 class EndpointRow(Base):
     """Stable network endpoint identity (P0-C). ``observed_at`` is not part
     of the key; observation windows belong to the event/binding."""
@@ -525,6 +546,19 @@ class EntitySnapshotRow(Base):
     hook_state: Mapped[str] = mapped_column(String(24), default="UNKNOWN")
     removal_verdict: Mapped[str] = mapped_column(String(16), default="NONE")
     coverage_summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    # V1.3 orthogonal dimensions: what the run proved, how well, and whether
+    # the entity is still part of the inventory. Old rows keep the defaults
+    # until the next scan rewrites them; the reader treats them as stale.
+    presence: Mapped[str] = mapped_column(String(16), default="UNKNOWN")
+    verification: Mapped[str] = mapped_column(String(16), default="STALE")
+    lifecycle: Mapped[str] = mapped_column(String(16), default="ACTIVE")
+    reason_code: Mapped[str] = mapped_column(String(48), default="")
+    last_known_status: Mapped[str] = mapped_column(String(16),
+                                                   default="UNKNOWN")
+    # Freshness is judged per owning scope, not by a global generation counter.
+    owner_scope_type: Mapped[str | None] = mapped_column(String(48))
+    owner_scope_key: Mapped[str | None] = mapped_column(String(256))
+    verified_scopes_json: Mapped[str] = mapped_column(Text, default="[]")
     projected_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
 
     __table_args__ = (

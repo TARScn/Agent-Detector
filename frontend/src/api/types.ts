@@ -1,4 +1,12 @@
 export type AgentStatus = "RUNNING" | "CONFIGURED" | "INSTALLED" | "UNKNOWN";
+export type Presence = "PRESENT" | "ABSENT" | "UNKNOWN";
+export type Verification =
+  | "VERIFIED"
+  | "PARTIAL"
+  | "FAILED"
+  | "NOT_CHECKED"
+  | "STALE";
+export type Lifecycle = "ACTIVE" | "WATCH" | "ARCHIVED";
 export type ProtectionSummary =
   | "PROTECTED"
   | "MONITOR_ONLY"
@@ -30,6 +38,23 @@ export interface StatusBasis {
   running?: boolean | null;
   conflicts?: string[];
   claim_ids?: Record<string, string[]>;
+  presence?: Presence;
+  verification?: Verification;
+  lifecycle?: Lifecycle;
+  reason_code?: string;
+  reason?: string;
+  last_known_status?: AgentStatus;
+  verified?: boolean;
+  unverified_reason?: string;
+  unverified_code?: string;
+  stale?: boolean;
+  last_generation_id?: number;
+  scope_checks?: Array<{
+    scope_type: string;
+    scope_key: string;
+    predicate: string;
+    status: string;
+  }>;
 }
 
 export interface ProtectionView {
@@ -54,8 +79,25 @@ export interface AgentRow {
   version: string;
   version_source: string;
   agent_status: AgentStatus | null;
+  presence: Presence;
+  verification: Verification;
+  lifecycle: Lifecycle;
+  reason_code: string;
+  reason: string;
+  last_known_status: AgentStatus;
   status_basis: StatusBasis;
   removal_verdict: "NONE" | "CANDIDATE" | "CONFIRMED" | null;
+  snapshot_generation_id: number | null;
+  snapshot_current: boolean;
+  snapshot_projected_at: string | null;
+  snapshot_hook_state: HookState;
+  verified_scopes: Array<{
+    scope_type: string;
+    scope_key: string;
+    predicate: string;
+    status: string;
+  }>;
+  owner_scope: { scope_type: string; scope_key: string } | null;
   capability_tags: string[];
   protection: ProtectionView;
   instance_count: number;
@@ -342,8 +384,10 @@ export interface ChannelView {
   name: string;
   available: boolean;
   running: boolean;
-  state: "OK" | "DEGRADED" | "DOWN" | "UNAVAILABLE" | "UNKNOWN";
+  /** RUNNING/STANDBY 仅行为通道互斥组会出现：同一时刻只运行一个。 */
+  state: "RUNNING" | "STANDBY" | "STOPPED" | "UNAVAILABLE" | "DOWN" | "UNKNOWN";
   detail: string;
+  control: "monitor" | "behavior" | null;
   platform: "Windows" | "Linux" | "all";
   last_event_at: string | null;
   status_age_seconds: number | null;
@@ -394,6 +438,8 @@ export interface HookPlanResponse {
   changed: boolean;
   written: boolean;
   backup: string | null;
+  /** uninstall 结果：本次移除的本工具条目数 */
+  removed?: number;
   status?: HookInstallation[];
 }
 
@@ -401,9 +447,15 @@ export interface HookPlanResponse {
 export interface OverviewView {
   agents: {
     total: number;
+    inventory_total: number;
+    current_detected: number;
+    confirmed_present: number;
     running: number;
+    running_count: number;
     running_confirmed: number;
     running_unconfirmed: number;
+    needs_verification: number;
+    archived_total: number;
     running_basis: "agent_status" | "mixed" | "unavailable";
     new_24h: number;
     unknown_status: number;

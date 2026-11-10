@@ -26,12 +26,14 @@ from agent_detector.discovery.fingerprints.loader import load_rules
 from agent_detector.discovery.sources.llm_config import endpoints_for
 from agent_detector.discovery.sources.mcp import for_agent as mcp_for_agent
 from agent_detector.discovery.sources.mcp import scan_mcp_servers
-from agent_detector.core.config import legacy_delete_enabled
 from agent_detector.core.enums import (AssetState, AssetType, HookState, ProtectionStatus,
                                          VersionSource)
-from agent_detector.coverage import (ABSENT, PRESENT, UNVERIFIED,
-                                     reconfirm_application,
-                                     reconfirm_container, reconfirm_paths)
+from agent_detector.aggregation.state_resolver import (ABSENT, FAILED,
+                                                       NOT_CHECKED, PRESENT,
+                                                       ScopeRef, entity_context,
+                                                       product_scope_refs)
+from agent_detector.coverage import (UNVERIFIED as R_UNVERIFIED,
+                                     reconfirm_application, reconfirm_paths)
 from agent_detector.core.models import (AgentInstance, AgentInventoryItem, DetectedAsset,
                                           HostFacts, ProjectInfo)
 from agent_detector.interception.hooks.installer import inspect as inspect_hook
@@ -100,12 +102,12 @@ class InventoryBuilder:
         self._verification_interest = interest_names(deps)
         self.mcp_servers = []
         self.warnings: list[str] = []
-        # P0-B: absence candidates recorded by the stale verification; the
-        # scan coordinator persists them after apply_scan returns.
-        self.removal_candidates: list[dict] = []
+        # Evidence only: presence observations for entities that did not show
+        # up in this scan. The scan coordinator writes them as claims; the
+        # state resolver decides absent/active/archived from them.
+        self.observations: list[dict] = []
         # Entities this scan could not check at all (docker engine unreachable,
-        # rule crashed). The projection must not fall back to older evidence
-        # for them, otherwise a long-gone container keeps reading RUNNING.
+        # rule crashed). Kept as a read model for scan stats.
         self.unverified: dict[str, str] = {}
         self._coverage = None
 
@@ -134,7 +136,7 @@ class InventoryBuilder:
         command, processes}).
         """
         repository = AgentInventoryRepository(session)
-        self.removal_candidates = []
+        self.observations = []
         self.unverified = {}
         self._coverage = coverage
         self.refresh_mcp()
@@ -171,23 +173,32 @@ class InventoryBuilder:
                          "app_id": item.app_id,
                          "capabilities": item.capabilities,
                          "llm_endpoints": [dict(e) for e in item.llm_endpoints],
+                         "container_id": item.container_id,
+                         "origin": item.origin,
                          "instance_count": len(asset.running_pids)})
         if instances or seen_asset_ids:
             repository.upsert_instances(instances, seen_asset_ids)
-        self._verify_stale(session, repository, seen_asset_ids, app_links,
-                           failed_detectors, docker_context=docker_context)
+        self._reconfirm_unseen(session, seen_asset_ids, failed_detectors,
+                               docker_context=docker_context)
         return seen
 
-    def _verify_stale(self, session: Session, repository: AgentInventoryRepository,
-                      seen_asset_ids: set[str], app_links: dict[str, dict],
-                      failed_detectors: tuple[str, ...] | set[str],
-                      docker_context: dict | None = None) -> None:
-        """Re-verify canonical entities that did not appear in this scan."""
+    def _reconfirm_unseen(self, session: Session, seen_asset_ids: set[str],
+                          failed_detectors: tuple[str, ...] | set[str],
+                          docker_context: dict | None = None) -> None:
+        """Collect presence observations for entities this scan did not see.
+
+        This method only *collects*: it writes no status, chooses no
+        lifecycle and creates no absence candidate. ``scan_evidence`` turns
+        the observations into claims; the state resolver decides what they
+        mean for the console.
+        """
         from agent_detector.discovery.sources.frameworks import rule_matches
         docker = docker_context or {}
         docker_failed = bool(docker.get("failed"))
+        docker_disabled = str(docker.get("error") or "") == "disabled"
         containers_seen = set(docker.get("containers_seen") or ())
         candidates_seen = set(docker.get("candidates_seen") or ())
+        projects_seen = set(docker.get("projects_seen") or ())
         failed = {name.replace("-", "_") for name in failed_detectors}
         frameworks_failed = "frameworks" in failed
 
@@ -199,171 +210,280 @@ class InventoryBuilder:
         }
 
         docker_scope_key = docker.get("scope_key") or "local"
-        engine_required = (("docker_engine_enumeration", docker_scope_key,
-                            "container_presence"),)
-        project_required = (("project_candidate_universe", "scan",
-                             "application_presence"),)
+        engine_ref = ScopeRef("docker_engine_enumeration", docker_scope_key,
+                              "container_presence")
         engine_complete = (self._coverage is not None
                            and self._coverage.is_complete(
                                "docker_engine_enumeration", docker_scope_key,
                                "container_presence"))
+        engine_status = (self._coverage.predicate_status(
+            "docker_engine_enumeration", docker_scope_key,
+            "container_presence") if self._coverage is not None else None)
 
         for attr in session.scalars(select(EntityAttributeRow).where(
                 EntityAttributeRow.inventory_kind == "agent")):
             if attr.entity_id in seen_entities:
                 continue
-            if attr.container_id:
-                if docker_failed:
-                    self._mark_unverified(
-                        attr.entity_id, "容器状态：docker 引擎本轮不可达")
-                    continue
-                container_id = attr.container_id
-                if legacy_delete_enabled():
-                    attr.status = "inactive"
-                    continue
-                deep_status = (self._coverage.predicate_status(
-                    "container_deep_scan", container_id, "component_presence")
-                    if self._coverage is not None else None)
-                verdict = reconfirm_container(
-                    container_id, engine_complete=engine_complete,
-                    containers_seen=containers_seen,
-                    candidates_seen=candidates_seen,
-                    deep_scan_status=deep_status)
-                required = engine_required
-                if container_id in containers_seen:
-                    required = engine_required + (
-                        ("container_deep_scan", container_id,
-                         "component_presence"),)
-                self._record_entity_absence(
-                    attr, predicate="container_presence",
-                    required_scopes=required, verdict=verdict.verdict,
-                    reason=verdict.reason, entity_kind="container")
+            context = entity_context(session, attr.entity_id)
+            if context.entity_kind == "COMPOSE_DEPLOYMENT":
+                self._observe_compose(
+                    attr, context, docker_failed=docker_failed,
+                    docker_disabled=docker_disabled, engine_complete=engine_complete,
+                    engine_status=engine_status, projects_seen=projects_seen,
+                    engine_ref=engine_ref)
+                continue
+            if attr.container_id or context.entity_kind == "CONTAINER_DEPLOYMENT":
+                self._observe_container(
+                    attr, docker_failed=docker_failed,
+                    docker_disabled=docker_disabled, engine_complete=engine_complete,
+                    engine_status=engine_status, containers_seen=containers_seen,
+                    candidates_seen=candidates_seen, engine_ref=engine_ref)
                 continue
             if attr.agent_type.replace("-", "_") in failed:
-                self._mark_unverified(
-                    attr.entity_id, f"产品规则 {attr.agent_type} 本轮失败")
+                self._observe_unverified(
+                    attr, f"产品规则 {attr.agent_type} 本轮失败",
+                    verification=FAILED)
                 continue
             location = session.get(EntityLocationRow, attr.entity_id)
             if location is not None:
-                if frameworks_failed and attr.agent_type in self._framework_ids:
-                    self._mark_unverified(
-                        attr.entity_id, "自建框架扫描本轮失败")
-                    continue
-                root_verdict = reconfirm_application(location.root_path)
-                if root_verdict.verdict == ABSENT:
-                    self._record_entity_absence(
-                        attr, predicate="component_presence",
-                        required_scopes=project_required,
-                        verdict=root_verdict.verdict,
-                        reason=root_verdict.reason, entity_kind="application")
-                    continue
-                app = {
-                    "app_id": attr.entity_id,
-                    "root_path": location.root_path,
-                    "environment_path": location.environment_path,
-                    "runtime": location.runtime,
-                }
-                installed = self._installed_dependencies(app)
-                if installed is None:
-                    attr.status = "inactive"
-                    continue
-                rule = self._framework_rules.get(attr.agent_type)
-                if rule is not None and not rule_matches(rule, installed):
-                    self._record_entity_absence(
-                        attr, predicate="component_presence",
-                        required_scopes=project_required, verdict=ABSENT,
-                        reason=f"installed packages no longer match {attr.agent_type}",
-                        entity_kind="application")
-                else:
-                    attr.status = "inactive"
+                self._observe_application(
+                    attr, location, frameworks_failed=frameworks_failed,
+                    rule_matches=rule_matches)
                 continue
-            try:
-                import json
-                paths = list(json.loads(attr.config_paths_json or "[]"))
-            except ValueError:
-                paths = []
-            if attr.executable:
-                paths.append(attr.executable)
-            verdict = reconfirm_paths(paths)
-            self._record_entity_absence(
-                attr, predicate="product_presence",
-                required_scopes=self._product_required_scopes(attr.agent_type),
-                verdict=verdict.verdict, reason=verdict.reason,
-                entity_kind="product")
+            self._observe_product(attr)
 
-        active = {attr.entity_id for attr in session.scalars(
-            select(EntityAttributeRow).where(
-                EntityAttributeRow.status == "active"))}
-        for instance in session.scalars(select(AgentInstanceRow)):
-            if instance.entity_id not in active and instance.status == "running":
-                instance.status = "stopped"
-        # Unverified entities keep their attributes but their instances were
-        # not observed this round; "running" would be an assumption.
-        if self.unverified:
-            for instance in session.scalars(select(AgentInstanceRow).where(
-                    AgentInstanceRow.entity_id.in_(list(self.unverified)),
-                    AgentInstanceRow.status == "running")):
-                instance.status = "unverified"
+    # -- observations --------------------------------------------------------
+
+    def _observe(self, attr: EntityAttributeRow, *, presence: str,
+                 predicate: str, reason: str,
+                 required: tuple[ScopeRef, ...],
+                 verification: str | None = None,
+                 reason_code: str = "",
+                 entity_kind: str = "") -> None:
+        self.observations.append({
+            "entity_id": attr.entity_id,
+            "asset_id": attr.entity_id,
+            "entity_kind": entity_kind or "UNKNOWN",
+            "predicate": predicate,
+            "presence": presence,
+            "reason": reason,
+            "required_scopes": [ref.as_dict() for ref in required],
+            "verification": verification,
+            "reason_code": reason_code,
+        })
+        if presence not in (PRESENT, ABSENT):
+            self._mark_unverified(attr.entity_id, reason)
+
+    def _observe_unverified(self, attr: EntityAttributeRow, reason: str, *,
+                            verification: str,
+                            required: tuple[ScopeRef, ...] = (),
+                            reason_code: str = "scope_failed") -> None:
+        self._observe(attr, presence=R_UNVERIFIED, predicate="entity_presence",
+                      reason=reason, required=required,
+                      verification=verification, reason_code=reason_code)
+
+    def _observe_compose(self, attr: EntityAttributeRow, context, *,
+                         docker_failed: bool, docker_disabled: bool,
+                         engine_complete: bool, engine_status,
+                         projects_seen: set[str],
+                         engine_ref: ScopeRef) -> None:
+        required: tuple[ScopeRef, ...] = (engine_ref,)
+        project = context.project or ""
+        if project and self._coverage is not None:
+            membership = ScopeRef("compose_membership", project,
+                                  "compose_membership")
+            if self._coverage.get(membership.scope_type,
+                                  membership.scope_key) is not None:
+                required = required + (membership,)
+        if docker_failed:
+            if not docker_disabled and project and project in projects_seen:
+                # 降级复核（T2）：list 层面确认 compose 项目仍在，但深探测
+                # 失联没能复核内部。出正存在性证据 + FAILED 标记，可见、
+                # 待复核，绝不冒充 RUNNING/INSTALLED。
+                self._observe(
+                    attr, presence=PRESENT, predicate="compose_membership",
+                    reason=(f"compose 项目仍在（本轮枚举确认）：{project}，"
+                            "深探测失联未复核"),
+                    required=required, entity_kind="COMPOSE_DEPLOYMENT",
+                    verification=FAILED, reason_code="deep_probe_stalled")
+                return
+            self._observe_unverified(
+                attr, self._docker_reason(docker_disabled),
+                verification=NOT_CHECKED if docker_disabled else FAILED,
+                required=required,
+                reason_code="scope_not_run" if docker_disabled else "scope_failed")
+            return
+        if not engine_complete:
+            self._observe_unverified(
+                attr, "Docker 枚举不完整，本轮无法确认 compose 项目",
+                verification=(FAILED if engine_status is not None
+                              and engine_status.value == "FAILED"
+                              else NOT_CHECKED),
+                required=required, reason_code="scope_incomplete")
+            return
+        if project and project in projects_seen:
+            self._observe(attr, presence=PRESENT,
+                          predicate="compose_membership",
+                          reason=f"compose 项目仍在：{project}",
+                          required=required, entity_kind="COMPOSE_DEPLOYMENT")
+            return
+        if project:
+            self._observe(attr, presence=ABSENT, predicate="compose_membership",
+                          reason=f"compose 项目已不在完整枚举中：{project}",
+                          required=required, entity_kind="COMPOSE_DEPLOYMENT")
+            return
+        self._observe_unverified(
+            attr, "compose 项目标识缺失，无法复核",
+            verification=NOT_CHECKED, required=required,
+            reason_code="scope_not_run")
+
+    def _observe_container(self, attr: EntityAttributeRow, *,
+                           docker_failed: bool, docker_disabled: bool,
+                           engine_complete: bool, engine_status,
+                           containers_seen: set[str],
+                           candidates_seen: set[str],
+                           engine_ref: ScopeRef) -> None:
+        container_id = attr.container_id or ""
+        required: tuple[ScopeRef, ...] = (engine_ref,)
+        deep_ref = ScopeRef("container_deep_scan", container_id,
+                            "component_presence")
+        if container_id and self._coverage is not None \
+                and self._coverage.get(deep_ref.scope_type,
+                                       deep_ref.scope_key) is not None:
+            required = required + (deep_ref,)
+        if docker_failed:
+            if not docker_disabled and container_id and container_id in containers_seen:
+                # 降级复核（T2）：枚举确认容器仍在，但深探测失联没能复核
+                # 容器内部。正存在性证据 + FAILED 标记，可见、待复核。
+                self._observe(
+                    attr, presence=PRESENT, predicate="container_presence",
+                    reason="容器仍在（本轮枚举确认），深探测失联未复核",
+                    required=required, entity_kind="CONTAINER_DEPLOYMENT",
+                    verification=FAILED, reason_code="deep_probe_stalled")
+                return
+            self._observe_unverified(
+                attr, self._docker_reason(docker_disabled),
+                verification=NOT_CHECKED if docker_disabled else FAILED,
+                required=required,
+                reason_code="scope_not_run" if docker_disabled else "scope_failed")
+            return
+        if not engine_complete:
+            self._observe_unverified(
+                attr, "Docker 枚举不完整，本轮无法确认容器",
+                verification=(FAILED if engine_status is not None
+                              and engine_status.value == "FAILED"
+                              else NOT_CHECKED),
+                required=required, reason_code="scope_incomplete")
+            return
+        if not container_id:
+            self._observe_unverified(
+                attr, "容器标识未记录，无法复核", verification=NOT_CHECKED,
+                required=required, reason_code="scope_not_run")
+            return
+        if container_id not in containers_seen:
+            self._observe(attr, presence=ABSENT, predicate="container_presence",
+                          reason="容器已不在完整枚举中",
+                          required=required, entity_kind="CONTAINER_DEPLOYMENT")
+            return
+        if container_id not in candidates_seen:
+            self._observe_unverified(
+                attr, "容器仍在，但本轮未深扫", verification=NOT_CHECKED,
+                required=required, reason_code="scope_not_run")
+            return
+        deep_status = (self._coverage.predicate_status(
+            "container_deep_scan", container_id, "component_presence")
+            if self._coverage is not None else None)
+        if deep_status is not None and deep_status.value == "COMPLETE":
+            self._observe(attr, presence=ABSENT, predicate="component_presence",
+                          reason="容器深扫完成，但未再发现该资产",
+                          required=required, entity_kind="CONTAINER_DEPLOYMENT")
+        else:
+            self._observe_unverified(
+                attr, f"容器深扫不完整：{deep_status.value if deep_status else 'NOT_RUN'}",
+                verification=NOT_CHECKED, required=required,
+                reason_code="scope_incomplete")
+
+    def _observe_application(self, attr: EntityAttributeRow, location,
+                             *, frameworks_failed: bool, rule_matches) -> None:
+        required = (
+            ScopeRef("project_candidate_universe", "scan",
+                     "application_presence"),
+            ScopeRef("host_process_enumeration", "host", "process_inventory"),
+        )
+        if frameworks_failed and attr.agent_type in self._framework_ids:
+            self._observe_unverified(
+                attr, "自建框架扫描本轮失败", verification=FAILED,
+                required=required)
+            return
+        root_path = location.root_path or ""
+        if attr.origin == "docker" or root_path.startswith(
+                ("container:", "engine:")):
+            self._observe_unverified(
+                attr, "容器内应用路径无法在宿主复核", verification=NOT_CHECKED,
+                required=required, reason_code="scope_not_run")
+            return
+        root_verdict = reconfirm_application(root_path)
+        if root_verdict.verdict == ABSENT:
+            self._observe(attr, presence=ABSENT, predicate="component_presence",
+                          reason="项目目录已不存在", required=required,
+                          entity_kind="SELF_BUILT_APPLICATION")
+            return
+        if root_verdict.verdict == R_UNVERIFIED:
+            self._observe_unverified(
+                attr, "未记录可复核的项目目录", verification=NOT_CHECKED,
+                required=required, reason_code="scope_not_run")
+            return
+        app = {
+            "app_id": attr.entity_id,
+            "root_path": root_path,
+            "environment_path": location.environment_path,
+            "runtime": location.runtime,
+        }
+        installed = self._installed_dependencies(app)
+        rule = self._framework_rules.get(attr.agent_type)
+        if installed is not None and rule is not None \
+                and not rule_matches(rule, installed):
+            self._observe(attr, presence=ABSENT, predicate="component_presence",
+                          reason="已安装依赖不再匹配该框架",
+                          required=required,
+                          entity_kind="SELF_BUILT_APPLICATION")
+            return
+        self._observe(attr, presence=PRESENT, predicate="component_presence",
+                      reason="项目目录仍在", required=required,
+                      entity_kind="SELF_BUILT_APPLICATION")
+
+    def _observe_product(self, attr: EntityAttributeRow) -> None:
+        try:
+            import json
+            paths = list(json.loads(attr.config_paths_json or "[]"))
+        except ValueError:
+            paths = []
+        if attr.executable:
+            paths.append(attr.executable)
+        verdict = reconfirm_paths(paths)
+        required = product_scope_refs(self._coverage, attr.agent_type)
+        if verdict.verdict == ABSENT:
+            self._observe(attr, presence=ABSENT, predicate="product_presence",
+                          reason="记录的安装路径均已不存在", required=required,
+                          entity_kind="PRODUCT_INSTALL")
+            return
+        if verdict.verdict == R_UNVERIFIED:
+            self._observe_unverified(
+                attr, "未记录可复核的安装路径", verification=NOT_CHECKED,
+                required=required, reason_code="scope_not_run")
+            return
+        self._observe(attr, presence=PRESENT, predicate="product_presence",
+                      reason="记录的安装路径仍存在", required=required,
+                      entity_kind="PRODUCT_INSTALL")
+
+    @staticmethod
+    def _docker_reason(disabled: bool) -> str:
+        return ("docker 通道本轮未启用" if disabled
+                else "容器状态：docker 引擎本轮不可达")
 
     def _mark_unverified(self, entity_id: str, reason: str) -> None:
         """Record that this run could not check the entity (no absence proof)."""
         self.unverified.setdefault(entity_id, reason)
-
-    # -- P0-B absence helpers ------------------------------------------------
-
-    def _coverage_complete(self,
-                           required: tuple[tuple[str, str, str], ...]) -> bool:
-        if self._coverage is None or not required:
-            return False
-        return all(self._coverage.is_complete(scope_type, scope_key, predicate)
-                   for scope_type, scope_key, predicate in required)
-
-    def _product_required_scopes(self, agent_type: str
-                                 ) -> tuple[tuple[str, str, str], ...]:
-        """Prefer the asset's own rule scope; fall back to every rule.
-
-        The fallback is deliberately conservative: if the stored agent type
-        cannot be mapped to one rule, a failure in any rule blocks the absence
-        candidate rather than guessing which rule owned the asset.
-        """
-        if self._coverage is None:
-            return ()
-        scopes = [scope for scope in self._coverage.scopes()
-                  if scope.scope_type == "product_rule"]
-        by_key = {scope.scope_key.replace("-", "_"): scope for scope in scopes}
-        for key in (agent_type, agent_type.replace("-", "_")):
-            scope = by_key.get(key.replace("-", "_"))
-            if scope is not None:
-                return ((scope.scope_type, scope.scope_key,
-                         "product_presence"),)
-        return tuple((scope.scope_type, scope.scope_key, "product_presence")
-                     for scope in scopes)
-
-    def _record_entity_absence(self, attr: EntityAttributeRow, *,
-                               predicate: str,
-                               required_scopes: tuple[tuple[str, str, str], ...],
-                               verdict: str, reason: str,
-                               entity_kind: str) -> None:
-        """Archive a canonical entity; never hard-deletes it."""
-        attr.status = "inactive"
-        if legacy_delete_enabled():
-            return
-        if self._coverage is None:
-            return
-        if verdict == ABSENT and not self._coverage_complete(required_scopes):
-            return
-        self.removal_candidates.append({
-            "asset_id": attr.entity_id,
-            "entity_id": attr.entity_id,
-            "entity_kind": entity_kind,
-            "predicate": predicate,
-            "status": ("CONFIRMED_ABSENT" if verdict == ABSENT
-                       else "UNVERIFIED"),
-            "reason": reason,
-            "coverage_refs": [f"{scope_type}:{scope_key}:{predicate_name}"
-                              for scope_type, scope_key, predicate_name
-                              in required_scopes],
-        })
 
     def _installed_dependencies(self, app: dict) -> set[str] | None:
         """AI-relevant package names still *installed* in the app's environment.

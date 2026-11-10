@@ -38,6 +38,9 @@ def list_agents(
         protection: str | None = Query(default=None, pattern="^(PROTECTED|MONITOR_ONLY|UNPROTECTED|UNKNOWN)$"),
         alias_status: str | None = Query(default=None, pattern="^(OK|AMBIGUOUS|CONFLICT|MISSING)$"),
         origin: str | None = Query(default=None, pattern="^(host|docker)$"),
+        lifecycle: str | None = Query(default=None, pattern="^(ACTIVE|WATCH|ARCHIVED)$"),
+        verification: str | None = Query(default=None, pattern="^(VERIFIED|PARTIAL|FAILED|NOT_CHECKED|STALE)$"),
+        needs_verification: bool = False,
         include_stopped: bool = False, include_removed: bool = False,
         limit: int = Query(default=100, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
@@ -51,7 +54,9 @@ def list_agents(
                           telemetry_scope=telemetry_scope)
         items = [item for item in items if _matches(
             item, q=q, agent_type=agent_type, agent_status=agent_status,
-            protection=protection, alias_status=alias_status, origin=origin)]
+            protection=protection, alias_status=alias_status, origin=origin,
+            lifecycle=lifecycle, verification=verification,
+            needs_verification=needs_verification)]
         items.sort(key=lambda item: (item.get("name") or "").casefold())
         total = len(items)
         page = items[offset:offset + limit]
@@ -61,7 +66,10 @@ def list_agents(
 
 def _matches(item: dict, *, q: str | None, agent_type: str | None,
              agent_status: str | None, protection: str | None,
-             alias_status: str | None, origin: str | None) -> bool:
+             alias_status: str | None, origin: str | None,
+             lifecycle: str | None = None,
+             verification: str | None = None,
+             needs_verification: bool = False) -> bool:
     if q:
         needle = q.casefold()
         haystack = " ".join(str(item.get(key) or "") for key in
@@ -77,6 +85,13 @@ def _matches(item: dict, *, q: str | None, agent_type: str | None,
     if alias_status and alias_status != "OK":
         return False  # canonical rows are always resolved
     if origin and item.get("origin") != origin:
+        return False
+    if lifecycle and item.get("lifecycle") != lifecycle:
+        return False
+    if verification and item.get("verification") != verification:
+        return False
+    if needs_verification and item.get("verification") not in (
+            "FAILED", "NOT_CHECKED", "STALE"):
         return False
     return True
 

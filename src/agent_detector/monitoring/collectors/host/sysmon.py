@@ -432,7 +432,7 @@ class SysmonReader:
 
     def _on_event(self, action: int, _context, event_handle) -> int:
         try:
-            if action == 0 and event_handle:  # EvtSubscribeActionDeliver
+            if action == 1 and event_handle:  # EvtSubscribeActionDeliver
                 xml = self._render(event_handle)
                 if xml:
                     self.received += 1
@@ -443,6 +443,8 @@ class SysmonReader:
                         else:
                             self.unparsed += 1
                             self._raw.append(xml)
+            elif action == 2:  # EvtSubscribeActionError
+                logger.warning("sysmon subscription error, handle=%r", event_handle)
         except Exception:  # a bad event must not kill the subscription
             logger.exception("sysmon callback failed")
         return 0

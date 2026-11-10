@@ -74,7 +74,7 @@
 | C3 | 保护状态与 Agent 状态**正交**。`PROTECTED` 只在 `ENFORCEMENT_VERIFIED` 时出现。 | Hook 配置文件存在 ≠ 已验证阻断 |
 | C4 | `decision`（放行/阻断）与 `execution_status`（是否执行）**是两个字段**。 | `allow` 不得显示为“成功” |
 | C5 | `Coverage PARTIAL/FAILED` 只表示“这次采集不完整”，**不表示资产不存在**。 | 不得据此隐藏或删除资产 |
-| C6 | `removal_verdict=CANDIDATE` 不是已移除；`CONFIRMED` 是“已确认不存在”，历史仍保留。默认资产列表与计数不展示两者；容器资产的未验证候选例外保留（容器仍可能存在，深扫不完整不能隐藏）。`include_removed=true` 可查询全部。 | 不得显示为“已删除” |
+| C6 | `lifecycle=WATCH` 是“可能已不存在、尚待复核”，**默认可见**；`lifecycle=ARCHIVED` 是“覆盖完整且确认不存在”，默认隐藏但历史保留。`include_removed=true` 才返回 ARCHIVED。 | 不得显示为“已删除”；不得因一次不完整扫描隐藏资产 |
 | C7 | 身份歧义（`AMBIGUOUS/CONFLICT`）时 `entity_id=null`，UI 显示“待复核”，**不自动合并**。 | 不得把两个资产折叠成一个 |
 | C8 | E1–E5 是证据类别，**不是可求和的分数**。 | 不得显示“置信度 85%” |
 | C9 | 事件 `actor` 与 `target` 分离；无法归属时显示“未归属”，不得把 target 填成 actor。 | 见 §5.7 |
@@ -96,7 +96,29 @@
 
 > UI 不得用 `states[]` 渲染状态列。`states` 只允许出现在详情/证据区，并标注“兼容字段”。
 
-**陈旧快照不得冒充当前状态**：`agent_status` 只能来自**本轮 generation** 的快照。若某实体本轮所在 scope 无法复核（docker 引擎不可达、产品规则崩溃），投影必须写一条 `UNKNOWN` 快照并给出 `status_basis.unverified_reason`；读取侧遇到旧 generation 的快照也按 `UNKNOWN` 返回，并置 `snapshot_current=false`、`status_basis.stale=true`。不得沿用上一轮结论（例如容器的 `RUNNING`）来填补本轮空白。
+#### 2.1.1 四维正交（`basis_version=3`）
+
+状态判定收敛到后端 `aggregation/state_resolver.py`。采集层（detectors、静态复核）只写观察、不写状态；Dashboard 的每一项都来自最近一次扫描的解析结果。
+
+| 维度 | 取值 | 回答 |
+| --- | --- | --- |
+| `presence` | `PRESENT / ABSENT / UNKNOWN` | 对象还在吗 |
+| `agent_status` | `RUNNING / CONFIGURED / INSTALLED / UNKNOWN` | 现在是什么状态（兼容字段） |
+| `verification` | `VERIFIED / PARTIAL / FAILED / NOT_CHECKED / STALE` | 本轮结论可信吗 |
+| `lifecycle` | `ACTIVE / WATCH / ARCHIVED` | 是否在当前清单 |
+
+判定规则：
+
+1. **RUNNING 只属于本轮**：只有本 generation 写入的运行 Claim 且 `verification in (VERIFIED, PARTIAL)` 时才投影 `RUNNING`。上一轮仍在 TTL 内的运行 Claim 不算本轮结论。
+2. **未复核保留上次状态**：某实体本轮所在 scope 失败/未运行（docker 引擎不可达、产品规则崩溃）时，`presence=UNKNOWN`、`verification=FAILED/NOT_CHECKED`、`agent_status=last_known_status`（只可能是 `CONFIGURED/INSTALLED/UNKNOWN`，**绝无 `RUNNING`**），并写入 `status_basis.unverified_reason`。UI 在状态后加“（未复核）”。
+3. **旧快照不冒充当前**：读取侧的 `snapshot_current=false` 表示该行不是最近一次覆盖的结果；此时 `verification=STALE`，`agent_status` 回落到 `last_known_status`，`status_basis.stale=true`。
+4. **缺席分级**：`presence=ABSENT` 且实体所需 scope 全部 `COMPLETE` → `lifecycle=ARCHIVED`，同时失效旧的 `installed/configured/running` Claim；scope 不完整 → `lifecycle=WATCH`（可见）。没有完整枚举，不得归档。
+5. **未知且不可复核 → WATCH**：`presence=UNKNOWN`、`verification=NOT_CHECKED` 且历史上没有任何持久状态（`last_known_status=UNKNOWN`）的实体进入 `WATCH`（“待复核”，可见），而不是伪装成在用的 `ACTIVE`。
+6. **新鲜度按 owner scope**：快照记录 `owner_scope_type/owner_scope_key`；读取时与该 scope 最近一次被评估的 run 比较，而不是全局最大 generation。一个无关 scope 的运行不会让所有实体变“未复核”。
+6. **每轮全量投影**：本轮看到的、复核到的、以及无法复核的实体都会写当轮快照；读取侧不需要猜。
+7. **降级复核（docker 通道，T2）**：docker 深探测失联但 `containers/list` 枚举成功时，被枚举确认仍在的容器/compose 项目出 `presence=PRESENT` + `verification=FAILED`（`reason_code=deep_probe_stalled`，中文理由“容器仍在（本轮枚举确认），深探测失联未复核”），`lifecycle=WATCH`（可见待复核）。`agent_status` 保持 `last_known_status`，`basis.running=false`——枚举层面的事实**绝不**升级出 INSTALLED/RUNNING。缺席/归档结论在失联轮一律不出（规则 4/5 的守卫优先）。
+
+> 升级到 V1.3 后，旧快照没有四维列，读取侧按 `verification=STALE` 处理并显示“（未复核）”，下一次扫描会重写。
 
 ### 2.2 保护摘要 `protection.summary`
 
@@ -200,7 +222,7 @@ Coverage 是**扫描范围**的完整度，不是资产状态，也不是百分�
 | 资产列表/详情 | 30s；页面切换不重复拉取未过期数据 |
 | 事件页 | **只用 SSE**，不轮询；离开页面关闭 EventSource |
 | 扫描 | 同步请求，前端只显示“扫描中”；409 表示已有扫描；不伪造百分比 |
-| Hook 安装 | 先 `apply=false` 预览，用户确认后 `apply=true`；成功后重新 `GET /hooks` |
+| Hook 安装/卸载 | 先 `apply=false` 预览，用户确认后 `apply=true`；成功后重新 `GET /hooks`；卸载只移除本工具写入的条目，用户已有配置保持不变 |
 
 ---
 
@@ -216,17 +238,31 @@ export type HookState =
   | "HOOK_OBSERVED" | "ENFORCEMENT_VERIFIED" | "UNKNOWN";
 export type AliasStatus = "OK" | "AMBIGUOUS" | "CONFLICT" | "MISSING";
 export type RemovalVerdict = "NONE" | "CANDIDATE" | "CONFIRMED";
+export type Presence = "PRESENT" | "ABSENT" | "UNKNOWN";
+export type Verification =
+  | "VERIFIED" | "PARTIAL" | "FAILED" | "NOT_CHECKED" | "STALE";
+export type Lifecycle = "ACTIVE" | "WATCH" | "ARCHIVED";
 
 export interface StatusBasis {
+  basis_version: 3;
+  presence: Presence;
+  verification: Verification;
+  lifecycle: Lifecycle;
+  reason_code: string;                 // 机器可读的判定原因
+  reason: string;                      // 面向用户的短句
+  last_known_status: AgentStatus;      // 未复核/陈旧时保留的持久状态
   installed: boolean | null;           // null = 无证据/未知；false 只能来自反驳证据
   configured: boolean | null;
-  running: boolean | null;
+  running: boolean | null;             // true 仅当本 generation 观察到运行
   conflicts: string[];                 // 冲突的 predicate
   claim_ids: Record<string, string[]>; // predicate -> [claim_id]
-  verified?: boolean;                  // false = 本轮 scope 未能复核，三态全部为 null
+  verified: boolean;                   // verification in (VERIFIED, PARTIAL)
   unverified_reason?: string;          // verified=false 时的短句原因
-  stale?: boolean;                     // true = 快照来自更早的 generation
+  unverified_code?: string;            // scope_failed / scope_not_run / ...
+  stale?: boolean;                     // true = 快照来自更早的覆盖
   last_generation_id?: number;         // stale 快照所属的 generation
+  scope_checks?: Array<{ scope_type: string; scope_key: string;
+                         predicate: string; status: string }>;
 }
 
 export interface ProtectionView {
@@ -261,11 +297,20 @@ export interface AgentRow {
   version: string;                     // 无可靠版本时为 "UNKNOWN"
   version_source: string;              // package / image-tag / process-claim / unknown
   agent_status: AgentStatus | null;
+  presence: Presence;
+  verification: Verification;
+  lifecycle: Lifecycle;
+  reason_code: string;
+  reason: string;
+  last_known_status: AgentStatus;      // 未复核/陈旧时展示的状态
   status_basis: Partial<StatusBasis>;  // 无投影时为 {}
   snapshot_generation_id: number | null; // 该行状态来自哪一轮
-  snapshot_current: boolean;           // 是否为最新 generation（false 时 agent_status 恒为 UNKNOWN）
+  snapshot_current: boolean;           // 该行是否属于其 owner scope 最近一次覆盖
   snapshot_projected_at: string | null;
-  removal_verdict: RemovalVerdict | null;
+  verified_scopes: Array<{ scope_type: string; scope_key: string;
+                           predicate: string; status: string }>;
+  owner_scope: { scope_type: string; scope_key: string } | null;
+  removal_verdict: RemovalVerdict | null;  // 兼容别名：ARCHIVED→CONFIRMED，WATCH→CANDIDATE
   capability_tags: string[];
   protection: ProtectionView;
   instance_count: number;
@@ -552,7 +597,7 @@ export interface ChannelView {
   name: string;
   available: boolean;
   running: boolean;
-  state: "OK" | "DEGRADED" | "DOWN" | "UNAVAILABLE" | "UNKNOWN";
+  state: "RUNNING" | "STANDBY" | "STOPPED" | "UNAVAILABLE" | "DOWN" | "UNKNOWN";
   detail: string;
   platform: "Windows" | "Linux" | "all";
   last_event_at: string | null;
@@ -575,10 +620,16 @@ export interface AttentionItem {
 
 export interface OverviewView {
   agents: {
-    total: number;
+    total: number;                     // 默认清单口径（不含 ARCHIVED）
+    inventory_total: number;           // 含 ARCHIVED 的全部实体
+    current_detected: number;          // presence=PRESENT
+    confirmed_present: number;         // presence=PRESENT 且已核实
     running: number;                   // 兼容：instance_count>0；新 UI 不读
-    running_confirmed: number;         // 仅 agent_status=RUNNING
+    running_count: number;             // 同 running_confirmed
+    running_confirmed: number;         // 仅 agent_status=RUNNING 且 verification 已核实
     running_unconfirmed: number;       // status=null 且 instance_count>0
+    needs_verification: number;        // verification in (FAILED,NOT_CHECKED,STALE)
+    archived_total: number;            // lifecycle=ARCHIVED
     running_basis: "agent_status" | "mixed" | "unavailable";
     new_24h: number;
     unknown_status: number;
@@ -620,8 +671,14 @@ export interface OverviewView {
 
 | 字段 | 类型 | 规则 | 数据来源 |
 | --- | --- | --- | --- |
-| `agents.running_confirmed` | int | `agent_status=RUNNING` 的数量 | `EntitySnapshotRow.agent_status` |
+| `agents.running_confirmed` | int | `agent_status=RUNNING` 且 `verification in (VERIFIED,PARTIAL)` | 投影 |
 | `agents.running_unconfirmed` | int | `agent_status=null` 且 `instance_count>0` | 同上 + instances |
+| `agents.inventory_total` | int | 含 ARCHIVED 的实体总数 | `EntityRepository.list_agents(include_hidden=True)` |
+| `agents.current_detected` | int | `presence=PRESENT`（默认清单口径） | 投影 |
+| `agents.confirmed_present` | int | `presence=PRESENT` 且已核实 | 投影 |
+| `agents.needs_verification` | int | `verification in (FAILED,NOT_CHECKED,STALE)` | 投影 |
+| `agents.archived_total` | int | `lifecycle=ARCHIVED` | 投影 |
+| `agents.running_count` | int | 同 `running_confirmed`（新字段，语义明确） | 投影 |
 | `agents.running_basis` | enum | 全部有投影 `agent_status`；部分 `mixed`；全无 `unavailable` | 投影覆盖情况 |
 | `agents.new_24h` | int | `first_seen_at >= now-24h` | `AgentAssetRow.first_seen_at` |
 | `agents.unknown_status` | int | `agent_status in (null, UNKNOWN)` | 投影 |
@@ -655,8 +712,11 @@ export interface OverviewView {
 | `protection` | enum | — | `PROTECTED/MONITOR_ONLY/UNPROTECTED/UNKNOWN` |
 | `alias_status` | enum | — | `OK/AMBIGUOUS/CONFLICT/MISSING` |
 | `origin` | enum | — | `host/docker` |
+| `lifecycle` | enum | — | `ACTIVE/WATCH/ARCHIVED`；ARCHIVED 仅在 `include_removed=true` 时返回 |
+| `verification` | enum | — | `VERIFIED/PARTIAL/FAILED/NOT_CHECKED/STALE` |
+| `needs_verification` | bool | false | 等价于 `verification in (FAILED,NOT_CHECKED,STALE)` |
 | `include_stopped` | bool | false | 是否包含已停止实例的资产 |
-| `include_removed` | bool | false | 是否包含已移除、移除候选和已确认不存在的资产（默认仅 active/inactive 可复核资产） |
+| `include_removed` | bool | false | 是否返回 `lifecycle=ARCHIVED`（已确认不存在）。`WATCH` 候选默认可见，不受此参数影响 |
 | `limit` | int | 100 | 1–500 |
 | `offset` | int | 0 | 合并后分页 |
 
@@ -1077,18 +1137,30 @@ def protection_view(snapshot, telemetry_running, telemetry_scope):
 
 **聚合规则（冻结）**
 
-“核心采集通道”指当前平台实际使用的行为通道：Sysmon / Tetragon / auditd / poll 之一；netmon 与 native_hook 是可选通道，不折叠进全局 `health`。
+“核心采集通道”指当前平台实际使用的行为通道：Sysmon / Tetragon / auditd / poll 之一；netmon 是可选通道，不折叠进全局 `health`。native_hook **不在** `channels` 清单中：Hook 是每 Agent 的安装项，状态由 `GET /api/v1/hooks` 提供（采集页 Hook 安装区），不计入全局 `health`。
+
+**行为通道互斥（冻结）**：Sysmon / Tetragon / auditd / poll 组成一个互斥组，同一时刻**至多一个** `RUNNING`。`channels[].state` 枚举与语义（由后端计算，UI 不自行拼装）：
+
+| state | 语义 |
+| --- | --- |
+| `RUNNING` | 该通道是互斥组的活跃通道，服务正在以它采集 |
+| `STANDBY` | 本机可用、但活跃通道是组内另一个通道（待命） |
+| `STOPPED` | 行为采集服务未运行（或 netmon 未启用） |
+| `UNAVAILABLE` | 本平台不可用（如 Windows 上的 auditd） |
+| `DOWN` | 活跃通道异常（服务在跑但该通道读不到数据） |
+
+启动即切换：`POST /behavior/start` 在组内已有通道运行时**先停掉它**再启动目标通道（同一请求内完成，不返回 409）；409 仅保留给通道不可用/参数非法，且**目标通道就绪检查失败时当前通道保持不变**（Linux 上 auditd 日志 / Tetragon 导出文件通常 root-only，非 root 启动会得到带修复提示的 409）。UI 对 `STANDBY → 启动` 的切换先弹确认框。
 
 | 条件 | `health.state` | UI |
 | --- | --- | --- |
-| 核心行为通道 `running=true`，且没有核心通道 `DEGRADED/DOWN` | `OK` | 采集正常 |
-| 核心行为通道 `running=true`，但存在 `DEGRADED/DOWN` | `DEGRADED` | 部分通道异常 |
+| 核心行为通道 `running=true`，且没有核心通道 `DOWN` | `OK` | 采集正常 |
+| 核心行为通道 `running=true`，但存在 `DOWN` | `DEGRADED` | 部分通道异常 |
 | 核心行为通道 `running=false`，且 netmon 也未运行 | `NOT_RUNNING` | 未开启采集 |
 | 状态文件不可读/超时 | `UNKNOWN` | 状态未知 |
 
 - `status_age_seconds > 120` 视为 `DEGRADED`，不得继续显示“正常”。
-- `channels[].state` 由后端计算；UI 不自行拼装。
-- netmon 停止不使全局变为 `DEGRADED`，但必须在通道清单中显示 `DOWN`；Hook 是**每 Agent** 的能力，不计入全局 `health`。
+- `channels[].control`：`behavior`（Sysmon/Tetragon/auditd/进程采样，启停走 `/behavior/*`，start 的 mode=通道 `id`，启动即互斥切换）| `monitor`（出站连接观察，启停走 `/monitor/*`）。UI 对所有 `control` 非空的通道统一渲染启停按钮（`RUNNING` 显示“停止”，其余显示“启动”）；`available=false` 的通道按钮照常显示，**启动条件由后端校验**：不满足时 start 返回 409 与中文/英文原因文案（如"Sysmon 通道不可用：…"、"cannot read audit log …"），UI 以消息提示展示，不自行预判。
+- netmon 停止不使全局变为 `DEGRADED`，通道清单中显示 `STOPPED`；Hook 是**每 Agent** 的能力，不在通道清单中，不计入全局 `health`。
 - 顶部 chip 只显示 `health.state`；点击进入采集页看逐通道状态。
 
 其他端点保持：`GET /telemetry/audit-rules`、`POST /telemetry/monitor/start|stop`、`POST /telemetry/behavior/start|stop`。
@@ -1134,6 +1206,7 @@ def protection_view(snapshot, telemetry_running, telemetry_scope):
 | `GET /api/v1/discovery/summary` | 计数摘要 |
 
 - 扫描响应已包含 `coverage`、`identity_shadow`、`errors`；UI 只显示“完成/失败/进行中”，不显示伪造进度。
+- `stats.docker`（代码层字段，UI 不直接渲染）：`containers_total` / `candidates` / `agents` / `container_errors[]` / `degraded`（本轮深探测失联、走降级复核的容器数）/ `probe_cache`（`{hits, misses, stores}`，T1 摘要缓存计数）/ `error`（非空即本轮失联，缺席判定一律不出）。后端测试钉住这些键；新增键只做加法。
 - `409` 文案：“已有扫描在进行中”；不得自动重试。
 
 ---
@@ -1208,8 +1281,11 @@ def protection_view(snapshot, telemetry_running, telemetry_scope):
 | 3 | `agent_status=null`，有实例 | `running_unconfirmed+1` | “状态待确认”，不显示“运行中” |
 | 4 | `agent_status=UNKNOWN` | 状态原样 | 灰色“未知”，不显示红色故障 |
 | 4a | 没有任何安装证据 | `status_basis.installed=null` | “未知”，不显示“未安装” |
-| 4b | 本轮所在 scope 无法复核（docker 引擎不可达） | `agent_status=UNKNOWN`, `status_basis.verified=false` + `unverified_reason`，实例 `status=unverified` | “未知”；不显示“运行中”，也不把实例算进运行数 |
-| 4c | 快照来自更早 generation | `agent_status=UNKNOWN`, `snapshot_current=false`, `status_basis.stale=true` | “未知”；不沿用上一轮结论 |
+| 4b | 本轮所在 scope 无法复核（docker 引擎不可达） | `presence=UNKNOWN`, `verification=FAILED/NOT_CHECKED`, `agent_status=last_known_status`, `status_basis.verified=false` + `unverified_reason`，实例 `status=unverified` | “已配置（未复核）”；不显示“运行中”，也不把实例算进运行数 |
+| 4b-1 | docker 深探测失联，但容器被枚举确认仍在（T2 降级复核） | `presence=PRESENT`, `verification=FAILED`, `reason_code=deep_probe_stalled`, `lifecycle=WATCH`, `agent_status=last_known_status`, `basis.running=false` | 可见，标“（未复核）”与中文降级理由；既不消失/归档，也不显示“运行中” |
+| 4c | 快照不属于其 owner scope 最近一次覆盖 | `verification=STALE`, `agent_status=last_known_status`, `snapshot_current=false`, `status_basis.stale=true` | “（未复核）”；不沿用上一轮的 `RUNNING` |
+| 4d | `presence=ABSENT` 且所需 scope 全部完整 | `lifecycle=ARCHIVED`, `removal_verdict=CONFIRMED` | 默认隐藏；`include_removed=true` 可见 |
+| 4e | `presence=ABSENT` 但 scope 不完整 | `lifecycle=WATCH`, `verification=NOT_CHECKED` | 可见，标“待复核” |
 | 5 | alias `AMBIGUOUS` | `entity_id=null`，claims `available=false` | “待复核”；不合并、不隐藏 |
 | 6 | Coverage PARTIAL | attention `coverage_gap` | “覆盖不足”，不显示“不存在” |
 | 7 | `decision=allow`, `execution_status=failed` | 两字段独立 | “放行” + “执行失败” |

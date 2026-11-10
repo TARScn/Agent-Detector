@@ -13,9 +13,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agent_detector.storage.models import (AgentInstanceRow, AgentSessionRow,
-                                           ComponentRelationRow, EntityAttributeRow,
-                                           EntityLocationRow, EntityRow,
-                                           EntitySnapshotRow)
+                                           ComponentRelationRow, CoverageScopeRow,
+                                           EntityAttributeRow, EntityLocationRow,
+                                           EntityRow, EntitySnapshotRow)
 
 
 def _normalize_status_basis(value: dict) -> dict:
@@ -36,17 +36,33 @@ def _json(value: str | None, default):
         return default
 
 
+def _durable_from_snapshot(snapshot: EntitySnapshotRow) -> str:
+    """Recover the durable part of a snapshot written before V1.3.
+
+    RUNNING is never durable: it describes one observation window. Keep the
+    strongest static status the basis proves.
+    """
+    basis = _json(snapshot.status_basis_json, {})
+    if not isinstance(basis, dict):
+        basis = {}
+    if basis.get("configured") is True or snapshot.agent_status == "CONFIGURED":
+        return "CONFIGURED"
+    if basis.get("installed") is True or snapshot.agent_status == "INSTALLED":
+        return "INSTALLED"
+    return "UNKNOWN"
+
+
 class EntityRepository:
     def __init__(self, session: Session):
         self._session = session
 
     def _latest_snapshots(self) -> tuple[dict[str, EntitySnapshotRow], int | None]:
-        """Newest snapshot per entity, plus the generation they are judged by.
+        """Newest snapshot per entity, plus the newest generation seen.
 
-        A snapshot from an older generation describes a past run. The console
-        must not present it as the current status: the caller downgrades it,
-        otherwise an entity that a failing scope stopped covering (docker
-        engine down) keeps showing its last RUNNING forever.
+        Freshness itself is judged per owning scope (see ``_is_current``):
+        a global counter would mark every entity stale whenever one unrelated
+        scope ran, and would hide the fact that an entity's own scope never
+        re-ran at all.
         """
         latest: dict[str, EntitySnapshotRow] = {}
         generation: int | None = None
@@ -58,6 +74,29 @@ class EntityRepository:
             if generation is None or row.generation_id > generation:
                 generation = row.generation_id
         return latest, generation
+
+    def _latest_scope_runs(self) -> dict[tuple[str, str], int]:
+        """Last run that evaluated each coverage scope, one grouped query."""
+        rows = self._session.execute(
+            select(CoverageScopeRow.scope_type, CoverageScopeRow.scope_key,
+                   func.max(CoverageScopeRow.run_id)).group_by(
+                       CoverageScopeRow.scope_type, CoverageScopeRow.scope_key))
+        return {(scope_type, scope_key): int(run_id)
+                for scope_type, scope_key, run_id in rows}
+
+    @staticmethod
+    def _is_current(snapshot: EntitySnapshotRow | None,
+                    latest_generation: int | None,
+                    scope_runs: dict[tuple[str, str], int]) -> bool:
+        if snapshot is None:
+            return False
+        owner = (snapshot.owner_scope_type, snapshot.owner_scope_key)
+        if owner[0] and owner[1]:
+            latest_run = scope_runs.get(owner)
+            if latest_run is not None:
+                return snapshot.generation_id >= latest_run
+        return (latest_generation is None
+                or snapshot.generation_id == latest_generation)
 
     def _counts(self) -> tuple[dict[str, int], dict[str, int],
                                dict[str, int]]:
@@ -84,27 +123,63 @@ class EntityRepository:
 
     def _row(self, attr: EntityAttributeRow, entity: EntityRow | None,
              snapshot: EntitySnapshotRow | None, *, latest_generation: int | None,
+             scope_runs: dict[tuple[str, str], int] | None = None,
              instance_count: int = 0,
              session_count: int = 0, component_count: int = 0,
              include_location: bool = False) -> dict:
-        current = (snapshot is not None
-                   and (latest_generation is None
-                        or snapshot.generation_id == latest_generation))
+        scope_runs = scope_runs or {}
+        current = self._is_current(snapshot, latest_generation, scope_runs)
+        presence = snapshot.presence if snapshot is not None else "UNKNOWN"
+        verification = snapshot.verification if snapshot is not None else "STALE"
+        lifecycle = snapshot.lifecycle if snapshot is not None else "ACTIVE"
+        if snapshot is not None and lifecycle == "ACTIVE":
+            # Pre-v3 rows have no lifecycle column: the old removal verdict
+            # still carries the same meaning, so honour it.
+            if snapshot.removal_verdict == "CONFIRMED":
+                lifecycle = "ARCHIVED"
+            elif snapshot.removal_verdict == "CANDIDATE":
+                lifecycle = "WATCH"
+        reason_code = (snapshot.reason_code if snapshot is not None else "") or ""
+        last_known = "UNKNOWN"
+        if snapshot is not None:
+            last_known = snapshot.last_known_status or "UNKNOWN"
+            if last_known == "UNKNOWN":
+                # Pre-v3 rows have no durable column; recover it from the basis.
+                last_known = _durable_from_snapshot(snapshot)
         if snapshot is not None and current:
             agent_status = snapshot.agent_status
             status_basis = _normalize_status_basis(
                 _json(snapshot.status_basis_json, {}))
         elif snapshot is not None:
-            agent_status = "UNKNOWN"
+            # Keep the last durable status but mark it as not re-verified.
+            # RUNNING is never durable: it describes one observation window.
+            agent_status = (last_known if last_known in ("CONFIGURED",
+                                                         "INSTALLED")
+                            else "UNKNOWN")
+            verification = "STALE"
             status_basis = {
-                "basis_version": 2, "installed": None, "configured": None,
+                "basis_version": 3, "installed": None, "configured": None,
                 "running": None, "claim_ids": {}, "conflicts": [],
                 "stale": True,
                 "last_generation_id": snapshot.generation_id,
+                "last_known_status": last_known,
+                "verification": "STALE",
+                "presence": presence,
+                "lifecycle": lifecycle,
+                "reason_code": "stale_snapshot",
+                "reason": "该资产在最近一次扫描中没有被覆盖",
+                "verified": False,
             }
         else:
             agent_status = None
             status_basis = {}
+        if (agent_status == "RUNNING"
+                and verification not in ("VERIFIED", "PARTIAL")):
+            # RUNNING never survives a run that did not verify it (old rows
+            # without verification metadata land here as STALE).
+            agent_status = (last_known if last_known in ("CONFIGURED",
+                                                         "INSTALLED")
+                            else "UNKNOWN")
         row = {
             "entity_id": attr.entity_id,
             "entity_kind": entity.entity_kind if entity else "UNKNOWN",
@@ -119,7 +194,19 @@ class EntityRepository:
             "first_seen_at": attr.first_seen_at,
             "last_seen_at": attr.last_seen_at,
             "agent_status": agent_status,
+            "presence": presence,
+            "verification": verification,
+            "lifecycle": lifecycle,
+            "reason_code": reason_code,
+            "reason": status_basis.get("reason") or "",
+            "last_known_status": last_known,
             "status_basis": status_basis,
+            "verified_scopes": (_json(snapshot.verified_scopes_json, [])
+                                if snapshot is not None else []),
+            "owner_scope": ({"scope_type": snapshot.owner_scope_type,
+                             "scope_key": snapshot.owner_scope_key}
+                            if snapshot is not None
+                            and snapshot.owner_scope_type else None),
             "snapshot_generation_id": (snapshot.generation_id
                                        if snapshot else None),
             "snapshot_current": current,
@@ -165,22 +252,23 @@ class EntityRepository:
         entities = {row.entity_id: row for row in self._session.scalars(
             select(EntityRow))}
         snapshots, latest_generation = self._latest_snapshots()
+        scope_runs = self._latest_scope_runs()
         instances, sessions, components = self._counts()
         result: list[dict] = []
         for attr in attrs:
-            snapshot = snapshots.get(attr.entity_id)
-            verdict = snapshot.removal_verdict if snapshot else "NONE"
-            if not include_hidden:
-                if verdict == "CONFIRMED":
-                    continue
-                if verdict == "CANDIDATE" and not attr.container_id:
-                    continue
-            result.append(self._row(
-                attr, entities.get(attr.entity_id), snapshot,
-                latest_generation=latest_generation,
+            row = self._row(
+                attr, entities.get(attr.entity_id),
+                snapshots.get(attr.entity_id),
+                latest_generation=latest_generation, scope_runs=scope_runs,
                 instance_count=instances.get(attr.entity_id, 0),
                 session_count=sessions.get(attr.entity_id, 0),
-                component_count=components.get(attr.entity_id, 0)))
+                component_count=components.get(attr.entity_id, 0))
+            # Confirmed-absent rows are archived: hidden by default, kept in
+            # the database and still reachable with include_removed=true.
+            # WATCH (unconfirmed absence) stays visible.
+            if not include_hidden and row["lifecycle"] == "ARCHIVED":
+                continue
+            result.append(row)
         return result
 
     def get_agent(self, entity_id: str) -> dict | None:
@@ -193,6 +281,7 @@ class EntityRepository:
         return self._row(
             attr, entity, snapshots.get(entity_id),
             latest_generation=latest_generation,
+            scope_runs=self._latest_scope_runs(),
             instance_count=instances.get(entity_id, 0),
             session_count=sessions.get(entity_id, 0),
             component_count=components.get(entity_id, 0),
@@ -209,7 +298,8 @@ class EntityRepository:
         entity = self._session.get(EntityRow, attr.entity_id)
         snapshots, latest_generation = self._latest_snapshots()
         return self._row(attr, entity, snapshots.get(attr.entity_id),
-                         latest_generation=latest_generation)
+                         latest_generation=latest_generation,
+                         scope_runs=self._latest_scope_runs())
 
     def list_instances(self, entity_id: str,
                        include_stopped: bool = True) -> list[dict]:

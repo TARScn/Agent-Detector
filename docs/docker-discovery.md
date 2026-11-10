@@ -50,6 +50,12 @@ CLI（agent-detector scan / agents list）· Web API（/api/v1/agents）· 控�
 4. 镜像仓库末段或进程名暴露 python/node 运行时（`runtime_image_bases` /
    `runtime_process_names`）——运行时容器全量进入依赖扫描。
 
+**筛选分两步走（T3）**：先只用 brief（信号 1/2 + 镜像运行时回退）筛选——
+大多数容器在这里就定下候选，重 daemon 的 `docker top` 不必为筛选取证白跑；
+brief 未命中的运行中容器才补一次 `top` 查进程 token（信号 3 与进程运行时），
+已停止容器从不调 `top`。候选（无论从哪一步进来）再取一次 `top` 供 RUNNING
+证据与进程形态的命中理由——同一容器最多调一次 `top`，非候选容器可能零调用。
+
 已停止容器没有进程列表，靠 1/2 与镜像运行时判断；`get_archive` 对停止容器
 同样可用，深扫不受影响。
 
@@ -75,14 +81,19 @@ CLI（agent-detector scan / agents list）· Web API（/api/v1/agents）· 控�
   资产永不冲突；同一框架出现在多个容器时是彼此独立的资产（v1 不做跨容器合并）。
 - 实例身份：容器内 PID + 容器 `StartedAt` 锚定——容器重启即新实例；停止容器
   没有 running_pids，自然没有实例行。
-- 复核（`_verify_stale` 容器分支，宿主路径规则不适用）：
+- 复核（`_reconfirm_unseen` 容器分支，宿主路径规则不适用；只产出存在性
+  observation，判定收敛到 `aggregation/state_resolver.py`）：
   - 容器已删除 → 资产与应用**硬删**；
   - 容器被深扫但框架资产未再现 → 资产**硬删**（依赖已卸载），应用行置
     inactive（无法区分"仅剩 SDK 依赖"与"依赖全清空"，保守处理）；
   - 容器在但不构成候选（如运行时进程已退出）→ 资产与应用置 **inactive**
     （本轮无判定）；
-  - Docker 通道故障或被禁用 → 容器资产**不做任何判定**（与 detector 崩溃
-    同一守卫），绝不因"缺席"误删。
+  - Docker 通道故障但枚举成功 → **降级复核（T2）**：被枚举确认仍在的
+    容器/compose 项目出 PRESENT + `verification=FAILED` + 中文理由，
+    实体落 WATCH（可见、待复核），内部状态绝不伪造；缺席/归档结论本轮
+    一律不出；
+  - Docker 通道被禁用或枚举本身失败 → 容器资产**不做任何判定**（与
+    detector 崩溃同一守卫），绝不因"缺席"误删。
 - 库存行带 `origin`（host/docker）与 `container_id`（agent_assets 与
   agent_instances 各一份，经 `_ADDITIVE_COLUMNS` 幂等迁移）。
 
@@ -111,7 +122,13 @@ CLI（agent-detector scan / agents list）· Web API（/api/v1/agents）· 控�
 - **硬看门狗**：npipe 的读超时不可靠（响应头等待可能永不返回）。每个 Docker
   操作因此在独立守护线程里限时执行，超时即抛 `DockerStalled` 放弃该操作；
   单个客户端连续失联 3 次后通道熔断。失联的容器从候选集摘除、整轮通道标记
-  failed，生命周期复核本轮不做任何判定——绝不把"没扫成"当"已卸载"。
+  failed，缺席/归档类结论本轮一律不出——**绝不把"没扫成"当"已卸载"**。
+  在这条红线之上做**逐容器降级复核（T2）**：`containers/list` 是轻调用，
+  失联轮通常仍然成功——凡被枚举确认仍在的容器/compose 项目，照常出
+  `presence=PRESENT` 正证据，同时带 `verification=FAILED` 与中文理由
+  （"容器仍在（本轮枚举确认），深探测失联未复核"），实体落 `WATCH`
+  （可见、待复核）。容器内部状态（INSTALLED/RUNNING）绝不凭枚举伪造。
+  stats 以 `error`（本轮失联）+ `degraded`（降级容器数）如实记录。
 - **最小权限提示**：Docker API 等价于宿主 root。请确保运行扫描器的账号本身
   受控，不要把 docker socket/npipe 暴露给不可信进程；本工具只发起上表四个
   只读调用，但不改变 daemon 的权限面。
@@ -126,6 +143,7 @@ CLI（agent-detector scan / agents list）· Web API（/api/v1/agents）· 控�
 | `AGENT_DETECTOR_DOCKER_READ_MAX_BYTES` | 262144 | 单文件读取上限（字节；stat 预检超限直接跳过） |
 | `AGENT_DETECTOR_DOCKER_ARCHIVE_BYTE_CAP` | 2147483648 | 目录归档的解析预算（npipe 上总流量与预算无关，预算只决定"解析到哪、其余排干"） |
 | `AGENT_DETECTOR_DOCKER_ARCHIVE_TIME_CAP` | 60 | 目录归档排干的看门狗期限基数（秒） |
+| `AGENT_DETECTOR_DOCKER_PROBE_CACHE_TTL` | 86400 | 深探测结果按镜像 digest 缓存的 TTL（秒，0 关闭，上限 7 天）——digest 不变即镜像层内容不变，archive 读取/存在性探测/site-packages 枚举跨扫描复用；身份锚点（容器 ID、PID、StartedAt）永不缓存，每轮活算 |
 
 ## 平台产品跨环境识别（container 段通用机制）
 
@@ -221,3 +239,8 @@ PID）；`lg-stopped` 产出仅 INSTALLED；`web` 不产出任何资产；`stats
   进程列表，按"停止容器"的诚实规则处理（绝不虚标 RUNNING）。
 - site-packages 归档枚举在超大镜像下受字节/时间封顶约束，极端情况枚举不全，
   版本降级到声明/镜像标签出处（置信度相应更低）。
+- 弱 daemon（如 2 核 VM 上被 tetragon + 十几个容器挤占）会让深探测高频撞
+  看门狗。T1 摘要缓存把深探测成本变成一次性：首轮成功探测的结果按镜像
+  digest 落库（`docker_probe_cache` 表），次轮起同 digest 容器零归档读；
+  部分成功的失联轮按路径粒度增量填充缓存。失联轮由 T2 降级复核兜底，
+  dify 这类多容器部署不再从清单消失。

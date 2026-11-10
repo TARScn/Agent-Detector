@@ -21,7 +21,7 @@ from agent_detector.storage.models import (AgentInstanceRow, EntityAttributeRow,
                                            utc_now_iso)
 
 
-def _seed_container_entity(session, entity_id="ent-dify"):
+def _seed_container_entity(session, entity_id="ent-dify", generation=1):
     stamp = utc_now_iso()
     session.add(EntityRow(entity_id=entity_id, entity_kind="CONTAINER_DEPLOYMENT",
                           scope_key="engine:test"))
@@ -36,7 +36,8 @@ def _seed_container_entity(session, entity_id="ent-dify"):
         origin="docker", container_id="c0ffee", last_seen_at=stamp))
     # The stale snapshot a container asset leaves behind.
     session.add(EntitySnapshotRow(
-        entity_id=entity_id, generation_id=1, agent_status="RUNNING",
+        entity_id=entity_id, generation_id=generation,
+        agent_status="RUNNING",
         status_basis_json=json.dumps({"basis_version": 2, "installed": True,
                                       "configured": True, "running": True,
                                       "claim_ids": {}, "conflicts": [],
@@ -80,10 +81,12 @@ def test_scan_marks_unreachable_container_entity_unverified(tmp_path, monkeypatc
                         lambda: HostFacts("h", (), ()))
     engine = make_engine(tmp_path / "db.sqlite3")
     with Session(engine) as session:
-        _seed_container_entity(session)
+        _seed_container_entity(session, generation=0)
 
     result = scan_service.run_scan(engine, detectors=[], docker_enabled=False)
-    assert result["evidence"]["statuses"].get("UNKNOWN") == 1
+    # The last durable status (CONFIGURED) survives, but the run is marked
+    # unverified and the old RUNNING is gone.
+    assert result["evidence"]["statuses"].get("CONFIGURED") == 1
 
     with Session(engine) as session:
         snapshot = session.scalars(
@@ -92,11 +95,16 @@ def test_scan_marks_unreachable_container_entity_unverified(tmp_path, monkeypatc
         basis = json.loads(snapshot.status_basis_json)
         instance = session.get(AgentInstanceRow, "inst-1")
         detail = EntityRepository(session).get_agent("ent-dify")
-    assert snapshot.agent_status == "UNKNOWN"
+    assert snapshot.agent_status == "CONFIGURED"
+    assert snapshot.presence == "UNKNOWN"
+    assert snapshot.verification == "NOT_CHECKED"
     assert basis["verified"] is False
+    assert basis["running"] is None
     assert "docker" in basis["unverified_reason"]
     assert instance.status == "unverified"
-    assert detail["agent_status"] == "UNKNOWN"
+    assert detail["agent_status"] == "CONFIGURED"
+    assert detail["verification"] == "NOT_CHECKED"
+    assert detail["presence"] == "UNKNOWN"
     assert detail["snapshot_current"] is True
     assert detail["instance_count"] == 0
 
@@ -125,10 +133,12 @@ def test_older_generation_snapshot_is_not_presented_as_current(tmp_path):
         stale = repository.get_agent("ent-dify")
         fresh = repository.get_agent("ent-new")
 
-    assert stale["agent_status"] == "UNKNOWN"
+    assert stale["agent_status"] == "CONFIGURED"  # durable status survives
+    assert stale["verification"] == "STALE"
     assert stale["snapshot_current"] is False
     assert stale["snapshot_generation_id"] == 1
     assert stale["status_basis"]["stale"] is True
     assert stale["status_basis"]["running"] is None
-    assert fresh["agent_status"] == "RUNNING"
+    # RUNNING in a snapshot without verification metadata is not repeated.
+    assert fresh["agent_status"] == "UNKNOWN"
     assert fresh["snapshot_current"] is True

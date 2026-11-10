@@ -33,7 +33,10 @@ def overview(services: Services = Depends(_services)):
     """仪表盘：Agent 清单摘要 + 今日行为 + 已阻断 + 通道状态 + 最近事件/告警。"""
     since = _today_iso()
     with Session(services.engine) as session:
-        entities = EntityRepository(session).list_agents()
+        all_entities = EntityRepository(session).list_agents(include_hidden=True)
+        entities = [agent for agent in all_entities
+                    if agent.get("lifecycle") != "ARCHIVED"]
+        archived_total = len(all_entities) - len(entities)
         events = BehaviorEventRepository(session)
         summary = events.summary(since)
         recent_events = events.list_events(limit=12)
@@ -59,10 +62,23 @@ def overview(services: Services = Depends(_services)):
         [agent["protection"]["summary"] for agent in entities])
     hook_states = _counts(agent["protection"]["hook_state"] for agent in entities)
     statuses = [agent.get("agent_status") for agent in entities]
-    running_confirmed = sum(1 for status in statuses if status == "RUNNING")
+    # RUNNING counts only what this scan actually observed; stale snapshots
+    # keep their last durable status and are counted as needing verification.
+    running_confirmed = sum(
+        1 for agent in entities
+        if agent.get("agent_status") == "RUNNING"
+        and agent.get("verification") in ("VERIFIED", "PARTIAL"))
     running_unconfirmed = sum(
         1 for agent in entities
         if agent.get("agent_status") is None and agent["instance_count"] > 0)
+    current_detected = sum(1 for agent in entities
+                           if agent.get("presence") == "PRESENT")
+    confirmed_present = sum(
+        1 for agent in entities if agent.get("presence") == "PRESENT"
+        and agent.get("verification") in ("VERIFIED", "PARTIAL"))
+    needs_verification = sum(
+        1 for agent in entities
+        if agent.get("verification") in ("FAILED", "NOT_CHECKED", "STALE"))
     unknown_status = sum(
         1 for status in statuses if status in (None, "UNKNOWN"))
     if not statuses or all(status is None for status in statuses):
@@ -75,8 +91,14 @@ def overview(services: Services = Depends(_services)):
     return {
         "agents": {"total": len(entities), "running": running_legacy,
                    "protection": protection,
+                   "inventory_total": len(all_entities),
+                   "current_detected": current_detected,
+                   "confirmed_present": confirmed_present,
+                   "running_count": running_confirmed,
                    "running_confirmed": running_confirmed,
                    "running_unconfirmed": running_unconfirmed,
+                   "needs_verification": needs_verification,
+                   "archived_total": archived_total,
                    "running_basis": running_basis,
                    "new_24h": new_24h,
                    "unknown_status": unknown_status,

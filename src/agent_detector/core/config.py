@@ -50,6 +50,14 @@ DOCKER_ARCHIVE_BYTE_CAP = max(DOCKER_READ_MAX_BYTES,
                                   4 * 1024 * 1024 * 1024))
 DOCKER_ARCHIVE_TIME_CAP_S = min(max(float(os.getenv("AGENT_DETECTOR_DOCKER_ARCHIVE_TIME_CAP",
                                                     "60")), 1.0), 600.0)
+# Deep-probe cache (T1): archive reads / existence probes / site-packages
+# enumeration are content-addressed by the container image's config digest —
+# same digest, same image layers, same file contents — so results are reused
+# across scans until this TTL lapses. 0 disables the cache and every scan
+# re-reads the daemon (the pre-cache behaviour, which on a starved 2-core
+# daemon meant stall-prone multi-minute scans).
+DOCKER_PROBE_CACHE_TTL_S = min(max(float(os.getenv(
+    "AGENT_DETECTOR_DOCKER_PROBE_CACHE_TTL", "86400")), 0.0), 7 * 86400.0)
 
 MONITOR_INTERVAL = min(max(float(os.getenv("AGENT_DETECTOR_MONITOR_INTERVAL", "2.0")),
                            0.5), 60.0)

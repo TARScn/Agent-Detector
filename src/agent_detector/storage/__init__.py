@@ -6,6 +6,7 @@ from agent_detector.storage.behavior_event_repository import BehaviorEventReposi
 from agent_detector.storage.claim_repository import ClaimRepository
 from agent_detector.storage.component_repository import ComponentRepository
 from agent_detector.storage.coverage_repository import CoverageRepository
+from agent_detector.storage.docker_probe_cache import DockerProbeCacheRepository
 from agent_detector.storage.endpoint_repository import EndpointRepository
 from agent_detector.storage.entity_repository import EntityRepository
 from agent_detector.storage.identity_repository import IdentityRepository
@@ -19,6 +20,7 @@ __all__ = [
     "ClaimRepository",
     "ComponentRepository",
     "CoverageRepository",
+    "DockerProbeCacheRepository",
     "EndpointRepository",
     "EntityRepository",
     "IdentityRepository",

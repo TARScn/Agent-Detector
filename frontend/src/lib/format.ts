@@ -3,8 +3,11 @@ import type {
   Decision,
   ExecutionStatus,
   HookState,
+  Lifecycle,
+  Presence,
   ProtectionSummary,
   RiskLevel,
+  Verification,
 } from "../api/types";
 
 export const AGENT_STATUS: Record<AgentStatus, { label: string; tone: string }> = {
@@ -13,6 +16,35 @@ export const AGENT_STATUS: Record<AgentStatus, { label: string; tone: string }> 
   INSTALLED: { label: "已安装", tone: "neutral" },
   UNKNOWN: { label: "未知", tone: "neutral" },
 };
+
+export const PRESENCE: Record<Presence, { label: string; tone: string }> = {
+  PRESENT: { label: "仍存在", tone: "success" },
+  ABSENT: { label: "已不存在", tone: "neutral" },
+  UNKNOWN: { label: "未确认", tone: "neutral" },
+};
+
+export const VERIFICATION: Record<Verification, { label: string; tone: string }> = {
+  VERIFIED: { label: "已核实", tone: "success" },
+  PARTIAL: { label: "部分核实", tone: "warning" },
+  FAILED: { label: "核实失败", tone: "danger" },
+  NOT_CHECKED: { label: "未核实", tone: "neutral" },
+  STALE: { label: "未复核", tone: "neutral" },
+};
+
+export const LIFECYCLE: Record<Lifecycle, { label: string; tone: string }> = {
+  ACTIVE: { label: "在用", tone: "neutral" },
+  WATCH: { label: "待复核", tone: "warning" },
+  ARCHIVED: { label: "已归档", tone: "neutral" },
+};
+
+/** "（未复核）" only for runs that did not verify the entity this time. */
+export function unverifiedSuffix(verification: Verification | undefined): string {
+  return verification === "FAILED" ||
+    verification === "NOT_CHECKED" ||
+    verification === "STALE"
+    ? "（未复核）"
+    : "";
+}
 
 export const PROTECTION: Record<ProtectionSummary, { label: string; tone: string; hint: string }> = {
   PROTECTED: { label: "已验证阻断", tone: "success", hint: "有真实前置阻断证据" },
@@ -68,10 +100,11 @@ export const ALERT_STATUS: Record<string, { label: string; tone: string }> = {
 };
 
 export const CHANNEL_STATE: Record<string, { label: string; tone: string }> = {
-  OK: { label: "正常", tone: "success" },
-  DEGRADED: { label: "降级", tone: "warning" },
-  DOWN: { label: "停止", tone: "danger" },
+  RUNNING: { label: "运行中", tone: "success" },
+  STANDBY: { label: "备用", tone: "info" },
+  STOPPED: { label: "未运行", tone: "neutral" },
   UNAVAILABLE: { label: "不可用", tone: "neutral" },
+  DOWN: { label: "异常", tone: "danger" },
   UNKNOWN: { label: "未知", tone: "neutral" },
 };
 

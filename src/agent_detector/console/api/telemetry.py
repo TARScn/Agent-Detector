@@ -25,7 +25,6 @@ from agent_detector.core.config import SYSMON_CHANNEL, TETRA_LOG
 from agent_detector.monitoring.services.collector_status import load_collector_status
 from agent_detector.monitoring.services.ingest import BehaviorIngestError
 from agent_detector.monitoring.services.monitor import MonitorError
-from agent_detector.interception.hooks.installer import inspect_all
 
 router = APIRouter(prefix="/api/v1/telemetry", tags=["telemetry"])
 
@@ -61,37 +60,42 @@ def telemetry_status(services: Services = Depends(_services)):
     monitor = services.monitor.status()
     sysmon = sysmon_available(SYSMON_CHANNEL)
     tetragon = tetragon_available(TETRA_LOG)
-    hooks = inspect_all()
-    hook_installed = any(item["state"] in ("INSTALLED", "PARTIAL")
-                         for item in hooks)
     mode = behavior.get("mode")
+    service_running = bool(behavior.get("running"))
     last_event_at = _epoch_iso(behavior.get("last_event_at"))
+    # native_hook is deliberately absent: hook install state lives in
+    # GET /api/v1/hooks (采集页 Hook 安装区), not in the channel list.
     channels = [
-        _channel("sysmon", "Windows Sysmon", sysmon.available,
-                 behavior.get("running") and mode == "sysmon", "Windows",
-                 sysmon.reason, last_event_at, behavior.get("status_age_seconds"),
-                 active_mode=mode),
-        _channel("tetragon", "eBPF (Tetragon)", tetragon.available,
-                 behavior.get("running") and mode == "tetragon", "Linux",
-                 tetragon.reason or "进程/网络/文件事件，含容器身份",
+        _channel("sysmon", "Sysmon", sysmon.available,
+                 service_running and mode == "sysmon", "Windows",
+                 "Windows 行为事件" if sysmon.available else "未安装 Sysmon",
+                 last_event_at, behavior.get("status_age_seconds"),
+                 active_mode=mode, control="behavior",
+                 service_running=service_running),
+        _channel("tetragon", "Tetragon (eBPF)", tetragon.available,
+                 service_running and mode == "tetragon", "Linux",
+                 "进程/网络/文件事件" if tetragon.available else "仅 Linux",
                  last_event_at,
                  tetragon.last_write_age_seconds
                  if tetragon.last_write_age_seconds is not None
                  else behavior.get("status_age_seconds"),
-                 active_mode=mode),
-        _channel("auditd", "Linux auditd", _audit_available(),
-                 behavior.get("running") and mode == "auditd", "Linux",
-                 _audit_detail(), last_event_at, behavior.get("status_age_seconds"),
-                 active_mode=mode),
-        _channel("poll", "采样降级模式", True,
-                 behavior.get("running") and mode == "poll", "all",
-                 "无需 root：仅进程执行级行为", last_event_at,
-                 behavior.get("status_age_seconds"), active_mode=mode),
-        _channel("netmon", "出站连接观察（零合作）", True,
+                 active_mode=mode, control="behavior",
+                 service_running=service_running),
+        _channel("auditd", "auditd", _audit_available(),
+                 service_running and mode == "auditd", "Linux",
+                 "进程/文件/网络事件 · 需 root" if _audit_available()
+                 else "仅 Linux · 需 root",
+                 last_event_at, behavior.get("status_age_seconds"),
+                 active_mode=mode, control="behavior",
+                 service_running=service_running),
+        _channel("poll", "进程采样", True,
+                 service_running and mode == "poll", "all",
+                 "进程执行级 · 免管理员", last_event_at,
+                 behavior.get("status_age_seconds"), active_mode=mode,
+                 control="behavior", service_running=service_running),
+        _channel("netmon", "出站连接观察", True,
                  bool(monitor.get("running")), "all",
-                 "连接级证据，不读取通信内容", None, None),
-        _channel("native_hook", "Agent 原生 Hook", True, hook_installed, "all",
-                 "执行前拦截通道，需要为每个 Agent 安装 Hook", None, None),
+                 "零合作 · 连接级证据", None, None, control="monitor"),
     ]
     return {
         "host_platform": platform.system(),
@@ -106,22 +110,25 @@ def _channel(channel_id: str, name: str, available: bool, running: bool,
              platform_name: str, detail: str,
              last_event_at: str | None,
              status_age_seconds: float | None,
-             active_mode: str | None = None) -> dict:
+             active_mode: str | None = None,
+             control: str | None = None,
+             service_running: bool = False) -> dict:
     if not available:
         state = "UNAVAILABLE"
     elif running:
-        state = "OK"
-    elif channel_id in ("sysmon", "tetragon", "auditd", "poll"):
-        # The active core channel is down; a different available core channel
-        # is merely standby, not a failure.
-        state = "DOWN" if channel_id == active_mode else "OK"
-    elif channel_id == "native_hook":
-        # Hook is per-Agent and optional; no installation is degraded, not down.
-        state = "DEGRADED"
+        state = "RUNNING"
+    elif control == "behavior" and channel_id in ("sysmon", "tetragon",
+                                                  "auditd", "poll"):
+        # Behavior channels are mutually exclusive: an available channel that
+        # is not the active one is standby, and the whole group is stopped
+        # while the ingest service itself is down.
+        state = "STANDBY" if service_running else "STOPPED"
     else:
-        state = "DOWN"
+        state = "DOWN" if service_running and channel_id == active_mode \
+            else "STOPPED"
     return {"id": channel_id, "name": name, "available": available,
             "running": running, "state": state, "detail": detail,
+            "control": control,
             "platform": platform_name,
             "last_event_at": last_event_at,
             "status_age_seconds": status_age_seconds,
@@ -132,11 +139,10 @@ def _health(behavior: dict, monitor: dict, channels: list[dict],
             last_event_at: str | None) -> dict:
     mode = behavior.get("mode")
     active = next((item for item in channels
-                   if item["id"] == mode and item["id"] != "native_hook"), None)
+                   if item["id"] == mode), None)
     core = [item for item in channels
             if item["id"] in ("sysmon", "tetragon", "auditd", "poll")]
-    bad = [item["id"] for item in core
-           if item["state"] in ("DEGRADED", "DOWN")]
+    bad = [item["id"] for item in core if item["state"] == "DOWN"]
     age = behavior.get("status_age_seconds")
     stale = age is not None and age > 120
     if behavior.get("running") and not bad and not stale:
@@ -170,12 +176,6 @@ def _epoch_iso(value) -> str | None:
 
 def _audit_available() -> bool:
     return platform.system() == "Linux"
-
-
-def _audit_detail() -> str:
-    if platform.system() == "Linux":
-        return "需要 root 安装审计规则；audit.log 默认仅 root 可读"
-    return "非 Linux 主机：auditd 不可用（WSL2 因发行版运行在子 PID namespace 亦不可用）"
 
 
 @router.post("/monitor/start")

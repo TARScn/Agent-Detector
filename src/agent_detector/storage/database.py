@@ -81,6 +81,18 @@ _ADDITIVE_COLUMNS.setdefault("entity_attributes", {})["inventory_kind"] = (
 _ADDITIVE_COLUMNS.setdefault("entity_attributes", {})["listening_ports_json"] = (
     "TEXT DEFAULT '[]'")
 
+# V1.3: orthogonal state dimensions + per-scope freshness on snapshots.
+_ADDITIVE_COLUMNS.setdefault("entity_snapshots", {}).update({
+    "presence": "VARCHAR(16) DEFAULT 'UNKNOWN'",
+    "verification": "VARCHAR(16) DEFAULT 'STALE'",
+    "lifecycle": "VARCHAR(16) DEFAULT 'ACTIVE'",
+    "reason_code": "VARCHAR(48) DEFAULT ''",
+    "last_known_status": "VARCHAR(16) DEFAULT 'UNKNOWN'",
+    "owner_scope_type": "VARCHAR(48)",
+    "owner_scope_key": "VARCHAR(256)",
+    "verified_scopes_json": "TEXT DEFAULT '[]'",
+})
+
 _ADDITIVE_INDEXES = (
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_behavior_source_event "
     "ON behavior_events(source, source_event_uid)",
