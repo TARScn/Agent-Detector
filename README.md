@@ -1,183 +1,406 @@
-# Agent Detector · Windows V0.2
+<div align="center">
 
-本机 AI Agent 的安全检测与行为治理工具：**发现 Agent → 关联进程行为 → 理解工具调用 → 执行前拦截 → 审计追溯**。
+# Agent Detector
 
-它不是 Agent 开发框架，而是独立运行在 Agent 外部的监测工具。参考 Microsoft Agent 365 / Defender 的建模方式，
-结合 Claude Code、Codex CLI、Cursor 官方开放的 Hook 接口实现。
+**Discover, observe and pre-emptively block the AI agents running on your machine.**
 
-产品设计稿：`J:\myNotes\plans\agent探测实现.md`。
+**English** · [简体中文](README.zh-CN.md)
 
-## 三种模式
+[![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey?style=flat-square)](#environment--optional-components)
+[![Console](https://img.shields.io/badge/console-React%2018%20%2B%20TDesign-1677ff?style=flat-square)](frontend/)
+[![Version](https://img.shields.io/badge/version-0.2.0-informational?style=flat-square)](pyproject.toml)
 
-| 模式 | 数据来源 | 能做到 |
+</div>
+
+![Agent Detector console overview](docs/screenshots/overview.png)
+
+Agent Detector is a local security tool for AI agents. It is **not** an agent framework:
+it runs *outside* the agent, watches what the agent actually does with processes, files,
+network and tool calls, and can stop a tool call **before it executes** when the agent
+exposes a native `PreToolUse` hook.
+
+The modeling follows Microsoft Agent 365 / Defender: stable asset identity, evidence-backed
+status, explicit coverage, and an honest distinction between *observed* and *enforced*.
+
+> Monitoring a process that is deleting a file does not let you stop it. Only agents wired
+> into a native hook can be blocked ahead of execution; everything else is labelled
+> **monitor only** in the console instead of pretending to be protected.
+
+---
+
+## Why
+
+Coding agents such as Claude Code, Codex CLI and Cursor run shell commands, edit files,
+install packages and read credentials on the developer's own machine. They are powerful,
+long-lived and largely invisible to classic endpoint inventory: an agent is not one process,
+it does not have a version you can trust from the process name, and it may be a container.
+
+Agent Detector answers four questions with evidence rather than guesses:
+
+1. **What is installed?** — a canonical asset identity that survives restarts and PID reuse.
+2. **What is running?** — instances, sessions and the tool calls they made.
+3. **What did it do?** — a unified behavior timeline from hooks, OS telemetry and network observation.
+4. **Can we stop it?** — deterministic `allow` / `ask` / `deny` decisions in the tool-call path.
+
+## Three capabilities
+
+| Mode | Data source | What you get |
 | --- | --- | --- |
-| **Discovery** | 进程、安装记录、Agent 配置、MCP 配置、Docker 容器 | 发现 Agent，给出稳定资产身份、带来源的版本、运行实例 |
-| **Monitor** | Sysmon / eBPF (Tetragon) / auditd / 进程采样 / 出站连接 / 原生 Hook | 观察进程、文件、网络与工具调用行为 |
-| **Protect** | Agent 原生 PreToolUse Hook | 在受支持 Agent 的**工具调用执行前** allow / ask / deny |
+| **Discovery** | Processes, installer records, agent & MCP config, Docker containers | Agents with stable identity, version + `version_source`, instances and sessions |
+| **Monitor** | Sysmon · auditd · Tetragon (eBPF) · process sampling · outbound connections · native hooks | Process / file / network / tool-call behavior |
+| **Protect** | Native `PreToolUse` hooks (Claude Code, Codex CLI, Cursor) | `allow` / `ask` / `deny` **before** the tool call runs |
 
-> 监测到进程正在删除文件，不代表能在删除前阻止它。只有接入原生 Hook 的 Agent 才能被前置阻断，
-> 未接入的 Agent 在界面上一律显示"仅监测"。
+## Features
 
-## 快速开始
+- **Canonical entity identity** — assets are keyed by a canonical `entity_id`, not by PID or
+  install path. Aliases are kept permanently so historical events and alerts still resolve
+  after a migration.
+- **Evidence ledger** — every status claim carries the observations that produced it
+  (`claims` → `claim_evidence`), so a status can be replayed and audited, not just displayed.
+- **Four-axis status projection** — `presence` / `agent_status` / `verification` /
+  `lifecycle` are computed separately, with an explicit `reason_code`; unseen assets keep
+  their last known state and are marked *not re-verified* instead of silently disappearing.
+- **Six collection channels** — hook, Sysmon, auditd, Tetragon, process poll, outbound
+  connections. Each reports its own availability; a missing prerequisite degrades that
+  channel only and is never disguised as healthy.
+- **Deterministic policy engine** — 13 built-in rules, no LLM in the decision path. Rules
+  can be disabled or have their decision overridden from the console and take effect
+  immediately.
+- **Fail-closed interception** — if the decision service is unreachable the tool call is
+  denied by default (`AGENT_DETECTOR_HOOK_FAILURE_MODE=allow` switches to audit-only).
+  `allow` is not proof of execution: the `PostToolUse` event confirms `execution_status`.
+- **Container-aware discovery** — read-only Docker API (never `docker exec`) finds agents
+  deployed as containers such as Dify, n8n, OpenClaw or Langflow, together with their
+  components.
+- **Offline replay** — audit logs and Tetragon exports can be replayed on any platform
+  (`agent-detector replay`) to develop and validate detections without a target host.
+- **React console** — status, protection, coverage and identity semantics are decided by the
+  backend; the UI only presents them ([API contract](docs/web-console-contract.md)).
+
+## Quick start
+
+Windows (PowerShell):
 
 ```powershell
-# 1. 安装（创建虚拟环境 + 可编辑安装 + 通道体检 + 生成 Hook Token）
+# 1. Install: venv + editable install + channel health check + hook token
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 
-# 2. 启动控制台（默认 http://127.0.0.1:8787）
+# 2. Start the console at http://127.0.0.1:8787
 .venv\Scripts\python.exe -m agent_detector.console.cli.main serve
 
-# 3. 首次扫描
+# 3. First scan (in another shell)
 .venv\Scripts\python.exe -m agent_detector.console.cli.main scan
 ```
 
-Linux / macOS 上等价（采集通道会自动降级）：
+Linux / macOS (telemetry channels degrade automatically):
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[test]"
 uvicorn agent_detector.console.api.app:app --host 127.0.0.1 --port 8787
+agent-detector scan
 ```
 
-## 控制台
+`install.ps1` deliberately does **not**: install Sysmon, write any agent's hook config,
+elevate privileges, or register a startup task.
 
-生产默认使用 `console/web/next/`（React 18 + TypeScript + Vite + TDesign React），源码在
-[`frontend/`](frontend/)。控制台已切换到 V1.2 canonical `entity_id`：资产路由、事件过滤和 API
-响应不再暴露 legacy `asset_id`/`app_id`。React 控制台遵循
-[Web 控制台 API 契约](docs/web-console-contract.md)：状态/保护/覆盖/身份语义由后端裁决，
-前端只负责呈现。
-
-首次构建前端：
+Check what is actually available at any time:
 
 ```powershell
-cd frontend
-npm install
-npm run build
+agent-detector channels          # or the Collectors page in the console
 ```
 
-风格参考 Microsoft 365 admin center / Agent 365：白色命令栏、分组左导航、卡片式内容区与状态徽章。
+### Environment & optional components
 
-| 页面 | 内容 |
+Python dependencies are handled by `pip`. Everything below is optional — installing none of
+them still starts the tool, and each absent channel is reported as unavailable/degraded.
+
+| Component | Required | Purpose | Platform |
+| --- | --- | --- | --- |
+| Python ≥ 3.11 (`tomllib`) | Yes | Runtime | Any |
+| Node.js ≥ 18 + npm | No* | Frontend development only (build output is committed) | Any |
+| Docker Desktop / Engine | No | Container-shaped agent discovery | Any |
+| Sysmon | No | Process / network / file / DNS events | Windows |
+| auditd | No | Syscall-level audit rules | Linux (not in WSL2) |
+| Tetragon | No | eBPF behavior collection with container identity | Linux ≥ 4.19 |
+| Claude Code / Codex CLI / Cursor | No | The agents being monitored/protected | Vendor channels |
+
+\* Frontend source lives in [`frontend/`](frontend/); rebuild with `scripts\build-web.ps1`
+only when you change it.
+
+**Sysmon** (Windows, administrator):
+
+```powershell
+winget install Microsoft.Sysinternals.Sysmon --source winget
+sysmon64.exe -accepteula -i configs\sysmon.xml
+```
+
+The console usually runs unelevated and therefore cannot read the Sysmon channel. Append a
+user read ACE with the **full SDDL** (query your SID with `whoami /user`):
+
+```powershell
+wevtutil sl Microsoft-Windows-Sysmon/Operational ^
+  /ca:"O:BAG:SYD:(A;;0xf0007;;;SY)(A;;0x7;;;BA)(A;;0x1;;;BO)(A;;0x1;;;SO)(A;;0x1;;;S-1-5-32-573)(A;;0x1;;;YOUR-SID)"
+```
+
+If a configuration already exists, export it with `sysmon64.exe -c` and merge — do not
+overwrite the whole file. Details: [docs/windows.md](docs/windows.md).
+
+**Tetragon** (Linux, root): install v1.7.1, export to a JSON file and enable process
+namespace events; the tool only tails the export, it never loads eBPF programs itself:
+
+```bash
+curl -fSL -o /tmp/tetragon.tar.gz https://github.com/cilium/tetragon/releases/download/v1.7.1/tetragon-v1.7.1-amd64.tar.gz
+sudo tar -xzf /tmp/tetragon.tar.gz -C /tmp
+sudo bash /tmp/tetragon-v1.7.1-amd64/install.sh
+sudo mkdir -p /var/log/tetragon
+sudo printf '/var/log/tetragon/events.json\n' > /etc/tetragon/tetragon.conf.d/export-filename
+sudo printf 'true\n' > /etc/tetragon/tetragon.conf.d/enable-process-ns
+sudo systemctl restart tetragon
+```
+
+`agent-detector tetragon` prints the current channel state and these commands at any time.
+For auditd, `agent-detector audit-rules --watch-dir /path` prints the rules and install
+commands; the tool never elevates privileges for you.
+
+## Console
+
+The console is a React 18 + TypeScript + Vite + TDesign app, built into
+`src/agent_detector/console/web/next/` and served by the local API. Visual language follows
+Microsoft 365 admin center / Agent 365: a white command bar, grouped left navigation,
+card-based content and status badges.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/assets.png" alt="Asset inventory"></td>
+<td width="50%"><img src="docs/screenshots/asset-detail.png" alt="Asset detail"></td>
+</tr>
+<tr>
+<td><sub><b>Asset inventory</b> — capability, hook state, protection state, instances/sessions.</sub></td>
+<td><sub><b>Asset detail</b> — identity, protection basis, version provenance, instances, claims, coverage.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/alerts.png" alt="Risk alerts"></td>
+<td><img src="docs/screenshots/policies.png" alt="Security policies"></td>
+</tr>
+<tr>
+<td><sub><b>Risk alerts</b> — blocked tool calls with the policy that matched, acknowledge / resolve.</sub></td>
+<td><sub><b>Security policies</b> — decision, risk, priority and match conditions per rule.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/events.png" alt="Behavior timeline"></td>
+<td><img src="docs/screenshots/collectors.png" alt="Collectors"></td>
+</tr>
+<tr>
+<td><sub><b>Behavior timeline</b> — unified event stream over SSE, expandable evidence tags.</sub></td>
+<td><sub><b>Collectors</b> — six channel states plus per-agent hook install state.</sub></td>
+</tr>
+</table>
+
+| Page | Content |
 | --- | --- |
-| 总览 | 发现 Agent / 今日行为 / 已阻断 / 未启用拦截 四个数字 + 保护状态分布 + 采集通道 + 实时事件 |
-| Agent 资产 | 资产清单（能力矩阵、Hook 状态、保护状态、实例与会话数）；详情页含身份、实例、会话、MCP、证据 |
-| 行为时间线 | 统一事件流（Hook / Sysmon / auditd / 采样 / 网络），SSE 实时追加，可展开证据标签 |
-| 安全策略 | 13 条内置规则的决策、风险、优先级与匹配条件；可停用规则或改判决策并立即生效 |
-| 风险告警 | 阻断调用与高风险事件的告警，可确认 / 解决 |
-| 设置 | 系统信息、采集通道、Hook 安装（dry-run → 写入并备份）、auditd 规则生成器、支持矩阵、待开发清单 |
+| Overview | Discovered agents, today's behavior, blocked calls, unprotected agents; trend, distribution, live events |
+| Assets | Asset inventory and per-asset identity, instances, sessions, MCP servers, evidence |
+| Behavior timeline | Unified event stream (hook / Sysmon / auditd / poll / network) with live SSE append |
+| Security policies | 13 built-in rules; disable a rule or override its decision, effective immediately |
+| Alerts | Blocked calls and high-risk events; acknowledge / resolve |
+| Collectors | Six channel states, channel start/stop, hook install/uninstall (confirmed, backed up) |
+| Settings | System info, hook status, auditd rule generator, support matrix, roadmap |
 
-页面上标注"待开发"的部分是明确的未完成能力（例如策略可视化编辑、告警通知渠道），不会伪装成已实现。
+Anything marked *planned* in the UI is explicitly unfinished (e.g. visual policy editing,
+alert notification channels); it is not disguised as implemented.
 
-## Hook 与执行前拦截
+## How it works
 
-```powershell
-agent-detector hooks status                      # 各 Agent 的 Hook 配置状态
-agent-detector hooks plan claude_code            # dry-run：打印将要写入的内容
-agent-detector hooks install claude_code --apply # 写入（先备份，只增删本工具的条目）
-agent-detector hooks uninstall cursor --apply    # 卸载
-agent-detector policy test --command "rm -rf ~/.ssh"   # 策略自查，不需要 Agent 参与
+```
+             ┌──────────────────── Console (React 18 · TDesign) ────────────────────┐
+             │ Overview · Assets · Timeline · Policies · Alerts · Collectors        │
+             └───────────────────────────────▲──────────────────────────────────────┘
+                                             │ REST + SSE · 127.0.0.1:8787
+┌────────────────────────────────────────────┴─────────────────────────────────────────┐
+│                                 agent-detector core                                  │
+│                                                                                      │
+│  Discovery  filesystem · installers · agent/MCP config · Docker API                  │
+│             → canonical entities → evidence ledger → 4-axis status projection        │
+│                                                                                      │
+│  Monitor    Sysmon · auditd · Tetragon · process poll · netmon                       │
+│             → behavior_events → policy engine → alerts                               │
+│                                                                                      │
+│  Protect    PreToolUse hook → POST /internal/v1/hooks/decide → allow · ask · deny     │
+└──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-链路：`hook_bridge`（仅标准库，位于 Agent 工具调用路径内）→ `POST /internal/v1/hooks/decide`
-（loopback + Token）→ 策略引擎（确定性，不调用 LLM）→ 事件 + 告警 → 转换为该 Agent 的原生响应。
+The interception path is intentionally small: `hook_bridge` (standard library only) sits in
+the agent's tool-call path, posts to a loopback endpoint authenticated by a token, receives a
+deterministic decision from the policy engine (no LLM call), records event + alert, and
+translates the decision into that agent's native hook response.
 
-- 服务不可达时默认 **fail-closed**（拒绝调用），可用 `AGENT_DETECTOR_HOOK_FAILURE_MODE=allow` 改为审计放行。
-- `decision=allow` 不等于执行成功：成功由 `PostToolUse` 事件确认（`execution_status`）。
-- 详见 [docs/hooks.md](docs/hooks.md) 与 [docs/policy.md](docs/policy.md)。
+```powershell
+agent-detector hooks status                      # per-agent hook configuration state
+agent-detector hooks plan claude_code            # dry run: print what would be written
+agent-detector hooks install claude_code --apply # write (backup first, only our entries)
+agent-detector hooks uninstall cursor --apply
+agent-detector policy test --command "rm -rf ~/.ssh"
+```
+
+See [docs/hooks.md](docs/hooks.md) and [docs/policy.md](docs/policy.md).
+
+## Supported agents
+
+| Agent | Discovery | Monitor | Protect | Notes |
+| --- | --- | --- | --- | --- |
+| Claude Code | Yes | Yes | Yes | Native `PreToolUse` hook, token-authenticated |
+| Codex CLI | Yes | Yes | Yes | Native hook adapter |
+| Cursor | Yes | Yes | Yes | Native hook adapter |
+| OpenCode / Hermes | Yes | Yes | Planned | Installer + config discovery, process attribution |
+| Self-built (LangChain, LangGraph, CrewAI) | Yes | Yes | Planned | Identified from project dependency metadata, not process names |
+| Containerized (Dify, n8n, OpenClaw, Langflow …) | Yes | Partial | Planned | Read-only Docker API; behavior limited by container visibility |
+
+Capability levels (`P0` / `P1` / `P2` / `planned`) are shown per asset in the console, so a
+partially supported agent never looks fully covered.
 
 ## CLI
 
 ```
-agent-detector serve                                 启动控制台与决策服务
-agent-detector scan [--active] [--json]              资产扫描（+  Agent 清单刷新）
-agent-detector agents list|show <asset_id>           Agent 资产、实例、会话、保护状态
-agent-detector assets [--scan-id N]                  组件资产（含 MCP / 模型服务）
-agent-detector events [--source X] [--risk high]     行为事件（Hook / Sysmon / auditd / 采样 / 网络）
-agent-detector alerts [--status open]                安全告警
-agent-detector monitor --duration 60                 出站 LLM 调用观察（零合作）
-agent-detector collect --mode sysmon --duration 60   系统行为采集（sysmon / tetragon / auditd / poll）
-agent-detector replay <log> [--format tetragon]      离线回放 audit 日志或 Tetragon 导出（任意平台）
-agent-detector channels                              采集通道可用性体检
-agent-detector audit-rules --watch-dir /path         打印 auditd 规则与安装命令（不自动提权）
-agent-detector tetragon                              打印 Tetragon 通道状态与部署命令（不自动提权）
-agent-detector policy list | policy test --command …  策略清单与决策自查
+agent-detector serve                                 Start console + decision service
+agent-detector scan [--active] [--json]              Asset scan (+ agent inventory refresh)
+agent-detector agents list | show <entity_id>        Agents, instances, sessions, protection
+agent-detector assets [--scan-id N]                  Component assets (incl. MCP / model services)
+agent-detector events [--source X] [--risk high]     Behavior events
+agent-detector alerts [--status open]                Security alerts
+agent-detector monitor --duration 60                 Outbound LLM call observation (zero cooperation)
+agent-detector collect --mode sysmon --duration 60   System behavior collection
+agent-detector replay <log> [--format tetragon]      Replay audit log / Tetragon export offline
+agent-detector channels                              Collection channel health check
+agent-detector audit-rules --watch-dir /path         Print auditd rules + install commands
+agent-detector tetragon                              Tetragon channel state + deploy commands
+agent-detector policy list | policy test --command … Policy inventory and decision self-test
 agent-detector hooks status|plan|install|uninstall|snippet
-agent-detector purge [--older-than-days N] [--all]   保留策略清理
+agent-detector identity backfill|resolve <asset_id>  Legacy id → canonical entity
+agent-detector replay-evidence --scan-id N           Re-project stored observations, no re-collection
+agent-detector purge [--older-than-days N] [--all]   Retention cleanup
 ```
 
 ## REST API
 
+All endpoints are served under `127.0.0.1` by default; the console contract is documented in
+[docs/web-console-contract.md](docs/web-console-contract.md).
+
 ```
-GET  /api/v1/overview                          仪表盘汇总
-GET  /api/v1/agents | /{id} | /{id}/mcp         Agent 资产与详情
-GET  /api/v1/agents/{id}/claims|coverage|relations     证据、覆盖与关系
-POST /api/v1/discovery/scan                     发起扫描
-GET  /api/v1/discovery/scan/status              当前扫描是否在运行（页面刷新后仍可判断）
+GET  /api/v1/overview                                    Dashboard summary
+GET  /api/v1/agents | /{id} | /{id}/mcp                  Agent assets and detail
+GET  /api/v1/agents/{id}/claims|coverage|relations        Evidence, coverage, relations
+POST /api/v1/discovery/scan                              Start a scan
+GET  /api/v1/discovery/scan/status                       Is a scan running (survives reload)
 GET  /api/v1/events | /{id} | /events/stats | /events/timeseries | /events/stream
-                                                事件查询（before_id/after_id 游标）、趋势与 SSE
-GET  /api/v1/attention                          待关注事项 API（当前控制台未展示）
-GET  /api/v1/policies | PUT /{id} | POST /reload        策略查询与覆盖
-GET  /api/v1/alerts | PATCH /{id}               告警
-GET  /api/v1/telemetry/status | /audit-rules    通道状态与 auditd 规则模板
-POST /api/v1/telemetry/monitor/start|stop       出站连接观察
-POST /api/v1/telemetry/behavior/start|stop      系统行为采集
-GET  /api/v1/hooks | POST /{agent}/plan|install|uninstall   Hook 管理（默认 dry-run）
-GET  /api/v1/system | /api/v1/capabilities      环境信息与能力清单
-POST /internal/v1/hooks/decide                  Hook 决策（内部控制接口，需 Token）
+                                                         Event query (cursor), trends, SSE
+GET  /api/v1/policies | PUT /{id} | POST /reload         Policy query and override
+GET  /api/v1/alerts | PATCH /{id}                        Alerts
+GET  /api/v1/telemetry/status | /audit-rules             Channel status, auditd rule template
+POST /api/v1/telemetry/monitor/start|stop                Outbound connection observation
+POST /api/v1/telemetry/behavior/start|stop               System behavior collection
+GET  /api/v1/hooks | POST /{agent}/plan|install|uninstall Hook management (dry run by default)
+GET  /api/v1/system | /api/v1/capabilities               Environment info, capability matrix
+POST /internal/v1/hooks/decide                           Hook decision (internal, token required)
 ```
 
-## 数据模型
+## Data model
 
-`scan_tasks`（扫描代次）；
-`entities` / `entity_keys` / `entity_aliases` / `entity_attributes` / `entity_locations`（canonical 资产身份与属性）；
-`entity_snapshots` / `observations` / `claims` / `claim_evidence`（状态投影与证据账本）；
-`components` / `component_relations`（组件依赖图）；
-`agent_instances` / `agent_sessions`（运行实例与 Hook 会话）；
-`behavior_events`（统一行为事件，`source` 区分通道）；
-`security_policies` / `security_alerts`（策略覆盖与告警）；
-`coverage_scopes` / `coverage_scope_*` / `removal_candidates`（覆盖与缺席候选）。
+- `scan_tasks` — scan generations
+- `entities` / `entity_keys` / `entity_aliases` / `entity_attributes` / `entity_locations` —
+  canonical asset identity and attributes
+- `entity_snapshots` / `observations` / `claims` / `claim_evidence` — status projection and
+  the evidence ledger
+- `components` / `component_relations` — component dependency graph
+- `agent_instances` / `agent_sessions` — runtime instances and hook sessions
+- `behavior_events` — unified events, `source` distinguishes channels
+- `security_policies` / `security_alerts` — policy overrides and alerts
+- `coverage_scopes` / `coverage_scope_*` / `removal_candidates` — coverage and absence candidates
 
-V1.2 迁移后，旧的 `assets` / `asset_snapshots` / `evidence` / `agent_assets` / `applications` / `application_components`
-已删除；数据已进入上述 canonical 表，旧表内容另存于 `data/backups/legacy-tables-*.json.gz`。
-`entity_aliases` 永久保留，用于历史事件/告警的只读 ID 桥。
+Design rules:
 
-- 资产身份与 PID 无关；实例身份含启动时间（Windows 会复用 PID）。
-- 事件只存元数据与脱敏摘要：不含对话内容、文件内容与凭据原文。
-- 版本信息一律带 `version_source`，无可靠来源输出 `UNKNOWN`。
+- Asset identity is independent of PID; instance identity includes start time (Windows reuses PIDs).
+- Events store metadata and redacted summaries only — no conversation, file contents or credentials.
+- Every version carries a `version_source`; without a reliable source it is reported as `UNKNOWN`.
 
-## 环境变量（摘要）
+## Configuration
 
-`AGENT_DETECTOR_DB`（数据库路径）、`_HOST` / `_PORT`（监听地址，默认 127.0.0.1:8787）、
-`CONSOLE_UI`（保留变量；当前只提供 `next` React 控制台）、
-`_HOOK_TOKEN` / `_HOOK_TOKEN_FILE`、`_HOOK_FAILURE_MODE`（block|allow）、`_HOOK_TIMEOUT`、`_POLICY_DIR`、
-`_AGENTS_FILE`、`_SYSMON_CHANNEL`、`_ALERT_RISK_LEVEL`、`_RULES_DIR`、`_BEHAVIOR_RULES_DIR`、
-`_AUDIT_LOG`、`_TETRA_LOG`（Tetragon JSON 导出文件，默认 `/var/log/tetragon/events.json`）、
-`_PROCESS_RESEED_SECONDS`（事件丢失全量重校准，逐出幽灵进程）、
-`_PROC_SNAPSHOT` / `_PROC_SNAPSHOT_MAX_AGE`（进程注册表快照，独立扫描优先采用；0600 权限、argv 脱敏）、
-`_COLLECTOR_STATUS` / `_COLLECTOR_STATUS_MAX_AGE`（采集器健康文件，console 跨进程读取真实计数）、
-`_BEHAVIOR_*`（抑制窗口 / 速率 / 保留 / 路径策略 / 是否存 argv / 忽略进程名 `IGNORE_PROC`）等。
-完整列表见 `src/agent_detector/core/config.py`。
+| Variable | Meaning |
+| --- | --- |
+| `AGENT_DETECTOR_DB` | SQLite database path |
+| `AGENT_DETECTOR_HOST` / `_PORT` | Bind address (default `127.0.0.1:8787`) |
+| `AGENT_DETECTOR_HOOK_TOKEN` / `_HOOK_TOKEN_FILE` | Token for the internal decision endpoint |
+| `AGENT_DETECTOR_HOOK_FAILURE_MODE` | `block` (fail-closed, default) or `allow` (audit only) |
+| `AGENT_DETECTOR_HOOK_TIMEOUT` | Decision timeout |
+| `AGENT_DETECTOR_POLICY_DIR` / `_AGENTS_FILE` | Policy and agent rules |
+| `AGENT_DETECTOR_SYSMON_CHANNEL` | Sysmon event channel |
+| `AGENT_DETECTOR_TETRA_LOG` | Tetragon JSON export (default `/var/log/tetragon/events.json`) |
+| `AGENT_DETECTOR_AUDIT_LOG` | auditd log path |
+| `AGENT_DETECTOR_RULES_DIR` / `_BEHAVIOR_RULES_DIR` | Detection and behavior rule directories |
+| `AGENT_DETECTOR_ALERT_RISK_LEVEL` | Minimum risk level that raises an alert |
+| `AGENT_DETECTOR_PROCESS_RESEED_SECONDS` | Full process re-calibration after dropped events |
+| `AGENT_DETECTOR_PROC_SNAPSHOT` / `_PROC_SNAPSHOT_MAX_AGE` | Process registry snapshot (0600, redacted argv) |
+| `AGENT_DETECTOR_COLLECTOR_STATUS` / `_COLLECTOR_STATUS_MAX_AGE` | Collector health file for cross-process counts |
+| `AGENT_DETECTOR_BEHAVIOR_*` | Suppression window, rate, retention, path policy, argv storage, `IGNORE_PROC` |
 
-## 范围与安全限制
+Full list: [`src/agent_detector/core/config.py`](src/agent_detector/core/config.py).
 
-- 默认只监听 `127.0.0.1`；`/internal/v1/hooks/decide` 是内部控制接口，用 Token 鉴权，不要暴露到网络。
-- Sysmon 的 Event ID 3（网络连接）默认关闭，需要按 [configs/sysmon.xml](configs/sysmon.xml) 显式启用。
-- Sysmon 文件事件不覆盖全部读写改名；auditd 需要 root 安装规则（工具只打印命令，不自动提权）。
-- 用户级 Hook 不具备不可篡改性（同权限用户可修改）；企业级需要托管配置、ACL 与策略签名。
-- WSL2 内的 Agent 不在首期范围：发行版运行在子 PID namespace，auditd 不可用，Windows 侧 Hook 也不适用。
-- 不执行被发现的 Agent、MCP stdio 启动命令或 Skill；不读取通信内容与文件内容。
+## Scope & safety boundaries
 
-## 文档
+- Binds to `127.0.0.1` by default; `/internal/v1/hooks/decide` is an internal endpoint
+  authenticated by token — do not expose it to a network.
+- Sysmon Event ID 3 (network connection) is disabled by default; enable it explicitly in
+  [configs/sysmon.xml](configs/sysmon.xml).
+- Sysmon file events do not cover every read/write/rename; auditd rules require root and the
+  tool only prints the commands, it never elevates.
+- User-level hooks are not tamper-proof (same-privilege users can edit them). Enterprise use
+  needs managed configuration, ACLs and policy signing.
+- Agents inside WSL2 are out of scope for now: the distro runs in a sub-PID namespace, auditd
+  is unavailable, and Windows-side hooks do not apply.
+- The tool never executes a discovered agent, MCP stdio startup command or skill, and never
+  reads conversation or file contents.
 
-[architecture.md](docs/architecture.md) · [windows.md](docs/windows.md) · [hooks.md](docs/hooks.md) ·
-[policy.md](docs/policy.md) · [rules.md](docs/rules.md)（检测规则） · [behavior.md](docs/behavior.md)（网络调用观察） ·
-[syscall-monitoring.md](docs/syscall-monitoring.md)（系统行为监测） ·
-[ebpf-monitoring.md](docs/ebpf-monitoring.md)（eBPF/Tetragon 通道） ·
-[docker-discovery.md](docs/docker-discovery.md)（容器发现） ·
-[web-console-contract.md](docs/web-console-contract.md)（Web 控制台 API 契约）
+## Project layout
 
-## 测试
+```
+src/agent_detector/
+  aggregation/   evidence ledger, predicates, status projection, state resolver
+  console/       FastAPI app, CLI, built React console (web/next)
+  discovery/     filesystem, installers, frameworks, MCP, LLM config, Docker sources
+  identity/      canonical entity identity and legacy aliases
+  interception/  hook adapters (Claude Code, Codex, Cursor), installer, policy engine
+  monitoring/    sysmon / auditd / tetragon / poll / netmon collectors, ingest, rules
+  storage/       SQLAlchemy models, repository, migrations
+frontend/        React 18 + TypeScript + Vite + TDesign source
+configs/         Sysmon configuration and rule assets
+docs/            architecture, hooks, policy, rules, per-OS and channel documentation
+scripts/         install / uninstall / web build
+```
+
+## Documentation
+
+[architecture](docs/architecture.md) · [architecture v1.2](docs/architecture-v1.2.md) ·
+[Windows setup](docs/windows.md) · [hooks](docs/hooks.md) · [policy](docs/policy.md) ·
+[detection rules](docs/rules.md) · [network observation](docs/behavior.md) ·
+[syscall monitoring](docs/syscall-monitoring.md) · [eBPF / Tetragon](docs/ebpf-monitoring.md) ·
+[Docker discovery](docs/docker-discovery.md) · [web console contract](docs/web-console-contract.md)
+
+## Development & testing
 
 ```bash
-pytest -q          # 策略语义、适配器、安装器、决策接口、SSE、采集归一化、持久化等
+pytest -q      # policy semantics, adapters, installer, decision endpoint, SSE,
+               # collector normalization, persistence, web contract
 ```
+
+Rebuild the console only when the frontend changes:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-web.ps1
+```
+
+## Status
+
+Pre-1.0 (`0.2.0`), Windows-first. The console and API are documented and tested but the
+contract may still change between minor versions. No license file is present yet — add one
+before redistributing.
