@@ -25,7 +25,8 @@ from agent_detector.discovery.sources.deps import interest_names
 from agent_detector.discovery.fingerprints.loader import load_rules
 from agent_detector.discovery.sources.llm_config import endpoints_for
 from agent_detector.discovery.sources.mcp import for_agent as mcp_for_agent
-from agent_detector.discovery.sources.mcp import scan_mcp_servers
+from agent_detector.discovery.sources.mcp import McpConfigReference, legacy_servers
+from agent_detector.discovery.sources.mcp import scan_mcp_configs
 from agent_detector.core.enums import (AssetState, AssetType, HookState, ProtectionStatus,
                                          VersionSource)
 from agent_detector.aggregation.state_resolver import (ABSENT, FAILED,
@@ -100,7 +101,8 @@ class InventoryBuilder:
         deps = {name for rule in self._framework_rules.values()
                 for name in (*rule.dependencies.any, *rule.dependencies.all)}
         self._verification_interest = interest_names(deps)
-        self.mcp_servers = []
+        self.mcp_refs: list[McpConfigReference] = []
+        self.mcp_servers: list = []
         self.warnings: list[str] = []
         # Evidence only: presence observations for entities that did not show
         # up in this scan. The scan coordinator writes them as claims; the
@@ -111,10 +113,18 @@ class InventoryBuilder:
         self.unverified: dict[str, str] = {}
         self._coverage = None
 
-    def refresh_mcp(self) -> None:
+    def refresh_mcp(self, refs: list[McpConfigReference] | None = None) -> None:
+        """Adopt the scan stage's config references, or scan the home ourselves.
+
+        The scan coordinator passes the full user+project reference list; a
+        broken config must not break a scan, so every failure degrades to a
+        warning with the legacy view emptied.
+        """
         try:
-            self.mcp_servers = scan_mcp_servers(self.home)
+            self.mcp_refs = list(refs) if refs is not None else scan_mcp_configs(self.home)
+            self.mcp_servers = legacy_servers(self.mcp_refs)
         except Exception as exc:  # a broken MCP config must not break a scan
+            self.mcp_refs = []
             self.mcp_servers = []
             self.warnings.append(f"MCP 配置读取失败：{exc}")
 
@@ -123,7 +133,8 @@ class InventoryBuilder:
                    app_links: dict[str, dict] | None = None,
                    failed_detectors: tuple[str, ...] | set[str] = (),
                    docker_context: dict | None = None,
-                   coverage=None) -> list[dict]:
+                   coverage=None,
+                   mcp_refs: list[McpConfigReference] | None = None) -> list[dict]:
         """Upsert Agent assets/instances for one scan; returns the asset dicts.
 
         ``app_links`` maps a self-built framework asset id to its application
@@ -134,12 +145,15 @@ class InventoryBuilder:
         containers_seen, candidates_seen, links}); ``links`` maps a container
         asset id to its container ({container_id, image, state, started_at,
         command, processes}).
+        ``mcp_refs`` is the scan stage's MCP config reference list; ``None``
+        makes the builder scan the home's user-level configs itself (tests and
+        standalone callers).
         """
         repository = AgentInventoryRepository(session)
         self.observations = []
         self.unverified = {}
         self._coverage = coverage
-        self.refresh_mcp()
+        self.refresh_mcp(mcp_refs)
         processes = {proc.pid: proc for proc in facts.processes}
         app_links = app_links or {}
         container_links = (docker_context or {}).get("links") or {}

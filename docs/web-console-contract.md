@@ -48,7 +48,7 @@
 | GET | `/api/v1/agents/{entity_id}/claims` | 新增 | 证据 Claim |
 | GET | `/api/v1/agents/{entity_id}/coverage` | 新增 | 覆盖范围 |
 | GET | `/api/v1/agents/{entity_id}/relations` | 新增 | 关系/组件/端点 |
-| GET | `/api/v1/agents/{entity_id}/mcp` | 已存在 | MCP 名称/传输（不含命令） |
+| GET | `/api/v1/agents/{entity_id}/mcp` | 扩展 | MCP 配置引用（名称/传输/来源/作用域/运行与探测状态，不含命令） |
 | GET | `/api/v1/events` | 扩展 | 事件列表（双向游标） |
 | GET | `/api/v1/events/{event_id}` | 新增 | 单事件 |
 | GET | `/api/v1/events/stats` | 扩展 | 事件统计 |
@@ -791,7 +791,7 @@ export interface OverviewView {
 - `evidence` 保持现有扫描证据语义；**不得**把它当 Claim 展示。
 - `404`：不存在该 `asset_id`。
 - `relations`/`claims_summary`/`coverage` 在数据不可用时返回空数组/`available:false`，**不返回 404**。
-- `GET /api/v1/agents/{asset_id}/mcp` 保持独立：只返回 MCP 服务名称与传输类型；命令、参数、环境变量不入库也不返回（`console/api/agents.py:104-115`）。
+- `GET /api/v1/agents/{entity_id}/mcp` 保持独立并升级为配置引用视图：每个条目来自 `mcp_config_refs`（identity = host + 配置路径 + server 名），返回 `name/transport/agent_type(声明客户端)/source(配置路径)/scope(user|project)/enabled/run_status/probe_status`；无引用记录时回退旧的名称列表（transport UNKNOWN）。命令、参数、环境变量、URL query 不入库也不返回；endpoint 入库前已去 query（contract C10）。stdio 的 run_status 来自进程关联核验，http/sse 的 probe_status 来自受控 JSON-RPC 探测（只列工具，永不调用）。
 - 详情内联的 `instances/sessions/events/evidence` 只是最近 20 条；完整列表/分页继续用现有子端点 `/{id}/instances|sessions|events|evidence`。
 
 **保护对象（新增）**

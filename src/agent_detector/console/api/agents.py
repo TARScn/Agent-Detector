@@ -13,7 +13,8 @@ from agent_detector.console.api.deps import Services, get_services
 from agent_detector.console.api.evidence import (agent_coverage,
                                                  relations_for_entity)
 from agent_detector.storage import (BehaviorEventRepository, ClaimRepository,
-                                    ComponentRepository, EntityRepository)
+                                    ComponentRepository, EntityRepository,
+                                    McpConfigRefRepository)
 from agent_detector.storage.models import EntityAttributeRow
 
 router = APIRouter(prefix="/api/v1", tags=["agents"])
@@ -170,11 +171,31 @@ def agent_evidence(entity_id: str, services: Services = Depends(_services)):
 
 @router.get("/agents/{entity_id}/mcp")
 def agent_mcp(entity_id: str, services: Services = Depends(_services)):
+    """MCP config references for one Agent entity.
+
+    Primary source is ``mcp_config_refs`` (scoped references with transport,
+    config path and runtime/probe status); the legacy name-only attribute list
+    remains the fallback for entities not yet covered by a config scan.
+    Names, transports and sanitized endpoints only — never commands, args,
+    env or URL query (contract C10).
+    """
     with Session(services.engine) as session:
         attr = session.get(EntityAttributeRow, entity_id)
         if attr is None:
             raise HTTPException(status_code=404, detail="未找到该 Agent 实体")
-        names = _parse_json(attr.mcp_servers_json, [])
-    return {"items": [{"name": name, "transport": "UNKNOWN",
-                       "source": "config"} for name in names],
-            "notes": []}
+        refs = McpConfigRefRepository(session).list_for_entity(entity_id)
+        if refs:
+            items = [{"name": row.server_name, "transport": row.transport,
+                      "agent_type": row.client, "source": row.config_path,
+                      "scope": row.scope, "enabled": row.enabled,
+                      "run_status": row.run_status or "unknown",
+                      "probe_status": row.probe_status or "unknown"}
+                     for row in refs]
+        else:
+            names = _parse_json(attr.mcp_servers_json, [])
+            items = [{"name": name, "transport": "UNKNOWN",
+                      "agent_type": attr.agent_type, "source": "config",
+                      "scope": "user", "enabled": "unknown",
+                      "run_status": "unknown", "probe_status": "unknown"}
+                     for name in names]
+    return {"items": items, "notes": []}

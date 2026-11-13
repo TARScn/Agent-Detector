@@ -10,6 +10,7 @@ from agent_detector.storage.docker_probe_cache import DockerProbeCacheRepository
 from agent_detector.storage.endpoint_repository import EndpointRepository
 from agent_detector.storage.entity_repository import EntityRepository
 from agent_detector.storage.identity_repository import IdentityRepository
+from agent_detector.storage.mcp_repository import McpConfigRefRepository
 from agent_detector.storage.policy_repository import PolicyRepository
 from agent_detector.storage.scan_repository import ScanRepository
 
@@ -24,6 +25,7 @@ __all__ = [
     "EndpointRepository",
     "EntityRepository",
     "IdentityRepository",
+    "McpConfigRefRepository",
     "PolicyRepository",
     "ScanRepository",
 ]

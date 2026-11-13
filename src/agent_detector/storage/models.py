@@ -609,6 +609,62 @@ class ComponentRelationRow(Base):
     )
 
 
+class McpConfigRefRow(Base):
+    """One MCP server entry as declared in one client config file.
+
+    Identity is host + config path + server name: the same server name in two
+    clients (or two scopes) stays two rows. Privacy (C10): no command, args,
+    env or URL query is ever written — the endpoint is sanitized upstream and
+    ``config_digest`` is a one-way hash over the raw spec.
+    """
+
+    __tablename__ = "mcp_config_refs"
+
+    ref_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    entity_id: Mapped[str] = mapped_column(String(96), index=True, default="")
+    client: Mapped[str] = mapped_column(String(64), default="")
+    server_name: Mapped[str] = mapped_column(String(200), default="")
+    scope: Mapped[str] = mapped_column(String(16), default="user")
+    config_path: Mapped[str] = mapped_column(Text, default="")
+    transport: Mapped[str] = mapped_column(String(24), default="unknown")
+    endpoint: Mapped[str] = mapped_column(String(400), default="")
+    enabled: Mapped[str] = mapped_column(String(16), default="unknown")
+    config_digest: Mapped[str] = mapped_column(String(64), default="")
+    # Runtime/protocol layer (V0.3): run_status from stdio process correlation
+    # (correlated/running_unlinked/not_running/ambiguous/""), probe_status from
+    # the JSON-RPC probe (verified/timeout/unauthorized/not_mcp/error/"").
+    run_status: Mapped[str] = mapped_column(String(24), default="")
+    run_pids_json: Mapped[str] = mapped_column(Text, default="[]")
+    probe_status: Mapped[str] = mapped_column(String(24), default="")
+    protocol_version: Mapped[str] = mapped_column(String(32), default="")
+    last_probe_at: Mapped[str | None] = mapped_column(String(48))
+    first_seen: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+    last_seen: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+
+
+class McpToolSnapshotRow(Base):
+    """Capability snapshot per probed MCP server tool (rug-pull baseline).
+
+    Hashes only — descriptions are sanitized and truncated before hashing, and
+    the raw text is not stored.
+    """
+
+    __tablename__ = "mcp_tool_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ref_id: Mapped[str] = mapped_column(String(96), index=True)
+    tool_name: Mapped[str] = mapped_column(String(200), default="")
+    desc_hash: Mapped[str] = mapped_column(String(64), default="")
+    schema_hash: Mapped[str] = mapped_column(String(64), default="")
+    protocol_version: Mapped[str] = mapped_column(String(32), default="")
+    first_seen: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+    last_seen: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
+
+    __table_args__ = (
+        UniqueConstraint("ref_id", "tool_name", name="uq_mcp_tool_ref_name"),
+    )
+
+
 class RelationRow(Base):
     """Generic typed relation (entity/endpoint/component refs)."""
 
