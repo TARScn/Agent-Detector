@@ -169,9 +169,9 @@ def test_budget_caps_candidate_projects(tmp_path):
 
 def test_non_interpreter_processes_are_ignored(tmp_path):
     root = make_project(tmp_path, "notpython", with_venv=False)
-    facts = HostFacts("h", (ProcessInfo(pid=120, name="node.exe",
-                                        cmdline=("node", "server.js"),
-                                        exe=str(root / "node.exe"),
+    facts = HostFacts("h", (ProcessInfo(pid=120, name="nginx.exe",
+                                        cmdline=("nginx",),
+                                        exe=str(root / "nginx.exe"),
                                         cwd=str(root)),), ())
     assert resolve_projects(facts) == []
 
@@ -184,5 +184,5 @@ def test_runtime_of_recognizes_interpreters():
     assert runtime_of(ProcessInfo(pid=1, name="py.exe",
                                   cmdline=("py", "-3"), exe="C:/x/py.exe")) == "python"
     assert runtime_of(ProcessInfo(pid=1, name="node.exe",
-                                  exe="C:/x/node.exe")) is None
+                                  exe="C:/x/node.exe")) == "node"
     assert runtime_of(ProcessInfo(pid=1, name="explorer.exe")) is None

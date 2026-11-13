@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agent_detector.monitoring.detection.attribution import AgentAttributor, Attribution
@@ -34,7 +35,8 @@ from agent_detector.monitoring.collectors.ebpf.tetragon import tetragon_availabl
 from agent_detector.monitoring.detection.behavior_rules import (DerivedBehavior, load_behavior_rules,
                                                     match_fact)
 from agent_detector.monitoring.detection.process_graph import ProcessGraph
-from agent_detector.monitoring.services.retention import purge_behavior_events
+from agent_detector.monitoring.services.retention import (get_retention_days,
+                                                           purge_behavior_events)
 from agent_detector.monitoring.collectors.host.poll import PollCollector
 from agent_detector.monitoring.collectors.host.sysmon import (DEFAULT_CHANNEL as SYSMON_DEFAULT_CHANNEL,
                                               SysmonReader, fact_from_event,
@@ -53,16 +55,19 @@ from agent_detector.core.config import (ALERT_RISK_LEVEL, BEHAVIOR_AUDIT_KEYS,
                                           PROC_SNAPSHOT_PATH, SYSMON_CHANNEL,
                                           TETRA_LOG)
 from agent_detector.core.security import redact
+from agent_detector.identity import HostIdentityStore, build_process_birth
 from agent_detector.monitoring.collectors.host.process import collect_processes
 from agent_detector.monitoring.collectors.host.registry_snapshot import write_process_snapshot
 from agent_detector.monitoring.services.collector_status import write_collector_status
 from agent_detector.core.enums import RiskLevel
 from agent_detector.core.models import ProcessInfo
 from agent_detector.discovery.fingerprints.loader import load_rules
-from agent_detector.storage.models import BehaviorEventRow, utc_now_iso
+from sqlalchemy import select
+
+from agent_detector.storage.models import (AgentInstanceRow, BehaviorEventRow,
+                                           EntityAttributeRow, utc_now_iso)
 from agent_detector.interception.policy.engine import risk_at_least
-from agent_detector.storage import (AgentInventoryRepository, AlertRepository,
-                                    AssetRepository)
+from agent_detector.storage import AlertRepository
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +149,18 @@ class BehaviorIngestService:
         # the registry snapshot file was last rewritten.
         self._last_event_epoch: float | None = None
         self._snapshot_epoch: float | None = None
+        # First-batch prep (registry seed + retention purge) runs on the
+        # collector side, not inside start(): the full process sweep takes
+        # seconds on Windows and would freeze the console request thread.
+        self._seeded = False
+        # Published in the status file when this service runs inside the
+        # detached collector child: lets the console manager re-attach to
+        # (or stop) a collector that survived a serve restart.
+        self.collector_pid: int | None = None
+        # P0-C: actor process identity for stored events. A shadow identity
+        # failure must not stop the collector; the key is then simply absent.
+        self._scope_key = self._resolve_scope_key()
+        self._birth_cache: dict[tuple[int, float | None, str | None], str | None] = {}
         # The `collect` CLI drives run_once() inline on its main thread
         # instead of start()'s worker thread — `running` must still say yes
         # or the published health file reports a live collector as stopped.
@@ -177,8 +194,13 @@ class BehaviorIngestService:
                 "tetragon": "tetragon"}.get(self.mode, "auditd")
 
     def status(self) -> dict:
+        try:
+            effective_retention = get_retention_days(self.engine)
+        except Exception:
+            effective_retention = BEHAVIOR_RETENTION_DAYS
         return {
             "running": self.running or self.inline_loop, "mode": self.mode,
+            "collector_pid": self.collector_pid,
             "log_path": str(self.log_path) if self.mode in ("auditd", "tetragon", "replay") else None,
             "log_readable": self._log_readable(),
             "sysmon_channel": self.sysmon_channel if self.mode == "sysmon" else None,
@@ -190,7 +212,7 @@ class BehaviorIngestService:
             "suppress_seconds": self.suppress_seconds,
             "path_policy": BEHAVIOR_PATH_POLICY, "store_argv": BEHAVIOR_STORE_ARGV,
             "include_unattributed": BEHAVIOR_INCLUDE_UNATTRIBUTED,
-            "retention_days": BEHAVIOR_RETENTION_DAYS,
+            "retention_days": effective_retention,
             "started_at": self.started_at, "batches": self.batches,
             "records_read": self.records_read, "facts": self.facts_seen,
             "exits_seen": self.exits_seen, "ignored_proc": self.ignored_proc,
@@ -212,22 +234,36 @@ class BehaviorIngestService:
     # -------------------------------------------------------------- lifecycle
     def start(self, *, mode: str | None = None, log_path=None,
               from_start: bool | None = None) -> dict:
-        with self._lock:
-            if self.running:
-                raise BehaviorIngestError("behavior ingest already running")
+        if mode:
+            mode = mode.lower()
+            if mode not in MODES or mode == "replay":
+                raise BehaviorIngestError(f"unknown behavior mode: {mode}")
+        if self.running:
+            # Behavior channels are mutually exclusive: starting one channel
+            # switches away from the channel that is currently active. Probe
+            # the target first — a broken target must not cost the channel
+            # that is still running.
             if mode:
-                mode = mode.lower()
-                if mode not in MODES or mode == "replay":
-                    raise BehaviorIngestError(f"unknown behavior mode: {mode}")
+                self._preflight_switch(mode, log_path)
+            self.stop()
+        with self._lock:
+            if mode:
                 self.mode = mode
+                if not log_path:
+                    # mode can switch after __init__ (start(mode=...)); the
+                    # default log file must follow the new mode.
+                    self.log_path = Path(TETRA_LOG if self.mode == "tetragon"
+                                         else BEHAVIOR_AUDIT_LOG)
             if log_path:
                 self.log_path = Path(log_path)
             if from_start is not None:
                 self._from_start = from_start
-            self._ensure_ready()
+            # Clear before the readiness checks: after a previous stop the
+            # event is still set, and _ensure_ready refuses to open channel
+            # resources while a stop is in effect.
             self._stop.clear()
+            self._ensure_ready()
             self.started_at = utc_now_iso()
-            self._maybe_purge(time.monotonic(), force=True)
             self._thread = threading.Thread(target=self._run,
                                             name="agent-detector-behavior", daemon=True)
             self._thread.start()
@@ -244,18 +280,61 @@ class BehaviorIngestService:
             self._reader.close()
         if self._sysmon is not None:
             self._sysmon.close()
+        # Drop the closed readers: a subsequent start() must re-subscribe
+        # instead of finding a live-looking dead object (the sysmon
+        # subscription and the tail readers keep no auto-reconnect).
+        self._reader = None
+        self._sysmon = None
+        self._poll = None
+        self._seeded = False
         self.started_at = None
+        # The periodic writer lives in the worker loop; once the thread is
+        # gone the file would keep advertising a running collector until it
+        # ages out, so publish the stopped state immediately.
+        write_collector_status(self.status(), path=COLLECTOR_STATUS_PATH)
         return self.status()
 
     def close(self) -> None:
         if self._reader is not None:
             self._reader.close()
 
+    def _preflight_switch(self, mode: str, log_path) -> None:
+        """Read-only readiness probe used before stopping the active channel.
+
+        Must raise a helpful error without creating readers or threads: the
+        channel that is currently running survives a failed switch.
+        """
+        if mode in ("replay", "poll"):
+            return
+        if mode == "sysmon":
+            probe = sysmon_available(self.sysmon_channel)
+            if not probe.available:
+                raise BehaviorIngestError(
+                    f"Sysmon 通道不可用：{probe.reason or '未安装'}")
+            return
+        path = Path(log_path) if log_path else (
+            TETRA_LOG if mode == "tetragon" else BEHAVIOR_AUDIT_LOG)
+        try:
+            with path.open("r", encoding="utf-8", errors="replace"):
+                pass
+        except OSError as exc:
+            if mode == "tetragon":
+                raise BehaviorIngestError(self._tetra_hint(exc, path)) from exc
+            raise BehaviorIngestError(self._log_hint(exc, path)) from exc
+
     def _ensure_ready(self) -> None:
+        """Cheap readiness: open the channel, raise on failure. Deliberately
+        free of the process-registry seed — that sweep takes seconds and lives
+        in :meth:`_bootstrap` on the collector side. Resource creation is
+        gated on no stop being in effect: an inline run_once (CLI / detached
+        runner / tests) opens the channel directly, while a straggler worker
+        thread that overshot stop()'s join timeout must not reopen the
+        dropped channel."""
+        gate_open = not self._stop.is_set()
         if self.mode == "replay":
             return
         if self.mode == "sysmon":
-            if self._sysmon is None:
+            if self._sysmon is None and gate_open:
                 self._sysmon = SysmonReader(self.sysmon_channel,
                                             start_from_oldest=self._from_start)
                 try:
@@ -265,20 +344,18 @@ class BehaviorIngestService:
                     raise BehaviorIngestError(
                         f"Sysmon 通道不可用：{exc}。请先安装 Sysmon 并按 "
                         f"configs/sysmon.xml 启用所需事件（Event ID 3 默认关闭）。") from exc
-                self._seed_graph()
             return
         if self.mode == "poll":
-            if self._poll is None:
+            if self._poll is None and gate_open:
                 if self._process_lookup is None:
                     self._poll = PollCollector(self._snapshot_provider)
                 else:
                     self._poll = PollCollector(self._snapshot_provider,
                                                lookup=self._process_lookup)
-                self._seed_graph()
                 self._poll.prime()
             return
         if self.mode == "tetragon":
-            if self._reader is None:
+            if self._reader is None and gate_open:
                 try:
                     with self.log_path.open("r", encoding="utf-8", errors="replace"):
                         pass
@@ -287,9 +364,8 @@ class BehaviorIngestService:
                 self._reader = TailReader(self.log_path, from_start=self._from_start)
                 self._last_record_monotonic = time.monotonic()
                 self._last_event_epoch = time.time()
-                self._seed_graph()
             return
-        if self._reader is None:
+        if self._reader is None and gate_open:
             try:
                 with self.log_path.open("r", encoding="utf-8", errors="replace"):
                     pass
@@ -298,15 +374,16 @@ class BehaviorIngestService:
             self._reader = TailReader(self.log_path, from_start=self._from_start)
             self._last_record_monotonic = time.monotonic()
             self._last_event_epoch = time.time()
-            self._seed_graph()
 
-    def _log_hint(self, exc: OSError) -> str:
-        return (f"cannot read audit log {self.log_path}: {exc}. auditd logs are "
+    def _log_hint(self, exc: OSError, path: Path | None = None) -> str:
+        target = path or self.log_path
+        return (f"cannot read audit log {target}: {exc}. auditd logs are "
                 "usually root-only: run the collector as root, or set log_group in "
                 "/etc/audit/auditd.conf to a group this user belongs to.")
 
-    def _tetra_hint(self, exc: OSError) -> str:
-        return (f"cannot read Tetragon export {self.log_path}: {exc}. the file "
+    def _tetra_hint(self, exc: OSError, path: Path | None = None) -> str:
+        target = path or self.log_path
+        return (f"cannot read Tetragon export {target}: {exc}. the file "
                 "appears when the tetragon service runs with --export-filename "
                 "(default 600 root:root) — start the service or run the collector "
                 "as root / relax the permission.")
@@ -316,6 +393,14 @@ class BehaviorIngestService:
             self.graph.seed(self._snapshot_provider())
         except Exception:
             logger.exception("process snapshot seeding failed")
+
+    def _bootstrap(self) -> None:
+        """First-batch prep on the collector side: process-registry seed (one
+        full psutil sweep — seconds on Windows, which is why start() must not
+        pay it in the request thread) and the forced retention purge."""
+        self._seed_graph()
+        self._seeded = True
+        self._maybe_purge(time.monotonic(), force=True)
 
     def _log_readable(self) -> bool:
         try:
@@ -340,6 +425,8 @@ class BehaviorIngestService:
     def run_once(self) -> list[dict]:
         """One batch; returns the events stored in this round."""
         self._ensure_ready()
+        if not self._seeded:
+            self._bootstrap()
         raw_before = self.records_read
         facts = self._collect_facts()
         if facts:
@@ -589,34 +676,30 @@ class BehaviorIngestService:
         container_map: dict[str, tuple[str, str]] = {}
         try:
             with Session(self.engine) as session:
-                for snapshot in AssetRepository(session).latest_snapshots():
-                    asset_id = snapshot["asset_id"]
-                    known.add(asset_id)
-                    for pid in snapshot.get("running_pids") or []:
-                        try:
-                            pid_map.setdefault(int(pid), asset_id)
-                        except (TypeError, ValueError):
-                            continue
-                # Container-origin assets (Docker channel): match eBPF events
-                # by container-ID prefix instead of pids (different namespaces).
-                inventory = AgentInventoryRepository(session)
-                for asset in inventory.list_assets():
-                    stored = (asset.get("container_id") or "").strip().lower()
+                attrs = {row.entity_id: row for row in session.scalars(
+                    select(EntityAttributeRow))}
+                for instance in session.scalars(
+                        select(AgentInstanceRow).where(
+                            AgentInstanceRow.status == "running")):
+                    entity_id = instance.entity_id or instance.asset_id
+                    if not entity_id:
+                        continue
+                    known.add(entity_id)
+                    try:
+                        pid_map.setdefault(int(instance.pid), entity_id)
+                    except (TypeError, ValueError):
+                        continue
+                    stored = (instance.container_id or "").strip().lower()
                     if stored:
-                        container_map[stored] = (asset["asset_id"], asset["name"])
+                        name = attrs[entity_id].name if entity_id in attrs else entity_id
+                        container_map[stored] = (entity_id, name)
+                        container_map.setdefault(stored[:12], (entity_id, name))
+                for attr in attrs.values():
+                    stored = (attr.container_id or "").strip().lower()
+                    if stored:
+                        container_map.setdefault(stored, (attr.entity_id, attr.name))
                         container_map.setdefault(stored[:12],
-                                                 (asset["asset_id"], asset["name"]))
-                    # Compose-merged assets carry one container_id per running
-                    # INSTANCE (api/worker/sandbox/...): map every instance's
-                    # container to the one asset so any container of the
-                    # project attributes (the asset row stores the primary only).
-                    for instance in inventory.list_instances(asset["asset_id"]):
-                        cid = (instance.get("container_id") or "").strip().lower()
-                        if not cid:
-                            continue
-                        container_map[cid] = (asset["asset_id"], asset["name"])
-                        container_map.setdefault(cid[:12],
-                                                 (asset["asset_id"], asset["name"]))
+                                                 (attr.entity_id, attr.name))
         except Exception:
             logger.exception("asset attribution lookup failed")
         return AgentAttributor(hostname=platform.node() or "localhost", graph=self.graph,
@@ -663,27 +746,78 @@ class BehaviorIngestService:
                            if seen >= cutoff}
 
     def _maybe_purge(self, now: float, *, force: bool = False) -> None:
-        if BEHAVIOR_RETENTION_DAYS <= 0:
-            return
         if not force and now - self._last_purge < 86400.0:
             return
         self._last_purge = now
         try:
-            purge_behavior_events(self.engine, BEHAVIOR_RETENTION_DAYS,
-                                  source=self.source)
+            days = get_retention_days(self.engine)
+            if days <= 0:
+                return
+            purge_behavior_events(self.engine, days, source=self.source)
         except Exception:
             logger.exception("behavior retention purge failed")
 
     # ---------------------------------------------------------------- persist
+    def _resolve_scope_key(self) -> str | None:
+        try:
+            return HostIdentityStore.for_engine(self.engine).resolve().scope_key
+        except Exception:  # identity failure must not stop the collector
+            logger.exception("ingest host identity lookup failed")
+            return None
+
+    def _process_key(self, fact: BehaviorFact) -> str | None:
+        """Best-effort P0-A process key for the acting process; cached per fact identity."""
+        cache_key = (fact.pid, fact.start_time or None, fact.exec_id)
+        if cache_key in self._birth_cache:
+            return self._birth_cache[cache_key]
+        info = ProcessInfo(pid=fact.pid, name=fact.process_name,
+                           create_time=fact.start_time or None, ppid=fact.ppid)
+        birth = build_process_birth(fact.pid, self._scope_key or "unknown",
+                                    process_info=info, source=self.source)
+        key = birth.instance_key if birth is not None else None
+        self._birth_cache[cache_key] = key
+        if len(self._birth_cache) > 4096:
+            for stale in list(self._birth_cache)[:2048]:
+                del self._birth_cache[stale]
+        return key
+
+    @staticmethod
+    def _attribution_method(attribution: Attribution) -> str:
+        evidence = set(attribution.evidence)
+        if "container_id" in evidence:
+            return "container_membership"
+        if "self_asset_pid" in evidence or "ancestor_asset_pid" in evidence:
+            return "pid_snapshot"
+        if "process_fingerprint" in evidence:
+            return "process_fingerprint"
+        return "unattributed"
+
+    @staticmethod
+    def _attribution_state(method: str) -> str:
+        if method == "container_membership":
+            return "verified"
+        if method == "unattributed":
+            return "unattributed"
+        return "candidate"
+
     def _to_row(self, fact: BehaviorFact, derived: DerivedBehavior,
                 attribution: Attribution, target: str | None,
                 risk: RiskLevel, risk_reasons: list[str]) -> BehaviorEventRow:
         source = self.source
+        flow_id = f"{source}-{fact.serial}"[:64]
+        method = self._attribution_method(attribution)
         return BehaviorEventRow(
             observed_at=self._observed_at(fact), source=source,
             agent_label=(attribution.agent_label or f"pid-{fact.pid}")[:80],
             asset_id=attribution.asset_id,
-            flow_id=f"{source}-{fact.serial}"[:64],
+            actor_asset_id=attribution.asset_id,
+            actor_entity_id=attribution.asset_id,
+            actor_process_key=self._process_key(fact),
+            scope_key=self._scope_key,
+            attribution_method=method,
+            attribution_state=self._attribution_state(method),
+            source_event_uid=flow_id,
+            flow_id=flow_id,
             upstream_host="", protocol="SYS",
             event_type=fact.kind, operation=derived.operation,
             confidence=derived.confidence,
@@ -721,10 +855,16 @@ class BehaviorIngestService:
                     attribution: Attribution, target: str | None,
                     risk: RiskLevel, risk_reasons: list[str],
                     source: str = "auditd") -> dict:
+        method = BehaviorIngestService._attribution_method(attribution)
         return {"observed_at": BehaviorIngestService._observed_at(fact),
                 "source": "sysmon" if source == "sysmon" else source,
                 "agent_label": attribution.agent_label or f"pid-{fact.pid}",
-                "asset_id": attribution.asset_id, "pid": fact.pid,
+                "asset_id": attribution.asset_id,
+                "actor_asset_id": attribution.asset_id,
+                "actor_entity_id": attribution.asset_id,
+                "attribution_method": method,
+                "attribution_state": BehaviorIngestService._attribution_state(method),
+                "pid": fact.pid,
                 "container_id": fact.container_id,
                 "process_name": fact.process_name, "event_type": fact.kind,
                 "operation": derived.operation, "target": target,
@@ -762,6 +902,7 @@ class BehaviorIngestService:
                         reason=f"系统行为风险分级 {item['risk_level']}",
                         risk_level=item["risk_level"], decision="audit",
                         asset_id=item.get("asset_id"),
+                        entity_id=item.get("actor_entity_id"),
                         agent_label=item["agent_label"], agent_type=None,
                         detail={"source": item.get("source"),
                                 "event_type": item.get("event_type"),
@@ -773,6 +914,26 @@ class BehaviorIngestService:
             logger.exception("alert raising failed")
 
     def _write(self, rows: list[BehaviorEventRow]) -> None:
+        if not rows:
+            return
         with Session(self.engine) as session:
-            session.add_all(rows)
+            source = rows[0].source
+            uids = [row.source_event_uid for row in rows
+                    if row.source_event_uid]
+            existing: set[str] = set()
+            if uids:
+                existing = set(session.scalars(
+                    select(BehaviorEventRow.source_event_uid).where(
+                        BehaviorEventRow.source == source,
+                        BehaviorEventRow.source_event_uid.in_(uids))))
+            seen = set(existing)
+            fresh: list[BehaviorEventRow] = []
+            for row in rows:
+                uid = row.source_event_uid
+                if uid and uid in seen:
+                    continue  # replay of an already-stored source event
+                if uid:
+                    seen.add(uid)
+                fresh.append(row)
+            session.add_all(fresh)
             session.commit()

@@ -10,7 +10,8 @@ def test_packaged_rules_load_cleanly():
     assert loaded.errors == []
     assert [r.id for r in loaded.client_rules] == ["claude-code", "codex-cli",
                                                     "cursor", "dify", "hermes",
-                                                    "n8n", "openclaw", "opencode"]
+                                                    "n8n", "openclaw", "opencode",
+                                                    "zcode"]
     # 自建框架走依赖识别（framework_rule），签名通道已于 2026-11-02 退役 ——
     # 宽松命令行正则拿不到版本、还会撞上参数/路径里的同名单词（Dify 误报事故）。
     assert {"langchain", "langgraph", "langflow"} <= {r.id for r in loaded.framework_rules}

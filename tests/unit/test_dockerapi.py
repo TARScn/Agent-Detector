@@ -86,6 +86,7 @@ class FakeAPIClient:
         self.inspects = inspects or {}
         self.archives = archives or {}  # (container_id, path) -> bytes | stream
         self.archive_calls: list[tuple[str, str]] = []
+        self.top_calls: list[str] = []
         self.busybox = set(busybox)     # 容器内是 busybox ps：不支持 -eo
         self.stats = stats or {}        # (container_id, path) -> stat 覆盖值
 
@@ -108,6 +109,7 @@ class FakeAPIClient:
         return self.container_list
 
     def top(self, container_id, ps_args=None):
+        self.top_calls.append(container_id)
         if ps_args and container_id in self.busybox:
             raise KeyError(f"{container_id}: busybox ps has no -eo")
         try:
@@ -418,3 +420,64 @@ class _BrokenLister:
 
     def containers(self, all=False, limit=None):
         raise KeyError("daemon exploded")
+
+
+# ---------------------------------------------------------------------------
+# build_client：SDK 握手一次重试（弱 daemon 首连超时的吸收）
+# ---------------------------------------------------------------------------
+
+def test_build_client_retries_the_handshake_once(monkeypatch):
+    import sys
+    import types
+
+    calls = {"n": 0}
+
+    class _Boom(Exception):
+        pass
+
+    fake_docker = types.ModuleType("docker")
+    fake_docker.DockerException = _Boom
+
+    def from_env(timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _Boom("首次握手超时")
+
+        class _Client:
+            api = object()
+        return _Client()
+
+    fake_docker.from_env = from_env
+    monkeypatch.setitem(sys.modules, "docker", fake_docker)
+    monkeypatch.setattr(dockerapi.time, "sleep", lambda seconds: None)
+    client = dockerapi.build_client(20)
+    assert calls["n"] == 2
+    assert client.timeout == 20
+
+
+def test_build_client_gives_up_after_the_retry(monkeypatch):
+    import sys
+    import types
+
+    calls = {"n": 0}
+
+    class _Boom(Exception):
+        pass
+
+    fake_docker = types.ModuleType("docker")
+    fake_docker.DockerException = _Boom
+
+    def from_env(timeout=None):
+        calls["n"] += 1
+        raise _Boom("daemon down")
+
+    fake_docker.from_env = from_env
+    monkeypatch.setitem(sys.modules, "docker", fake_docker)
+    monkeypatch.setattr(dockerapi.time, "sleep", lambda seconds: None)
+    try:
+        dockerapi.build_client(20)
+    except dockerapi.DockerUnavailable as exc:
+        assert "daemon down" in str(exc)
+    else:
+        raise AssertionError("DockerUnavailable expected")
+    assert calls["n"] == 2

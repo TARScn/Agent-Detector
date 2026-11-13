@@ -96,6 +96,11 @@ class DetectedAsset:
     # sighting into its compose/container twin instead of keeping two rows for
     # one deployment.
     scope_kind: str = ""
+    # Concrete value behind ``scope_kind``: home path, project root, compose
+    # project name, full container id, or port. Used by the P0-A identity
+    # shadow writer to build canonical entity keys; the legacy read path
+    # ignores it.
+    identity_scope: str = ""
     # Agent-level extras, filled by discovery/inventory.py for AGENT_CLIENT assets.
     mcp_servers: list[str] = field(default_factory=list)
     config_paths: list[str] = field(default_factory=list)

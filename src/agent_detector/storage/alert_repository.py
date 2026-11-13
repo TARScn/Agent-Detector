@@ -18,12 +18,14 @@ class AlertRepository:
 
     def raise_alert(self, *, title: str, reason: str, risk_level: str,
                     decision: str, asset_id: str | None = None,
+                    entity_id: str | None = None,
                     agent_type: str | None = None, agent_label: str = "",
                     session_id: str | None = None, event_id: int | None = None,
                     policy_id: str | None = None,
                     detail: dict | None = None) -> int:
         row = SecurityAlertRow(
-            created_at=utc_now_iso(), asset_id=asset_id, agent_type=agent_type,
+            created_at=utc_now_iso(), asset_id=asset_id or entity_id,
+            entity_id=entity_id, agent_type=agent_type,
             agent_label=agent_label, session_id=session_id, event_id=event_id,
             policy_id=policy_id, risk_level=risk_level, decision=decision,
             title=title[:200], reason=reason,
@@ -34,17 +36,25 @@ class AlertRepository:
 
     def list_alerts(self, limit: int = 100, status: str | None = None,
                     risk_level: str | None = None,
-                    asset_id: str | None = None) -> list[dict]:
+                    entity_id: str | None = None,
+                    event_id: int | None = None,
+                    offset: int = 0) -> list[dict]:
         statement = select(SecurityAlertRow)
         if status:
             statement = statement.where(SecurityAlertRow.status == status)
         if risk_level:
             statement = statement.where(SecurityAlertRow.risk_level == risk_level)
-        if asset_id:
-            statement = statement.where(SecurityAlertRow.asset_id == asset_id)
-        statement = statement.order_by(SecurityAlertRow.id.desc()).limit(
-            min(max(int(limit), 1), 500))
+        if entity_id:
+            statement = statement.where(SecurityAlertRow.entity_id == entity_id)
+        if event_id is not None:
+            statement = statement.where(SecurityAlertRow.event_id == event_id)
+        statement = statement.order_by(SecurityAlertRow.id.desc()).offset(
+            max(0, int(offset))).limit(min(max(int(limit), 1), 500))
         return [self._to_dict(row) for row in self._session.scalars(statement)]
+
+    def get_alert(self, alert_id: int) -> dict | None:
+        row = self._session.get(SecurityAlertRow, alert_id)
+        return self._to_dict(row) if row else None
 
     def update_status(self, alert_id: int, status: str) -> dict | None:
         row = self._session.get(SecurityAlertRow, alert_id)
@@ -72,7 +82,7 @@ class AlertRepository:
 
     @staticmethod
     def _to_dict(row: SecurityAlertRow) -> dict:
-        return {"id": row.id, "created_at": row.created_at, "asset_id": row.asset_id,
+        return {"id": row.id, "created_at": row.created_at, "entity_id": row.entity_id,
                 "agent_type": row.agent_type, "agent_label": row.agent_label,
                 "session_id": row.session_id, "event_id": row.event_id,
                 "policy_id": row.policy_id, "risk_level": row.risk_level,

@@ -66,9 +66,11 @@ def test_local_model_requires_scan_corroboration():
     assert match_llm_call(call, rules, {}, model_ports={}) is None
     hit = match_llm_call(call, rules, {}, model_ports={11434: "ollama--abc123"})
     assert hit is not None
-    assert (hit.match_kind, hit.host, hit.asset_id) == ("local_model", "Ollama:11434",
-                                                        "ollama--abc123")
-    assert hit.evidence == ("local_model_port", "scan_asset")
+    assert (hit.match_kind, hit.host, hit.target_asset_id) == (
+        "local_model", "Ollama:11434", "ollama--abc123")
+    assert hit.actor_asset_id is None
+    assert hit.evidence == ("local_model_port", "scan_asset",
+                            "target:scan_listen_port")
 
 
 def test_corroborated_port_outside_rules_is_ignored():

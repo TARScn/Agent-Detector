@@ -26,7 +26,9 @@ agent-detector = "agent_detector.console.cli.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"agent_detector.console.web" = ["index.html", "assets/**/*"]
+"agent_detector.console.web" = ["index.html", "assets/**/*",
+                                  "next/index.html", "next/assets/*",
+                                  "next/assets/**/*"]
 "agent_detector.discovery" = ["data/*.yaml", "data/fingerprints/*.yaml"]
 "agent_detector.interception" = ["data/*.yaml"]
 "agent_detector.monitoring" = ["data/*.yaml"]

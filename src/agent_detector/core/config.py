@@ -13,6 +13,16 @@ def _env_choice(name: str, choices: tuple[str, ...], default: str) -> str:
 
 
 DB_PATH = Path(os.getenv("AGENT_DETECTOR_DB", "./data/agent_detector.sqlite3"))
+# P0-A identity shadow: write canonical host/engine/entity/process-birth rows
+# beside the legacy inventory. Read paths stay on the old tables until P0-D.
+# AGENT_DETECTOR_HOST_ID is read directly by HostIdentityStore (operator
+# override); AGENT_DETECTOR_HOST_STATE_DIR relocates the identity state file.
+IDENTITY_SHADOW_ENABLED = _env_flag("AGENT_DETECTOR_IDENTITY_SHADOW", "1")
+
+
+def legacy_delete_enabled() -> bool:
+    """P0-B: old hard-delete path is off unless an operator opts back in."""
+    return _env_flag("AGENT_DETECTOR_LEGACY_DELETE", "0")
 MAX_PROBES = max(0, min(int(os.getenv("AGENT_DETECTOR_MAX_PROBES", "20")), 100))
 # Self-built agent discovery budget: python/node processes resolved to projects
 # per scan (AGENT_DETECTOR_MAX_PROJECTS). Guards the project resolver against
@@ -40,6 +50,14 @@ DOCKER_ARCHIVE_BYTE_CAP = max(DOCKER_READ_MAX_BYTES,
                                   4 * 1024 * 1024 * 1024))
 DOCKER_ARCHIVE_TIME_CAP_S = min(max(float(os.getenv("AGENT_DETECTOR_DOCKER_ARCHIVE_TIME_CAP",
                                                     "60")), 1.0), 600.0)
+# Deep-probe cache (T1): archive reads / existence probes / site-packages
+# enumeration are content-addressed by the container image's config digest —
+# same digest, same image layers, same file contents — so results are reused
+# across scans until this TTL lapses. 0 disables the cache and every scan
+# re-reads the daemon (the pre-cache behaviour, which on a starved 2-core
+# daemon meant stall-prone multi-minute scans).
+DOCKER_PROBE_CACHE_TTL_S = min(max(float(os.getenv(
+    "AGENT_DETECTOR_DOCKER_PROBE_CACHE_TTL", "86400")), 0.0), 7 * 86400.0)
 
 MONITOR_INTERVAL = min(max(float(os.getenv("AGENT_DETECTOR_MONITOR_INTERVAL", "2.0")),
                            0.5), 60.0)
@@ -71,6 +89,11 @@ BEHAVIOR_IGNORE_PROCS = tuple(name.strip().lower() for name in os.getenv(
     "AGENT_DETECTOR_BEHAVIOR_IGNORE_PROC", "").split(",") if name.strip())
 BEHAVIOR_POLL_INTERVAL = min(max(float(os.getenv("AGENT_DETECTOR_BEHAVIOR_POLL_INTERVAL",
                                                  "2.0")), 0.5), 60.0)
+# P2 controlled trace: an operator-supplied JSONL file with runtime/protocol
+# metadata. Empty = disabled; the detector never discovers or tails it on its own.
+CONTROLLED_TRACE_PATH = os.getenv("AGENT_DETECTOR_CONTROLLED_TRACE", "").strip()
+CONTROLLED_TRACE_MAX_RECORDS = min(max(int(os.getenv(
+    "AGENT_DETECTOR_CONTROLLED_TRACE_MAX_RECORDS", "2000")), 0), 20000)
 # eBPF channel (Tetragon): the JSON export file the tetragon service writes
 # (--export-filename / /etc/tetragon/tetragon.conf.d/export-filename). The
 # collector only ever tails this file; it never talks to the kernel itself.

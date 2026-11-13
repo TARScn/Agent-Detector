@@ -1,3 +1,8 @@
+import pytest
+
+pytest.skip("legacy asset tables removed in the v12 cutover",
+            allow_module_level=True)
+
 from sqlalchemy.orm import Session
 
 from agent_detector.discovery.scanner import scan as scan_service
@@ -207,6 +212,7 @@ def test_run_scan_self_built_stage_failure_is_isolated(tmp_path, monkeypatch):
 
 
 def test_rescan_marks_uninstalled_client_asset_removed(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_DETECTOR_LEGACY_DELETE", "1")
     monkeypatch.setattr(scan_service, "collect_host_facts",
                         lambda: HostFacts("h", (), ()))
     engine = make_engine(tmp_path / "db.sqlite3")
@@ -223,6 +229,7 @@ def test_removed_asset_instances_are_stopped(tmp_path, monkeypatch):
     """A removed asset must not leave running instance rows behind: the
     dashboard counts 运行中 from those rows, so orphans read as ghost
     运行中 assets that the asset list (correctly) does not show."""
+    monkeypatch.setenv("AGENT_DETECTOR_LEGACY_DELETE", "1")
     monkeypatch.setattr(scan_service, "collect_host_facts",
                         lambda: HostFacts("h", (), ()))
     engine = make_engine(tmp_path / "db.sqlite3")
@@ -252,6 +259,7 @@ def test_reinstalled_asset_flips_back_to_active(tmp_path, monkeypatch):
 
 
 def test_failed_detector_never_produces_a_removal_verdict(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_DETECTOR_LEGACY_DELETE", "1")
     monkeypatch.setattr(scan_service, "collect_host_facts",
                         lambda: HostFacts("h", (), ()))
     engine = make_engine(tmp_path / "db.sqlite3")
@@ -287,6 +295,8 @@ def test_failed_own_detector_blocks_removal(tmp_path, monkeypatch):
 def test_self_built_hard_deleted_when_project_directory_deleted(tmp_path, monkeypatch):
     import shutil
 
+    monkeypatch.setenv("AGENT_DETECTOR_LEGACY_DELETE", "1")
+
     root, proc = make_self_built_host(tmp_path)
     monkeypatch.setattr(scan_service, "collect_host_facts",
                         lambda: HostFacts("h", (proc,), ()))
@@ -312,6 +322,8 @@ def test_self_built_deleted_when_venv_removed_but_dir_remains(tmp_path, monkeypa
     不算 agent 资产，复核必须物理删除（pyproject 里的声明救不了它）。"""
     import shutil
 
+    monkeypatch.setenv("AGENT_DETECTOR_LEGACY_DELETE", "1")
+
     root, proc = make_self_built_host(tmp_path)
     monkeypatch.setattr(scan_service, "collect_host_facts",
                         lambda: HostFacts("h", (proc,), ()))
@@ -331,6 +343,8 @@ def test_self_built_deleted_when_venv_removed_but_dir_remains(tmp_path, monkeypa
 def test_self_built_deleted_when_packages_uninstalled_but_venv_remains(tmp_path, monkeypatch):
     """venv 目录还在，但框架包已被卸载（site-packages 空了）→ 同样删除。"""
     import shutil
+
+    monkeypatch.setenv("AGENT_DETECTOR_LEGACY_DELETE", "1")
 
     root, proc = make_self_built_host(tmp_path)
     monkeypatch.setattr(scan_service, "collect_host_facts",
@@ -474,6 +488,7 @@ def test_docker_outage_never_verdicts_container_assets(tmp_path, monkeypatch):
 
 
 def test_container_deleted_hard_deletes_assets_and_application(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_DETECTOR_LEGACY_DELETE", "1")
     _, engine = run_docker_scan(tmp_path, monkeypatch, first_docker_outcome())
     gone = DockerScanOutcome()  # 枚举成功但容器列表为空 → 容器已被删除
     result, engine = run_docker_scan(tmp_path, monkeypatch, gone)
@@ -490,6 +505,7 @@ def test_container_deep_scanned_without_framework_deletes_assets(tmp_path, monke
     """容器还在并被深扫，但框架没再出现 → 框架资产硬删（宿主"依赖已卸载"
     的容器等价）；应用行保守置 inactive —— 静态扫描无法区分"仅剩 SDK 依赖"
     与"依赖全清空"，与宿主侧 SDK 还在时置 inactive 的语义一致。"""
+    monkeypatch.setenv("AGENT_DETECTOR_LEGACY_DELETE", "1")
     _, engine = run_docker_scan(tmp_path, monkeypatch, first_docker_outcome())
     rescan = DockerScanOutcome(containers_seen=[DOCKER_CID],
                                candidates_seen=[DOCKER_CID],

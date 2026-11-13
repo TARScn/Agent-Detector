@@ -30,6 +30,15 @@ class AssetState(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class AgentStatus(str, Enum):
+    """User-facing status (P1): exactly four values, derived from claims."""
+
+    RUNNING = "RUNNING"
+    CONFIGURED = "CONFIGURED"
+    INSTALLED = "INSTALLED"
+    UNKNOWN = "UNKNOWN"
+
+
 class EvidenceKind(str, Enum):
     PROCESS = "process"
     LISTENING_SOCKET = "listening_socket"

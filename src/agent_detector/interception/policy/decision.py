@@ -25,13 +25,16 @@ from agent_detector.core.config import ALERT_RISK_LEVEL, HOOK_FAILURE_MODE
 from agent_detector.monitoring.detection.correlation import resolve_instance_for_pid
 from agent_detector.core.enums import ExecutionStatus, HookEvent
 from agent_detector.core.models import PolicyVerdict, ToolCall
-from agent_detector.interception.hooks.normalizer import describe_event, normalize
+from agent_detector.interception.hooks.normalizer import (describe_event,
+                                                          mcp_server_name,
+                                                          normalize)
 from agent_detector.interception.hooks.registry import get_adapter
 from agent_detector.interception.policy.engine import PolicyEngine, risk_at_least
 from agent_detector.interception.policy.loader import load_policies
 from agent_detector.storage.models import utc_now_iso
 from agent_detector.storage import (AgentInventoryRepository, AlertRepository,
-                                                BehaviorEventRepository, PolicyRepository)
+                                                BehaviorEventRepository,
+                                                EntityRepository, PolicyRepository)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,7 @@ class HookOutcome:
     response: dict
     event_id: int | None = None
     asset_id: str | None = None
+    entity_id: str | None = None
     instance_id: str | None = None
     session_id: str | None = None
     correlated_by: str = "none"
@@ -158,40 +162,52 @@ class HookDecisionService:
         assert call is not None
         with Session(self.engine) as session:
             inventory = AgentInventoryRepository(session)
+            entities = EntityRepository(session)
             events = BehaviorEventRepository(session)
             alerts = AlertRepository(session)
 
-            agent = inventory.find_asset_by_type(call.agent_type)
-            outcome.asset_id = agent["asset_id"] if agent else None
+            agent = entities.find_by_agent_type(call.agent_type)
+            outcome.entity_id = agent["entity_id"] if agent else None
+            outcome.asset_id = outcome.entity_id
             instance = resolve_instance_for_pid(bridge_ppid, session)
             if instance is not None:
                 outcome.instance_id = instance["instance_id"]
                 outcome.correlated_by = instance.get("matched_by", "process-tree")
-                if outcome.asset_id is None:
-                    outcome.asset_id = instance["asset_id"]
+                if outcome.entity_id is None:
+                    outcome.entity_id = instance.get("entity_id")
+                    outcome.asset_id = outcome.entity_id
             if call.session_id:
                 inventory.touch_session(
-                    call.session_id, call.agent_type, asset_id=outcome.asset_id,
+                    call.session_id, call.agent_type, asset_id=outcome.entity_id,
+                    entity_id=outcome.entity_id,
                     instance_id=outcome.instance_id, cwd=call.cwd,
                     tool=call.tool_name or None,
                     closed=call.event_type is HookEvent.SESSION_END)
             if call.event_type is HookEvent.PRE_TOOL_USE:
                 operation, target = describe_event(call)
+                protocol = "MCP" if operation == "mcp.call" else "HOOK"
                 execution = (ExecutionStatus.BLOCKED_BY_HOOK
                              if outcome.verdict.blocked else ExecutionStatus.ALLOWED)
                 event_id = events.record_tool_call(
                     observed_at=utc_now_iso(),
                     agent_label=call.agent_label or call.agent_type,
                     tool=call.tool_name, operation=operation, target=target[:512],
-                    asset_id=outcome.asset_id, session_id=call.session_id,
+                    asset_id=outcome.entity_id, entity_id=outcome.entity_id,
+                    session_id=call.session_id,
                     instance_id=outcome.instance_id,
                     decision=outcome.verdict.decision.value,
                     execution_status=execution.value,
                     risk_level=outcome.verdict.risk.value,
                     policy_id=outcome.verdict.policy_id,
+                    protocol=protocol,
+                    mcp_server=mcp_server_name(call.tool_name),
                     pid=bridge_ppid,
                     evidence=list(outcome.verdict.matched_rules))
                 outcome.event_id = event_id
+                self._record_execution_claim(
+                    session, outcome, operation=operation,
+                    tool=call.tool_name, session_id=call.session_id,
+                    protocol=protocol)
                 if outcome.verdict.blocked or risk_at_least(outcome.verdict.risk.value,
                                                             self.alert_risk):
                     alerts.raise_alert(
@@ -199,7 +215,8 @@ class HookDecisionService:
                         reason=outcome.verdict.reason,
                         risk_level=outcome.verdict.risk.value,
                         decision=outcome.verdict.decision.value,
-                        asset_id=outcome.asset_id, agent_type=call.agent_type,
+                        asset_id=outcome.entity_id, entity_id=outcome.entity_id,
+                        agent_type=call.agent_type,
                         agent_label=call.agent_label or call.agent_type,
                         session_id=call.session_id, event_id=event_id,
                         policy_id=outcome.verdict.policy_id,
@@ -211,12 +228,52 @@ class HookDecisionService:
                     agent_label=call.agent_label or call.agent_type,
                     tool=call.tool_name, operation="post.tool_use",
                     target=_post_target(call.tool_input),
-                    asset_id=outcome.asset_id, session_id=call.session_id,
+                    asset_id=outcome.entity_id, entity_id=outcome.entity_id,
+                    session_id=call.session_id,
                     instance_id=outcome.instance_id,
                     decision="allow",
                     execution_status=_post_status(call),
+                    protocol=("MCP" if call.tool_name and
+                              call.tool_name.lower().startswith("mcp__") else "HOOK"),
+                    mcp_server=mcp_server_name(call.tool_name),
                     risk_level=None, event_type="tool_result")
             session.commit()
+
+    def _record_execution_claim(self, session, outcome: HookOutcome, *,
+                                operation: str, tool: str | None,
+                                session_id: str | None,
+                                protocol: str) -> None:
+        """E5 evidence: the Agent's own hook reported a tool call."""
+        if not outcome.entity_id:
+            return
+        from agent_detector.aggregation.evidence_ledger import (
+            EvidenceLedger, static_claim_valid_to)
+
+        entity_id = outcome.entity_id
+        ledger = EvidenceLedger(session)
+        observed_at = utc_now_iso()
+        source_uid = f"hook-{outcome.event_id}"
+        observation_id = ledger.record_observation(
+            source="native_hook", source_event_uid=source_uid,
+            scope_key="", fact_type="agent_execution",
+            payload={"tool": tool or "", "operation": operation,
+                     "session_id": session_id, "protocol": protocol},
+            observed_at=observed_at, collection_run_id=0)
+        valid_to = static_claim_valid_to()
+        ledger.add_claim(
+            subject_ref=entity_id, predicate="agent_capability",
+            object_ref="AGENT_EXECUTION_OBSERVED", evidence_class="E5",
+            verification_method="verified_session", rule_id="native_hook",
+            rule_generation=0, collection_run_id=0, observed_at=observed_at,
+            valid_to=valid_to, observation_id=observation_id)
+        if protocol == "MCP":
+            ledger.add_claim(
+                subject_ref=entity_id, predicate="protocol_tool_call",
+                object_ref=f"mcp:{tool or ''}", evidence_class="E5",
+                verification_method="verified_session", rule_id="native_hook",
+                rule_generation=0, collection_run_id=0,
+                observed_at=observed_at, valid_to=valid_to,
+                observation_id=observation_id)
 
     def failure_outcome(self, reason: str, agent_type: str | None = None) -> HookOutcome:
         """Verdict used when the caller (transport) could not reach the service."""

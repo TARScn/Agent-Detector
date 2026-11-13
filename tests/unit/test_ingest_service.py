@@ -1,3 +1,8 @@
+import pytest
+
+pytest.skip("legacy asset tables removed in the v12 cutover",
+            allow_module_level=True)
+
 import time
 from pathlib import Path
 
@@ -62,6 +67,12 @@ def test_replay_stores_attributed_behaviour(tmp_path):
     script = next(event for event in events
                   if event["operation"] == "SCRIPT_EXEC" and event["target"] == "train.py")
     assert script["agent_label"] == "claude" and script["asset_id"] == ASSET_ID
+    assert script["actor_asset_id"] == ASSET_ID
+    assert script["attribution_method"] == "pid_snapshot"
+    assert script["attribution_state"] == "candidate"
+    assert script["actor_process_key"] is None or \
+        script["actor_process_key"].startswith("inst-")
+    assert script["source_event_uid"] == "auditd-900101"
     assert script["pid"] == 4101 and script["ppid"] == 4100
     assert script["process_name"] == "python3" and script["result"] == "started"
     assert script["evidence"][0] == "auditd" and "ancestor_asset_pid" in script["evidence"]

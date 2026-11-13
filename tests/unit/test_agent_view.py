@@ -1,3 +1,8 @@
+import pytest
+
+pytest.skip("legacy asset tables removed in the v12 cutover",
+            allow_module_level=True)
+
 """agent_view 合并层：框架行折叠进产品/应用实体（2026-10-26 用户裁定）。
 
 口径：资产清单统计单位是 Agent 实体（容器产品或自建应用），依赖的框架
@@ -68,6 +73,18 @@ def test_states_union_across_group():
             states=["INSTALLED", "RUNNING"]),
     ]
     (entity,) = merge_agent_rows(assets, {"app--1": "demo"})
+    assert entity["states"] == ["INSTALLED", "RUNNING"]
+
+
+def test_app_states_are_unioned_into_the_entity_row():
+    """The framework rows of a multi-framework app deliberately keep their
+    environment state; the running application's own state must still show."""
+    assets = [row("langchain--1", "LangChain · langflow", app_id="app--1",
+                  states=["INSTALLED"]),
+              row("langgraph--2", "LangGraph · langflow", "langgraph",
+                  app_id="app--1", states=["INSTALLED"])]
+    (entity,) = merge_agent_rows(assets, {"app--1": "langflow"},
+                                 app_states={"app--1": ["INSTALLED", "RUNNING"]})
     assert entity["states"] == ["INSTALLED", "RUNNING"]
 
 

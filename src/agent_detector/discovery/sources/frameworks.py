@@ -148,6 +148,7 @@ def detect_frameworks(projects: list[ProjectInfo],
         app_evidence.extend(_component_evidence(component) for component in components)
         app_asset = DetectedAsset(
             scope_kind="project",
+            identity_scope=project.root,
             asset_id=app_id, name=project.name, asset_type=AssetType.AI_APPLICATION,
             states={AssetState.RUNNING},
             confidence=0.7,  # 项目-进程关联 0.5 + AI 依赖证据 0.2
@@ -164,8 +165,16 @@ def detect_frameworks(projects: list[ProjectInfo],
             rule_deps = {normalize_name(name) for name in rule.dependencies.any} | \
                         {normalize_name(name) for name in rule.dependencies.all}
             hit = [component for component in components if component.name in rule_deps]
-            best = max(hit, key=lambda c: _VERSION_CONFIDENCE.get(c.version_source, 0.3),
-                       default=None)
+            # Several accepted dependency names can be present at once (npm's
+            # scoped @langchain/core next to langchain). Report the version of
+            # the package that names the rule itself when evidence strength
+            # ties, not whichever name sorts first.
+            rule_name = normalize_name(rule.id)
+            best = max(
+                hit,
+                key=lambda c: (_VERSION_CONFIDENCE.get(c.version_source, 0.3),
+                               normalize_name(c.name) == rule_name),
+                default=None)
             # Evidence honesty: a hit known only from declared metadata was
             # never confirmed on disk — the environment claim stays CONFIGURED
             # until installed-package metadata backs it.
@@ -182,6 +191,7 @@ def detect_frameworks(projects: list[ProjectInfo],
                          (spec.running if single else 0.0)
             framework_assets.append(DetectedAsset(
                 scope_kind="project",
+                identity_scope=project.root,
                 asset_id=build_asset_id(hostname, rule.id, f"project:{project.root}"),
                 name=rule.name, asset_type=AssetType.AGENT_RUNTIME,
                 states=states,

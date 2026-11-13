@@ -47,12 +47,19 @@ from agent_detector.core.models import (ComponentInfo, DetectedAsset, Evidence, 
 from agent_detector.core.security import redact
 from agent_detector.discovery.sources import dockerapi
 from agent_detector.discovery.sources.deps import (components_from_lock_text,
+                                                   components_from_package_json_text,
                                                    components_from_pyproject_text,
                                                    components_from_requirements_text,
-                                                   interest_names, normalize_name)
+                                                   interest_names,
+                                                   metadata_component,
+                                                   normalize_name)
 from agent_detector.discovery.sources.dockerapi import (ContainerBrief, DockerStalled,
                                                         DockerUnavailable, TopProcess)
 from agent_detector.discovery.sources.frameworks import ApplicationBundle, detect_frameworks
+from agent_detector.discovery.sources.docker_probe_cache import (
+    ProbeCache,
+    ProbeCacheStore,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +101,9 @@ class DockerScanOutcome:
     container_links: dict[str, dict] = field(default_factory=dict)
     containers_seen: list[str] = field(default_factory=list)
     candidates_seen: list[str] = field(default_factory=list)
+    # compose 项目名，来自 list 层面的标签——深探测失联也成立（T2 降级证据
+    # 的依据），而 container_links 只有识别成功才产出。
+    projects_seen: set[str] = field(default_factory=set)
     stats: dict = field(default_factory=lambda: {"containers_total": 0, "candidates": 0,
                                                  "agents": 0, "error": None})
 
@@ -122,18 +132,29 @@ def scan_docker_agents(framework_rules: list, hostname: str, *,
                        max_containers: int = DOCKER_MAX_CONTAINERS,
                        read_max_bytes: int = DOCKER_READ_MAX_BYTES,
                        archive_byte_cap: int = DOCKER_ARCHIVE_BYTE_CAP,
-                       archive_time_cap: float = DOCKER_ARCHIVE_TIME_CAP_S
+                       archive_time_cap: float = DOCKER_ARCHIVE_TIME_CAP_S,
+                       probe_cache_store: ProbeCacheStore | None = None,
+                       engine_key: str = "local",
                        ) -> DockerScanOutcome:
     """Enumerate every container, screen candidates, identify agents inside.
+
+    Screening runs on the brief (image/command/runtime-from-image) first;
+    ``docker top`` is only fetched when the brief misses (to screen process
+    tokens) or for candidates (RUNNING claims and process evidence) — the
+    daemon-heavy call never runs for plain containers (T3).
+
+    ``probe_cache_store`` enables the T1 content cache: deep ops (archive
+    reads, existence probes, site-packages enumeration) are keyed by the
+    container image's digest and reused across scans until the TTL lapses.
 
     ``client_rules`` carry the ``container`` sections that drive the generic
     container-client loop. Daemon/SDK problems raise nothing: they degrade
     into ``stats["error"]`` so the scan continues and the inventory's stale
     verification knows the docker channel said nothing this round. A stalled
-    operation (watchdog timeout — npipe reads cannot be interrupted) does the
-    same: the stalled container leaves ``candidates_seen`` untouched and the
-    round ends with ``stats["error"]`` set, so no container asset gets a
-    lifecycle verdict based on a deep scan that never really happened.
+    operation (watchdog timeout — npipe reads cannot be interrupted) marks
+    the round ``stalled`` and records the container in ``stats["degraded"]``
+    so the inventory can re-confirm what the list *did* prove (the container
+    exists) without letting the round conclude absence.
     """
     outcome = DockerScanOutcome()
     if client is None:
@@ -158,34 +179,69 @@ def scan_docker_agents(framework_rules: list, hostname: str, *,
         return outcome
 
     outcome.containers_seen = [brief.container_id for brief in containers]
+    outcome.projects_seen = {
+        project for project in
+        ((brief.labels or {}).get("com.docker.compose.project", "")
+         for brief in containers)
+        if project}
+    cache_stats: dict[str, int] = {}
+    degraded: set[str] = set()
     errors: list[dict] = []
     stalled = False
     for brief in containers:
-        try:
-            top = (dockerapi.container_top(client, brief.container_id)
-                   if brief.state == "running" else [])
-        except DockerStalled as exc:
-            stalled = True
-            errors.append({"container": brief.short_id, "error": str(exc)})
-            continue
-        except Exception as exc:
-            logger.warning("container %s: top failed: %s", brief.short_id, exc)
-            top = []
-        reasons = screen_candidate(brief, hints, top)
+        # 先用 brief 筛（镜像/命令/镜像基础运行时）：大多数容器在这里就能
+        # 定候选，重 daemon 的 docker top 不必为 nginx/redis 之类白跑（T3）。
+        reasons = screen_candidate(brief, hints, [])
+        top: list[TopProcess] = []
+        if not reasons and brief.state == "running":
+            try:
+                top = dockerapi.container_top(client, brief.container_id)
+            except DockerStalled as exc:
+                stalled = True
+                degraded.add(brief.container_id)
+                errors.append({"container": brief.short_id, "error": str(exc)})
+                continue
+            except Exception as exc:
+                logger.warning("container %s: top failed: %s", brief.short_id, exc)
+                top = []
+            reasons = screen_candidate(brief, hints, top)
         if not reasons:
             continue
         outcome.candidates_seen.append(brief.container_id)
+        if brief.state == "running" and not top:
+            # 候选需要活进程表：RUNNING 证据、进程形态的命中理由都出自这里。
+            try:
+                top = dockerapi.container_top(client, brief.container_id)
+            except DockerStalled as exc:
+                # 进程表拿不到：RUNNING 无从谈起。从候选集摘掉，生命周期复核
+                # 不得据此判"容器内已卸载"（那是硬删）；整条通道降级为本轮
+                # 不作复核（全局守卫保留）。
+                stalled = True
+                degraded.add(brief.container_id)
+                outcome.candidates_seen.remove(brief.container_id)
+                errors.append({"container": brief.short_id, "error": str(exc)})
+                continue
+            except Exception as exc:
+                logger.warning("container %s: top failed: %s", brief.short_id, exc)
+                top = []
+            else:
+                reasons = screen_candidate(brief, hints, top)
         try:
+            cache = ProbeCache(probe_cache_store, engine_key=engine_key,
+                               image_id=brief.image_id,
+                               container_id=brief.container_id,
+                               stats=cache_stats)
             bundles, clients, links = _identify_container(
                 client, brief, top, reasons=reasons, hostname=hostname,
                 framework_rules=framework_rules, client_rules=client_rules,
-                interest=interest, hints=hints,
+                interest=interest, hints=hints, cache=cache,
                 read_max_bytes=read_max_bytes, archive_byte_cap=archive_byte_cap,
                 archive_time_cap=archive_time_cap)
         except DockerStalled as exc:
             # 深扫没有真正完成：从候选集摘掉，生命周期复核不得据此判
             # "容器内已卸载"（那是硬删）；整条通道降级为本轮不作复核。
             stalled = True
+            degraded.add(brief.container_id)
             outcome.candidates_seen.remove(brief.container_id)
             errors.append({"container": brief.short_id, "error": str(exc)})
             continue
@@ -204,6 +260,10 @@ def scan_docker_agents(framework_rules: list, hostname: str, *,
                      "agents": (sum(len(bundle.frameworks) for bundle in outcome.bundles)
                                 + len(outcome.assets)),
                      "container_errors": errors,
+                     "degraded": len(degraded),
+                     "probe_cache": {"hits": cache_stats.get("hits", 0),
+                                     "misses": cache_stats.get("misses", 0),
+                                     "stores": cache_stats.get("stores", 0)},
                      "error": ("docker 通道出现失联，本轮容器资产不作生命周期复核"
                                if stalled else None)}
     return outcome
@@ -288,8 +348,13 @@ def _identify_container(client, brief: ContainerBrief, top: list[TopProcess], *,
                         interest: set[str], hints: dict[str, set[str]],
                         read_max_bytes: int, archive_byte_cap: int,
                         archive_time_cap: float,
+                        cache: ProbeCache | None = None,
                         ) -> tuple[list[ApplicationBundle], list[DetectedAsset],
                                    dict[str, dict]]:
+    if cache is None:
+        # 无缓存的调用方（旧测试/直连）拿到一个禁用门面：行为与直连一致。
+        cache = ProbeCache(None, engine_key="", image_id="",
+                           container_id=brief.container_id)
     try:
         info = dockerapi.inspect_container(client, brief.container_id)
     except Exception as exc:
@@ -301,7 +366,7 @@ def _identify_container(client, brief: ContainerBrief, top: list[TopProcess], *,
     workdir = str((info.get("Config") or {}).get("WorkingDir") or "")
     internal_root = workdir or next(
         (path for path in _PROJECT_ROOT_CANDIDATES
-         if dockerapi.probe_path(client, brief.container_id, path)), "/")
+         if cache.probe_path(client, brief.container_id, path)), "/")
 
     # client rule 声明的包根（如 /usr/local/lib/node_modules/n8n）：官方镜像
     # 把产品与依赖树装在 npm 全局布局里，WORKDIR 探测够不着 —— 规则知道在哪。
@@ -315,7 +380,8 @@ def _identify_container(client, brief: ContainerBrief, top: list[TopProcess], *,
             package_roots.append(f"{npm_root.rstrip('/')}/{package}")
 
     runtime = _runtime_of(brief, top, hints)
-    site_packages = _find_site_packages(client, brief.container_id, internal_root, top)
+    site_packages = _find_site_packages(client, brief.container_id,
+                                        internal_root, top, cache)
     if runtime == "unknown" and site_packages:
         runtime = "python"
 
@@ -348,22 +414,22 @@ def _identify_container(client, brief: ContainerBrief, top: list[TopProcess], *,
     main_project = make_project(internal_root, runtime, "container-command")
     main_components = _best_components(_python_components(
         client, brief, internal_root, site_packages, interest,
-        read_max_bytes, archive_byte_cap, archive_time_cap))
+        read_max_bytes, archive_byte_cap, archive_time_cap, cache))
     main_components.extend(_best_components(_node_components(
-        client, brief, internal_root, interest, read_max_bytes)))
+        client, brief, internal_root, interest, read_max_bytes, cache)))
     projects.append(main_project)
     components_by_project[main_project.project_id] = main_components
 
     for package_root in package_roots:
         # 探 package.json（小文件）而不是目录本身 —— 探大目录会让 daemon
         # 开始生成几百 MB 的 tar，断流检测滞后会拖垮紧随其后的请求。
-        if not dockerapi.probe_path(client, brief.container_id,
-                                    f"{package_root}/package.json"):
+        if not cache.probe_path(client, brief.container_id,
+                                f"{package_root}/package.json"):
             continue
         pkg_project = make_project(package_root, "node", "container-package")
         components_by_project[pkg_project.project_id] = _best_components(
             _node_components(client, brief, package_root, interest,
-                             read_max_bytes, interest_probes=True))
+                             read_max_bytes, cache, interest_probes=True))
         projects.append(pkg_project)
 
     bundles = detect_frameworks(projects, components_by_project,
@@ -407,7 +473,8 @@ def _python_versions_from_cmdlines(top: list[TopProcess]) -> list[str]:
 
 
 def _find_site_packages(client, container_id: str, internal_root: str,
-                        top: list[TopProcess]) -> str | None:
+                        top: list[TopProcess], cache: ProbeCache,
+                        ) -> str | None:
     """Locate a site-packages directory by existence probes (no readdir).
 
     Interpreters seen in ``docker top`` name their version, which jumps the
@@ -420,7 +487,7 @@ def _find_site_packages(client, container_id: str, internal_root: str,
         bases = (f"{internal_root}/.venv/lib", "/usr/local/lib", "/usr/lib")
         for base in bases:
             candidate = f"{base}/python{version}/site-packages"
-            if dockerapi.probe_path(client, container_id, candidate):
+            if cache.probe_path(client, container_id, candidate):
                 return candidate
     return None
 
@@ -428,21 +495,22 @@ def _find_site_packages(client, container_id: str, internal_root: str,
 def _python_components(client, brief: ContainerBrief, internal_root: str,
                        site_packages: str | None, interest: set[str],
                        read_max_bytes: int, archive_byte_cap: int,
-                       archive_time_cap: float) -> list[ComponentInfo]:
+                       archive_time_cap: float, cache: ProbeCache,
+                       ) -> list[ComponentInfo]:
     observed: list[ComponentInfo] = []
     readers = (("pyproject.toml", components_from_pyproject_text),
                ("requirements.txt", components_from_requirements_text),
                ("uv.lock", components_from_lock_text),
                ("poetry.lock", components_from_lock_text))
     for name, parse in readers:
-        raw = dockerapi.read_container_file(
+        raw = cache.read_file(
             client, brief.container_id, f"{internal_root}/{name}", read_max_bytes)
         if not raw:
             continue
         source = f"container:{brief.short_id}:{internal_root}/{name}"
         observed.extend(parse(raw.decode("utf-8", "replace"), source, interest))
     if site_packages:
-        for name, version, member in dockerapi.iter_dist_metadata(
+        for name, version, member in cache.iter_dist_metadata(
                 client, brief.container_id, site_packages, interest=interest,
                 byte_cap=archive_byte_cap, time_cap=archive_time_cap):
             observed.append(ComponentInfo(
@@ -453,17 +521,20 @@ def _python_components(client, brief: ContainerBrief, internal_root: str,
 
 
 def _node_components(client, brief: ContainerBrief, internal_root: str,
-                     interest: set[str], read_max_bytes: int, *,
+                     interest: set[str], read_max_bytes: int,
+                     cache: ProbeCache, *,
                      interest_probes: bool = False) -> list[ComponentInfo]:
     observed: list[ComponentInfo] = []
-    raw = dockerapi.read_container_file(
+    raw = cache.read_file(
         client, brief.container_id, f"{internal_root}/package.json", read_max_bytes)
     if raw:
+        text = raw.decode("utf-8", "replace")
         try:
-            data = json.loads(raw.decode("utf-8", "replace"))
+            data = json.loads(text)
         except ValueError:
             data = {}
         source = f"container:{brief.short_id}:{internal_root}/package.json"
+        observed.extend(components_from_package_json_text(text, source, interest))
         declared: list[tuple[str, str]] = []  # (raw npm name, normalized)
         for section in ("dependencies", "devDependencies", "optionalDependencies"):
             values = data.get(section)
@@ -473,13 +544,10 @@ def _node_components(client, brief: ContainerBrief, internal_root: str,
                 normalized = normalize_name(str(package))
                 if normalized in interest:
                     declared.append((str(package), normalized))
-                    observed.append(ComponentInfo(
-                        name=normalized, version="UNKNOWN",
-                        version_source=VersionSource.DECLARED, source_path=source))
         # Installed node metadata: exact paths from the declared names, so each
         # read is one cheap targeted get_archive instead of a tree walk.
         for package, normalized in declared:
-            pkg_raw = dockerapi.read_container_file(
+            pkg_raw = cache.read_file(
                 client, brief.container_id,
                 f"{internal_root}/node_modules/{package}/package.json", read_max_bytes)
             if not pkg_raw:
@@ -488,14 +556,13 @@ def _node_components(client, brief: ContainerBrief, internal_root: str,
                 pkg_data = json.loads(pkg_raw.decode("utf-8", "replace"))
             except ValueError:
                 continue
-            version = str(pkg_data.get("version") or "")
-            if not version:
-                continue
-            observed.append(ComponentInfo(
-                name=normalized, version=version,
-                version_source=VersionSource.PACKAGE_METADATA,
-                source_path=(f"container:{brief.short_id}:{internal_root}"
-                             f"/node_modules/{package}/package.json")))
+            component = metadata_component(
+                pkg_data,
+                (f"container:{brief.short_id}:{internal_root}"
+                 f"/node_modules/{package}/package.json"),
+                expected_name=package)
+            if component is not None:
+                observed.append(component)
     if not interest_probes:
         return observed
     # 兴趣驱动的定向读：npm 的安装路径就是包名，不需要 readdir —— 对兴趣表
@@ -504,7 +571,7 @@ def _node_components(client, brief: ContainerBrief, internal_root: str,
     # 的嵌套提升布局（如 n8n 内嵌 @langchain/core），与声明列表无关。
     base = f"{internal_root.rstrip('/')}/node_modules"
     for name in sorted(interest):
-        pkg_raw = dockerapi.read_container_file(
+        pkg_raw = cache.read_file(
             client, brief.container_id, f"{base}/{name}/package.json",
             read_max_bytes)
         if not pkg_raw:
@@ -513,13 +580,12 @@ def _node_components(client, brief: ContainerBrief, internal_root: str,
             pkg_data = json.loads(pkg_raw.decode("utf-8", "replace"))
         except ValueError:
             continue
-        version = str(pkg_data.get("version") or "")
-        if not version:
-            continue
-        observed.append(ComponentInfo(
-            name=normalize_name(name), version=version,
-            version_source=VersionSource.PACKAGE_METADATA,
-            source_path=f"container:{brief.short_id}:{base}/{name}/package.json"))
+        component = metadata_component(
+            pkg_data,
+            f"container:{brief.short_id}:{base}/{name}/package.json",
+            expected_name=name)
+        if component is not None:
+            observed.append(component)
     return observed
 
 
@@ -616,6 +682,7 @@ def _merge_compose_scope(assets: list[DetectedAsset], links: dict[str, dict],
         merged = DetectedAsset(
             asset_id=build_asset_id(hostname, rule_id, f"compose:{project}"),
             scope_kind="compose",
+            identity_scope=project,
             name=primary.name, asset_type=primary.asset_type,
             states=set().union(*(a.states for a in members)),
             confidence=max(a.confidence for a in members),
@@ -781,6 +848,7 @@ def _detect_container_clients(client, brief: ContainerBrief, running: bool,
         assets.append(DetectedAsset(
             asset_id=build_asset_id(hostname, rule.id, f"container:{brief.short_id}"),
             scope_kind="container",
+            identity_scope=brief.container_id,
             name=rule.name, asset_type=rule.asset_type, states=states,
             confidence=confidence, version=version_info, evidence=evidence,
             running_pids=running_pids, detector=rule.id,

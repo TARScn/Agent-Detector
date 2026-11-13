@@ -36,7 +36,15 @@ class NetObservation:
     match_kind: str      # "llm_api" | "local_model"
     confidence: str
     evidence: tuple[str, ...]
-    asset_id: str | None = None   # resolved at match time when provable (local_model)
+    # P0-C: the destination service is a target, never the actor. The actor is
+    # filled by MonitorManager from the process instance; a bare port hit may
+    # only set target_asset_id.
+    target_asset_id: str | None = None
+    target_endpoint_id: str | None = None
+    actor_asset_id: str | None = None
+    actor_process_key: str | None = None
+    attribution_method: str = "unattributed"
+    attribution_state: str = "unattributed"
 
 
 def collect_outbound() -> list[ConnInfo]:
@@ -120,8 +128,12 @@ def match_llm_call(conn: ConnInfo, rules,
         return NetObservation(pid=conn.pid, process_name=conn.process_name,
                               remote_ip=conn.remote_ip, remote_port=conn.remote_port,
                               host=f"{name}:{conn.remote_port}", match_kind="local_model",
-                              confidence="medium", evidence=("local_model_port", "scan_asset"),
-                              asset_id=model_ports[conn.remote_port])
+                              confidence="medium",
+                              evidence=("local_model_port", "scan_asset",
+                                        "target:scan_listen_port"),
+                              target_asset_id=model_ports[conn.remote_port],
+                              attribution_method="scan_listen_port",
+                              attribution_state="candidate")
     for host, origin in dns_hosts.get(conn.remote_ip, ()):
         if host in rules.known_llm_hosts:
             source = "dns_cache" if origin == "cache" else "proactive_resolve"

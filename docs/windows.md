@@ -21,13 +21,21 @@
 ```powershell
 # 1. 下载并安装（管理员权限；本工具不做这一步）
 #    https://learn.microsoft.com/sysinternals/downloads/sysmon
+#    或 winget install Microsoft.Sysinternals.Sysmon --source winget
 sysmon64.exe -accepteula -i
 
 # 2. 合并采集配置：先导出你现有的配置，再把 configs\sysmon.xml 的开关并进去
 sysmon64.exe -c            # 打印当前配置
 sysmon64.exe -c configs\sysmon.xml
 
-# 3. 验证通道可读
+# 3. （控制台非管理员运行时）授予当前用户通道读权限
+#    通道默认仅管理员可读；/ca 必须传完整 SDDL（含 O:BAG:SYD: 前缀），
+#    在原有 ACL 后追加 用户SID 的读 ACE；SID 用 whoami /user 查询。
+#    用普通批处理文件执行最稳（PowerShell 多层引号会把 SDDL 拆碎）：
+wevtutil sl Microsoft-Windows-Sysmon/Operational ^
+  /ca:"O:BAG:SYD:(A;;0xf0007;;;SY)(A;;0x7;;;BA)(A;;0x1;;;BO)(A;;0x1;;;SO)(A;;0x1;;;S-1-5-32-573)(A;;0x1;;;你的用户SID)"
+
+# 4. 验证通道可读
 Get-WinEvent -LogName Microsoft-Windows-Sysmon/Operational -MaxEvents 5
 ```
 
@@ -54,6 +62,9 @@ agent-detector hooks plan claude_code
 
 # 确认后写入（会先备份原配置，只增删本工具自己的条目）
 agent-detector hooks install claude_code --apply
+
+# 卸载（只移除本工具写入的条目，先备份）
+agent-detector hooks uninstall claude_code --apply
 ```
 
 - Claude Code：`%USERPROFILE%\.claude\settings.json`，`PreToolUse` + `PostToolUse`。

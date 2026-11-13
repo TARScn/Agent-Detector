@@ -16,6 +16,7 @@ from agent_detector.discovery.fingerprints.schema import FrameworkRule
 from agent_detector.discovery.sources import docker_agents, dockerapi
 from agent_detector.discovery.sources.dockerapi import (ContainerBrief, DockerUnavailable,
                                                         TopProcess)
+from agent_detector.discovery.sources.docker_probe_cache import DictProbeCacheStore
 from test_dockerapi import FakeAPIClient, SleepingStream, make_tar
 
 LANGGRAPH_RULE = FrameworkRule.model_validate({
@@ -54,11 +55,15 @@ def brief(image="registry.local/team/ai-app:1.8.0", state="running",
 def container_client(*, image="registry.local/team/ai-app:1.8.0", state="running",
                      pyproject=PYPROJECT, site_tar=SITE_TAR,
                      processes=(("7", "1", "python /app/server.py"),),
-                     name="ai-app", command="python /app/server.py"):
+                     name="ai-app", command="python /app/server.py",
+                     image_id=None):
     """一个运行（或停止）的 python 容器：/app/pyproject 声明 langgraph，
-    系统 site-packages 安装 langgraph 0.2.6。"""
+    系统 site-packages 安装 langgraph 0.2.6。image_id 提供 ImageID
+    （镜像 config digest）时才走 T1 缓存路径。"""
     listing = {"Id": CID, "Names": [f"/{name}"], "Image": image, "State": state,
                "Command": command, "Created": 0, "Labels": {}}
+    if image_id:
+        listing["ImageID"] = image_id
     archives = {(CID, "/app/pyproject.toml"): make_tar({"/app/pyproject.toml": pyproject})}
     if site_tar is not None:
         archives[(CID, "/usr/local/lib/python3.11/site-packages")] = site_tar
@@ -502,3 +507,136 @@ def test_stalled_top_marks_channel_failed(monkeypatch):
     assert outcome.stats["error"]
     assert outcome.candidates_seen == []  # 筛选根本没跑成
     assert outcome.stats["container_errors"]
+    assert outcome.stats["degraded"] == 1
+
+
+# ---------------------------------------------------------------------------
+# T3 筛选重排：brief 先筛，docker top 只为候选/进程证据服务
+# ---------------------------------------------------------------------------
+
+def test_brief_hit_candidate_tops_once_for_evidence_only():
+    """镜像关键词直接命中的候选：top 不参与筛选，只为进程证据调一次。"""
+    client = container_client(image="my-langgraph-worker:1.0", command="")
+    outcome = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE, LANGGRAPH_RULE], "h", client=client, hints=HINTS)
+    assert outcome.stats["candidates"] == 1
+    assert client.top_calls == [CID]
+    assert outcome.stats["error"] is None
+    (bundle,) = outcome.bundles
+    (framework,) = bundle.frameworks
+    assert {state.value for state in framework.states} == {"INSTALLED", "RUNNING"}
+
+
+def test_stopped_plain_container_never_gets_top():
+    """停止且镜像无关键词：既不是候选，也从不触发 daemon 调用。"""
+    client = container_client(image="nginx:1.25", state="exited",
+                              command="nginx -g 'daemon off;'",
+                              processes=(), site_tar=None, pyproject="")
+    outcome = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE, LANGGRAPH_RULE], "h", client=client, hints=HINTS)
+    assert outcome.stats["candidates"] == 0
+    assert client.top_calls == []
+
+
+def test_stalled_top_on_brief_hit_candidate_still_fails_the_channel(monkeypatch):
+    """brief 命中的候选补进程表时失联：候选摘除 + 通道降级不变。"""
+    def slow_top(*args, **kwargs):
+        time.sleep(1.0)
+
+    monkeypatch.setattr(dockerapi, "_container_top_raw", slow_top)
+    client = watched(container_client(image="my-langgraph-worker:1.0", command=""))
+    outcome = docker_agents.scan_docker_agents(
+        [LANGGRAPH_RULE], "h", client=client, hints=HINTS)
+    assert outcome.stats["error"]
+    assert outcome.candidates_seen == []
+    assert outcome.stats["degraded"] == 1
+
+
+# ---------------------------------------------------------------------------
+# T1 摘要缓存：同 digest 跨轮复用深探测；digest 变了重探
+# ---------------------------------------------------------------------------
+
+IMAGE_A = "sha256:" + "a" * 64
+IMAGE_B = "sha256:" + "b" * 64
+
+
+def _framework_sig(outcome):
+    return sorted((framework.detector, framework.version.value,
+                   tuple(sorted(state.value for state in framework.states)))
+                  for bundle in outcome.bundles
+                  for framework in bundle.frameworks)
+
+
+def test_probe_cache_reuses_deep_reads_across_scans():
+    store = DictProbeCacheStore()
+    client = container_client(image_id=IMAGE_A)
+    first = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE, LANGGRAPH_RULE], "h", client=client, hints=HINTS,
+        probe_cache_store=store)
+    assert first.stats["error"] is None
+    assert first.stats["probe_cache"]["stores"] > 0
+    reads_after_first = list(client.archive_calls)
+    assert reads_after_first  # 首轮真读了 daemon
+
+    second = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE, LANGGRAPH_RULE], "h", client=client, hints=HINTS,
+        probe_cache_store=store)
+    assert client.archive_calls == reads_after_first  # 次轮零新读
+    assert second.stats["probe_cache"]["hits"] > 0
+    assert second.stats["probe_cache"]["misses"] == 0
+    assert second.stats["candidates"] == 1
+    assert second.stats["agents"] == first.stats["agents"]
+    # 识别结果一致：缓存只复用内容，身份与 RUNNING 判定照旧活算
+    assert _framework_sig(second) == _framework_sig(first)
+    (framework,) = second.bundles[0].frameworks
+    assert framework.running_pids == [7]  # 进程证据仍是本轮的
+    assert framework.version.value == "0.2.6"
+
+
+def test_image_change_reprobes_despite_cache():
+    store = DictProbeCacheStore()
+    first = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE, LANGGRAPH_RULE], "h",
+        client=container_client(image_id=IMAGE_A), hints=HINTS,
+        probe_cache_store=store)
+    assert first.stats["probe_cache"]["stores"] > 0
+
+    rebuilt = container_client(image_id=IMAGE_B)  # 镜像更新：digest 变了
+    second = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE, LANGGRAPH_RULE], "h", client=rebuilt, hints=HINTS,
+        probe_cache_store=store)
+    assert len(rebuilt.archive_calls) > 0  # 新 digest 重新深探
+    assert second.stats["probe_cache"]["hits"] == 0
+    assert second.stats["probe_cache"]["misses"] > 0
+
+
+def test_no_image_id_bypasses_the_cache():
+    """旧 daemon/假件没有 ImageID：行为与无缓存通道完全一致。"""
+    store = DictProbeCacheStore()
+    client = container_client()  # 无 ImageID
+    first = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE, LANGGRAPH_RULE], "h", client=client, hints=HINTS,
+        probe_cache_store=store)
+    second = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE, LANGGRAPH_RULE], "h", client=client, hints=HINTS,
+        probe_cache_store=store)
+    assert first.stats["probe_cache"] == {"hits": 0, "misses": 0, "stores": 0}
+    assert second.stats["probe_cache"] == {"hits": 0, "misses": 0, "stores": 0}
+    assert store.rows == {}
+
+
+def test_compose_labels_survive_a_stalled_round():
+    """T2 的证据基座：list 层面标签在失联轮也进 projects_seen。"""
+    from test_dockerapi import SleepingStream
+    client = watched(container_client(image="langgenius/dify-api:1.18.0",
+                                      command="python app.py",
+                                      name="docker-api-1"))
+    client.container_list[0]["Labels"] = {"com.docker.compose.project": "docker"}
+    client.archives[(CID, "/usr/local/lib/python3.11/site-packages")] = \
+        SleepingStream(1.0)
+    outcome = docker_agents.scan_docker_agents(
+        [LANGCHAIN_RULE], "h", client=client, hints=HINTS, archive_time_cap=0.1)
+    assert outcome.stats["error"]
+    assert outcome.stats["degraded"] == 1
+    assert outcome.projects_seen == {"docker"}  # 标签来自 list，深探测失败也成立
+    assert outcome.containers_seen == [CID]
