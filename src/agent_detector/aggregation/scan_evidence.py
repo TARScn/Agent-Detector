@@ -23,12 +23,16 @@ from agent_detector.aggregation.state_resolver import (ABSENT, FAILED,
 from agent_detector.aggregation.status_projection import write_resolved
 from agent_detector.core.enums import AssetState, AssetType, HookState
 from agent_detector.core.models import DetectedAsset
+from agent_detector.discovery.sources.mcp import mcp_ref_id
 from agent_detector.identity.entity import legacy_identity_for_asset
 from agent_detector.storage.component_repository import ComponentRepository
+from agent_detector.storage.mcp_repository import McpConfigRefRepository
 from agent_detector.storage.identity_repository import IdentityRepository
 from agent_detector.storage.models import (AgentInstanceRow,
+                                           BehaviorEventRow,
                                            EntityAttributeRow,
-                                           EntityLocationRow, utc_now_iso)
+                                           EntityLocationRow,
+                                           McpToolSnapshotRow, utc_now_iso)
 
 _EVIDENCE_STATE_CLASS = {
     AssetState.INSTALLED: ("E2", "package_metadata"),
@@ -159,6 +163,166 @@ def _link_component(components: ComponentRepository, entity_id: str,
         version_source=asset.version.source.value)
 
 
+def _write_mcp_refs(session, refs: list, host_key: str,
+                    inventory_by_asset: dict, entity_by_asset: dict[str, str],
+                    stats: dict, ledger: EvidenceLedger | None = None,
+                    scan_id: int = 0, runs: list = (),
+                    probes: list = ()) -> None:
+    """Upsert the scan stage's MCP config references, then fold in the
+    runtime layers: stdio process correlations, protocol probe results,
+    capability snapshots, and the candidate→confirmed upgrades.
+
+    Identity is host + config path + server name, so the same server name in
+    two clients never folds into one row. Entity attribution is best-effort:
+    user-scope refs attach to the scanned client entity whose agent type
+    matches the declaring client; project-scope refs stay unattached this
+    round (their config_path keeps the project root for later matching). No
+    command/args/env is persisted — the reference carries names, transport and
+    sanitized endpoints only (contract C10).
+    """
+    if not refs:
+        return
+    type_entity: dict[str, str] = {}
+    for asset_id, entity_id in entity_by_asset.items():
+        item = inventory_by_asset.get(asset_id)
+        agent_type = str((item or {}).get("agent_type") or "")
+        if agent_type and entity_id:
+            type_entity.setdefault(agent_type, entity_id)
+    repository = McpConfigRefRepository(session)
+    components = ComponentRepository(session)
+    ref_ids: dict[tuple[str, str], str] = {}   # (config_path, name) -> ref_id
+    entity_by_ref: dict[str, str] = {}
+    for ref in refs:
+        ref_id = mcp_ref_id(host_key, ref.config_path, ref.name)
+        entity_id = _mcp_ref_entity(ref, type_entity)
+        ref_ids[(ref.config_path, ref.name)] = ref_id
+        repository.upsert_ref(
+            ref_id=ref_id, entity_id=entity_id, client=ref.client,
+            server_name=ref.name, scope=ref.scope, config_path=ref.config_path,
+            transport=ref.transport, endpoint=ref.endpoint,
+            enabled=ref.enabled, config_digest=ref.config_digest)
+        if entity_id:
+            entity_by_ref[ref_id] = entity_id
+
+    confirmed_by_name = _mcp_invoked_server_names(session)
+    probes_verified = 0
+    for ref in refs:
+        ref_id = ref_ids[(ref.config_path, ref.name)]
+        entity_id = entity_by_ref.get(ref_id, "")
+        # stdio process correlation: statuses (+pids) are the persisted facts.
+        run = next((item for item in runs
+                    if item.ref.config_path == ref.config_path
+                    and item.ref.name == ref.name), None)
+        if run is not None:
+            repository.set_run_status(ref_id, run.status, list(run.pids))
+            if run.status == "correlated" and entity_id and ledger is not None:
+                _write_mcp_claim(ledger, scan_id=scan_id, entity_id=entity_id,
+                                 predicate="process_correlated",
+                                 object_ref=f"mcp:{ref.name}",
+                                 evidence_class="E3",
+                                 method="process_correlation")
+        # protocol probe: verified flips the DECLARES relation to confirmed.
+        probe = next((item for item in probes
+                      if item.ref.endpoint == ref.endpoint), None)
+        if probe is not None and probe.status == "verified":
+            repository.set_probe_result(ref_id,
+                                        probe_status=probe.status,
+                                        protocol_version=probe.protocol_version)
+            _write_mcp_tool_snapshots(session, ref_id, probe.tools,
+                                      probe.protocol_version)
+            probes_verified += 1
+            if entity_id:
+                claim_id = None
+                if ledger is not None:
+                    claim_id = _write_mcp_claim(
+                        ledger, scan_id=scan_id, entity_id=entity_id,
+                        predicate="protocol_verified",
+                        object_ref=f"mcp:{ref.name}", evidence_class="E3",
+                        method="mcp_protocol_probe")
+                _confirm_mcp_relation(components, entity_id, ref.name, claim_id)
+        elif probe is not None:
+            # honest failure states stay on the row; nothing is confirmed
+            repository.set_probe_result(ref_id, probe_status=probe.status)
+        # E5 join: real mcp.call events confirm the declared component even
+        # without a probe (stdio servers). No new claim — the E5 event claims
+        # already exist upstream (trace_evidence / hook decision).
+        if entity_id and ref.name.casefold() in confirmed_by_name:
+            _confirm_mcp_relation(components, entity_id, ref.name, None)
+    stats["mcp_refs"] = len(refs)
+    stats["mcp_probes_verified"] = probes_verified
+
+
+def _mcp_ref_entity(ref, type_entity: dict[str, str]) -> str:
+    """Client entity for a user-scope ref; project-scope stays unattached."""
+    if ref.scope != "user":
+        return ""
+    candidates = {ref.client, _LEGACY_CLIENT_TYPE.get(ref.client, "")}
+    return next((type_entity[kind] for kind in sorted(candidates)
+                 if kind and kind in type_entity), "")
+
+
+_LEGACY_CLIENT_TYPE = {"claude_code": "claude_code", "cursor": "cursor",
+                       "codex_cli": "codex_cli"}
+
+
+def _mcp_invoked_server_names(session) -> set[str]:
+    """Server names with at least one real mcp.call event (E5), casefolded."""
+    names = session.execute(
+        select(BehaviorEventRow.mcp_server).distinct().where(
+            BehaviorEventRow.mcp_server.is_not(None),
+            BehaviorEventRow.mcp_server != "")).scalars().all()
+    return {str(name).casefold() for name in names}
+
+
+def _confirm_mcp_relation(components: ComponentRepository, entity_id: str,
+                          server_name: str, claim_id: str | None) -> None:
+    """Flip one MCP DECLARES relation from candidate to confirmed."""
+    key = components.upsert_component(server_name, kind="MCP_SERVER")
+    components.upsert_relation(entity_id, key, relation_type="DECLARES",
+                               status="confirmed", evidence_claim_id=claim_id)
+
+
+def _write_mcp_tool_snapshots(session, ref_id: str, tools: tuple[dict, ...],
+                              protocol_version: str) -> int:
+    """Capability snapshot per listed tool (hashes only, rug-pull baseline)."""
+    now = utc_now_iso()
+    existing = {row.tool_name: row for row in session.scalars(
+        select(McpToolSnapshotRow).where(McpToolSnapshotRow.ref_id == ref_id))}
+    written = 0
+    for tool in tools:
+        row = existing.get(tool["name"])
+        if row is None:
+            session.add(McpToolSnapshotRow(
+                ref_id=ref_id, tool_name=tool["name"],
+                desc_hash=tool["desc_hash"], schema_hash=tool["schema_hash"],
+                protocol_version=protocol_version, first_seen=now, last_seen=now))
+        else:
+            row.desc_hash = tool["desc_hash"]
+            row.schema_hash = tool["schema_hash"]
+            row.protocol_version = protocol_version
+            row.last_seen = now
+        written += 1
+    return written
+
+
+def _write_mcp_claim(ledger: EvidenceLedger, *, scan_id: int, entity_id: str,
+                     predicate: str, object_ref: str, evidence_class: str,
+                     method: str) -> str:
+    now = utc_now_iso()
+    uid = f"scan:{scan_id}:mcp:{predicate}:{object_ref}"
+    observation_id = ledger.record_observation(
+        source="discovery", source_event_uid=uid, scope_key="",
+        fact_type=predicate,
+        payload={"object": object_ref, "method": method},
+        observed_at=now, collection_run_id=scan_id)
+    return ledger.add_claim(
+        subject_ref=entity_id, predicate=predicate, object_ref=object_ref,
+        evidence_class=evidence_class, verification_method=method,
+        rule_id="mcp-scan", rule_generation=scan_id,
+        collection_run_id=scan_id, observed_at=now, valid_from=now,
+        observation_id=observation_id)
+
+
 def _write_canonical_inventory(session, assets: list[DetectedAsset],
                                inventory: list[dict],
                                entity_by_asset: dict[str, str],
@@ -282,7 +446,10 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
                         engine_key: str, docker_scope_key: str,
                         coverage_scope_ids: dict[tuple[str, str], int] | None = None,
                         observations: list[dict] | None = None,
-                        coverage=None
+                        coverage=None,
+                        mcp_refs: list | None = None,
+                        mcp_runs: list = (),
+                        mcp_probes: list = (),
                         ) -> dict:
     ledger = EvidenceLedger(session)
     identities = IdentityRepository(session)
@@ -483,6 +650,10 @@ def write_scan_evidence(session, *, scan_id: int, assets: list[DetectedAsset],
                             entity_host_scoped, docker_scope_key):
             components.close_stale(
                 entity_id, active_components.get(entity_id, set()))
+
+    _write_mcp_refs(session, mcp_refs or [], host_key, inventory_by_asset,
+                    entity_by_asset, stats, ledger=ledger, scan_id=scan_id,
+                    runs=mcp_runs, probes=mcp_probes)
 
     _write_canonical_inventory(session, assets, inventory, entity_by_asset,
                                stats)

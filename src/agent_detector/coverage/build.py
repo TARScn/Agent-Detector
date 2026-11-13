@@ -30,8 +30,12 @@ def build_scan_coverage(*, processes_count: int, process_source: str,
                         docker_enabled: bool,
                         max_projects: int,
                         max_containers: int,
-                        docker_scope_key: str = "local") -> CoverageGraph:
-    """Assemble host, product-rule, project, Docker and container scopes."""
+                        docker_scope_key: str = "local",
+                        mcp_stats: dict | None = None,
+                        mcp_probe_statuses: dict[str, str] | None = None,
+                        mcp_probe_active: bool = False
+                        ) -> CoverageGraph:
+    """Assemble host, product-rule, project, Docker, container and MCP scopes."""
     graph = CoverageGraph()
     failed = _normalized_failed(failed_detectors)
 
@@ -119,4 +123,55 @@ def build_scan_coverage(*, processes_count: int, process_source: str,
             predicates=(("compose_membership", _COMPLETE),),
             parents=(("docker_engine_enumeration", docker_scope_key),)))
 
+    _add_mcp_scopes(graph, failed, mcp_stats or {}, mcp_probe_statuses or {},
+                    mcp_probe_active)
+
     return graph
+
+
+def _add_mcp_scopes(graph: CoverageGraph, failed: set[str], mcp_stats: dict,
+                    probe_statuses: dict[str, str], probe_active: bool) -> None:
+    """MCP config and probe coverage: a failed read stays a failed read and a
+    denied probe stays denied — neither may look like "no MCP exists"."""
+    mcp_stage_failed = "mcp-config" in failed or "mcp_config" in failed
+    gate_status = (CoverageStatus.FAILED if mcp_stage_failed
+                   else _COMPLETE)
+    graph.add(CoverageScope(
+        scope_type="mcp_config_enumeration", scope_key="scan",
+        source="mcp", own_status=gate_status,
+        scanned_count=int(mcp_stats.get("refs") or 0),
+        predicates=(("mcp_config_presence", gate_status),)))
+    for config_path, state in sorted((mcp_stats.get("diagnostics") or {}).items()):
+        if state == "missing":
+            continue  # nothing declared there: not a coverage event
+        status = _COMPLETE if state == "ok" else CoverageStatus.FAILED
+        graph.add(CoverageScope(
+            scope_type="mcp_config_file", scope_key=config_path,
+            source="mcp", own_status=status,
+            predicates=(("mcp_config_presence", status),),
+            parents=(("mcp_config_enumeration", "scan"),)))
+
+    probe_stage_failed = "mcp-probe" in failed or "mcp_probe" in failed
+    if not probe_active:
+        probe_status = CoverageStatus.DISABLED  # passive scan: no network asks
+    elif probe_stage_failed:
+        probe_status = CoverageStatus.FAILED
+    else:
+        probe_status = _COMPLETE
+    graph.add(CoverageScope(
+        scope_type="mcp_endpoint_probing", scope_key="scan",
+        source="mcp", own_status=probe_status,
+        scanned_count=len(probe_statuses),
+        predicates=(("mcp_protocol_presence", probe_status),),
+        parents=(("mcp_config_enumeration", "scan"),)))
+    # Definitive answers only: verified/not_mcp are COMPLETE (the endpoint
+    # spoke and said yes/no); unauthorized/timeout/error are FAILED — the
+    # endpoint was never proven absent, so absence claims must not use them.
+    _DEFINITIVE = {"verified", "not_mcp"}
+    for endpoint, state in sorted(probe_statuses.items()):
+        status = _COMPLETE if state in _DEFINITIVE else CoverageStatus.FAILED
+        graph.add(CoverageScope(
+            scope_type="mcp_endpoint_probe", scope_key=endpoint,
+            source="mcp", own_status=status,
+            predicates=(("mcp_protocol_presence", status),),
+            parents=(("mcp_endpoint_probing", "scan"),)))

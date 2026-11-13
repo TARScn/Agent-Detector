@@ -29,6 +29,13 @@ MAX_PROBES = max(0, min(int(os.getenv("AGENT_DETECTOR_MAX_PROBES", "20")), 100))
 # pathological process tables, like MAX_PROBES does for the HTTP prober.
 MAX_PROJECT_PROBES = max(0, min(int(os.getenv("AGENT_DETECTOR_MAX_PROJECTS", "40")), 500))
 
+# MCP protocol probe budget (active scans only): loopback HTTP/SSE endpoints
+# get initialize + tools/list — never tools/call. Knobs clamp so a hostile or
+# wedged endpoint cannot run away with the scan the way MAX_PROBES does.
+MCP_PROBE_TIMEOUT = max(0.5, min(float(os.getenv("AGENT_DETECTOR_MCP_PROBE_TIMEOUT", "2.0")), 10.0))
+MCP_PROBE_MAX_ENDPOINTS = max(0, min(int(os.getenv("AGENT_DETECTOR_MCP_PROBE_MAX_ENDPOINTS", "20")), 100))
+MCP_PROBE_MAX_TOOLS = max(1, min(int(os.getenv("AGENT_DETECTOR_MCP_PROBE_MAX_TOOLS", "100")), 500))
+
 # Docker channel (Docker Core): container discovery over the read-only Docker
 # API (list/inspect/top/get_archive) — docker exec is never used. Knobs clamp
 # like MAX_PROBES so a pathological daemon or a huge site-packages archive

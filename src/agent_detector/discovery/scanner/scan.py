@@ -27,8 +27,10 @@ from agent_detector.core.config import (CONTROLLED_TRACE_MAX_RECORDS,
                                         CONTROLLED_TRACE_PATH,
                                         DOCKER_ENABLED,
                                         DOCKER_MAX_CONTAINERS,
-                                        DOCKER_PROBE_CACHE_TTL_S, MAX_PROBES,
-                                        MAX_PROJECT_PROBES)
+                                        DOCKER_PROBE_CACHE_TTL_S,
+                                        MAX_PROBES, MAX_PROJECT_PROBES,
+                                        MCP_PROBE_MAX_ENDPOINTS,
+                                        MCP_PROBE_TIMEOUT)
 from agent_detector.discovery.sources.agents import LoadedMatrix
 from agent_detector.discovery.scanner.build import build_detectors
 from agent_detector.discovery.sources.deps import interest_names, scan_project_dependencies
@@ -39,8 +41,12 @@ from agent_detector.discovery.scanner.registry import Detector
 from agent_detector.discovery.scanner.resolver import resolve_projects, runtime_of
 from agent_detector.discovery.sources.docker_agents import scan_docker_agents
 from agent_detector.discovery.sources.docker_probe_cache import RepositoryStore
+from agent_detector.discovery.sources.mcp import McpConfigReference, scan_mcp_configs
+from agent_detector.core.enums import AssetType
 from agent_detector.core.models import DetectedAsset, HostFacts
 from agent_detector.discovery.probes.http import probe_facts
+from agent_detector.discovery.probes.mcp_protocol import probe_mcp_endpoints
+from agent_detector.discovery.sources.mcp_process import correlate_stdio_processes
 from agent_detector.storage import (CoverageRepository, IdentityRepository,
                                     ScanRepository)
 from agent_detector.storage.docker_probe_cache import DockerProbeCacheRepository
@@ -96,12 +102,31 @@ def run_scan(engine: Engine, active: bool = False,
         assets.extend(bundle.asset for bundle in bundles)
         for bundle in bundles:
             assets.extend(bundle.frameworks)
+        mcp_refs, mcp_stats = _discover_mcp_configs(home, bundles, facts)
         merged = correlate_assets(merge_assets(assets))
+        agent_pids = {pid for asset in merged if asset.asset_type in (
+            AssetType.AGENT_CLIENT, AssetType.AGENT_PLATFORM)
+            for pid in asset.running_pids}
+        mcp_runs = correlate_stdio_processes(mcp_refs, facts, agent_pids,
+                                             home=home)
+        mcp_probes: list = []
+        if active and MCP_PROBE_MAX_ENDPOINTS > 0:
+            try:
+                mcp_probes = probe_mcp_endpoints(
+                    mcp_refs, timeout=MCP_PROBE_TIMEOUT,
+                    max_endpoints=MCP_PROBE_MAX_ENDPOINTS)
+            except Exception as exc:
+                logger.warning("mcp protocol probe failed: %s", exc)
+                errors.append({"detector": "mcp-probe", "error": str(exc)})
         failed_detectors = {error["detector"] for error in errors}
         if project_stats.get("error"):
             failed_detectors.add("frameworks")  # stage failed: absence proves nothing
         if docker_ctx["failed"]:
             failed_detectors.add("docker")  # same guard for the container channel
+        if mcp_stats.get("error"):
+            failed_detectors.add("mcp-config")  # same guard for the config channel
+        if any(error["detector"] == "mcp-probe" for error in errors):
+            failed_detectors.add("mcp-probe")  # probe stage said nothing this round
 
         docker_ctx["scope_key"] = docker_scope_key
         coverage_repo = CoverageRepository(session)
@@ -120,7 +145,11 @@ def run_scan(engine: Engine, active: bool = False,
                     docker_enabled=docker_enabled and DOCKER_ENABLED,
                     max_projects=MAX_PROJECT_PROBES,
                     max_containers=DOCKER_MAX_CONTAINERS,
-                    docker_scope_key=docker_scope_key)
+                    docker_scope_key=docker_scope_key,
+                    mcp_stats=mcp_stats,
+                    mcp_probe_statuses={probe.ref.endpoint: probe.status
+                                        for probe in mcp_probes},
+                    mcp_probe_active=active and MCP_PROBE_MAX_ENDPOINTS > 0)
                 coverage_repo.add_graph(scan_id, coverage)
                 coverage_scope_ids = {
                     (row["scope_type"], row["scope_key"]): row["id"]
@@ -138,7 +167,8 @@ def run_scan(engine: Engine, active: bool = False,
                            for bundle in bundles for framework in bundle.frameworks},
                 failed_detectors=failed_detectors,
                 docker_context=docker_ctx,
-                coverage=coverage))
+                coverage=coverage,
+                mcp_refs=mcp_refs))
         identity_shadow = write_identity_shadow(session, engine, merged, facts)
         if identity_shadow.get("error"):
             errors.append({"detector": "identity-shadow",
@@ -170,7 +200,10 @@ def run_scan(engine: Engine, active: bool = False,
                 docker_scope_key=docker_scope_key,
                 coverage_scope_ids=coverage_scope_ids,
                 observations=presence_observations,
-                coverage=coverage)
+                coverage=coverage,
+                mcp_refs=mcp_refs,
+                mcp_runs=mcp_runs,
+                mcp_probes=mcp_probes)
         except Exception as exc:  # evidence ledger failure must not void the scan
             logger.exception("scan evidence ledger failed")
             errors.append({"detector": "evidence-ledger", "error": str(exc)})
@@ -189,6 +222,11 @@ def run_scan(engine: Engine, active: bool = False,
                            "applications": len(bundles),
                            "framework_assets": sum(len(b.frameworks) for b in bundles)},
             "docker": docker_stats,
+            "mcp": {**mcp_stats,
+                    "stdio_runs": len(mcp_runs),
+                    "probes": len(mcp_probes),
+                    "probes_verified": sum(1 for probe in mcp_probes
+                                           if probe.status == "verified")},
             "detections": len(merged),
             "coverage": (coverage.summary() if coverage is not None
                          else {"scopes": 0}),
@@ -299,7 +337,8 @@ def _build_inventory(session: Session, merged: list[DetectedAsset], facts: HostF
                      app_links: dict[str, dict] | None = None,
                      failed_detectors: set[str] | None = None,
                      docker_context: dict | None = None,
-                     coverage=None
+                     coverage=None,
+                     mcp_refs: list[McpConfigReference] | None = None,
                      ) -> tuple[list[dict], list[str], list[dict]]:
     """Agent-level view of the same scan; a failure here never voids the scan.
 
@@ -311,11 +350,51 @@ def _build_inventory(session: Session, merged: list[DetectedAsset], facts: HostF
         items = builder.apply_scan(session, merged, facts, app_links=app_links,
                                    failed_detectors=failed_detectors or set(),
                                    docker_context=docker_context,
-                                   coverage=coverage)
+                                   coverage=coverage,
+                                   mcp_refs=mcp_refs)
         return items, builder.warnings, builder.observations
     except Exception as exc:
         logger.exception("agent inventory build failed")
         return [], [str(exc)], []
+
+
+def _discover_mcp_configs(home: Path | None, bundles: list,
+                          facts: HostFacts) -> tuple[list[McpConfigReference], dict]:
+    """MCP config discovery as its own isolated stage (like the docker one).
+
+    User-scope configs come from the home directory; project-scope configs
+    from every project root the self-built stage resolved plus local process
+    working directories. ``scan_mcp_configs`` already degrades per file, so a
+    single broken config never fails the stage; the guard only trips when the
+    stage itself crashes. The returned references carry no command/args/env —
+    names, transport and sanitized endpoints only (contract C10).
+    """
+    try:
+        roots: set[str] = set()
+        for bundle in bundles:
+            root = getattr(getattr(bundle, "project", None), "root", "")
+            if root:
+                roots.add(str(root))
+        for proc in facts.processes:
+            if proc.cwd and not proc.container_id:
+                roots.add(proc.cwd)
+        diagnostics: dict[str, str] = {}
+        refs = scan_mcp_configs(home, project_roots=sorted(roots),
+                                diagnostics=diagnostics)
+        stats = {"refs": len(refs),
+                 "roots": len(roots),
+                 "stdio": sum(1 for ref in refs if ref.transport == "stdio"),
+                 "network": sum(1 for ref in refs
+                                if ref.transport not in ("stdio", "unknown")),
+                 "files_unreadable": sum(1 for state in diagnostics.values()
+                                         if state == "unreadable"),
+                 "diagnostics": diagnostics}
+        return refs, stats
+    except Exception as exc:  # isolated like a failing detector
+        logger.warning("mcp config discovery failed: %s", exc)
+        return [], {"refs": 0, "roots": 0, "stdio": 0, "network": 0,
+                    "files_unreadable": 0, "diagnostics": {},
+                    "error": str(exc)}
 
 
 def merge_assets(assets: list[DetectedAsset]) -> list[DetectedAsset]:
