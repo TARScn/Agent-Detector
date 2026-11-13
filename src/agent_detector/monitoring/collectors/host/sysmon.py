@@ -304,24 +304,51 @@ def _channel_state(api, channel: str) -> tuple[bool, bool, str]:
         api.EvtClose(handle)
 
 
+_service_name_cache: tuple[float, str] | None = None
+_SERVICE_NAME_TTL = 300.0
+
+
+def reset_sysmon_service_name_cache() -> None:
+    """Test hook: forget the cached service lookup."""
+    global _service_name_cache
+    _service_name_cache = None
+
+
 def sysmon_service_name() -> str:
-    """'Sysmon64' / 'Sysmon' when the service exists, else ''."""
+    """'Sysmon64' / 'Sysmon' when the service exists, else ''.
+
+    Cached for a few minutes: this runs on every /overview and /telemetry
+    status call, and the fallback path spawns ``sc query`` — a subprocess per
+    dashboard refresh is exactly the kind of overhead a busy console doesn't
+    need. A service installed mid-session is picked up on the next TTL
+    expiry (or console restart).
+    """
+    global _service_name_cache
     if sys.platform != "win32":
         return ""
-    for name in ("Sysmon64", "Sysmon"):
-        for candidate in (shutil.which(f"{name}.exe"),
-                          rf"C:\Windows\{name}.exe"):
+    now = time.monotonic()
+    if _service_name_cache is not None and now - _service_name_cache[0] < _SERVICE_NAME_TTL:
+        return _service_name_cache[1]
+    name = ""
+    for candidate_name in ("Sysmon64", "Sysmon"):
+        for candidate in (shutil.which(f"{candidate_name}.exe"),
+                          rf"C:\Windows\{candidate_name}.exe"):
             if candidate and candidate.lower().endswith(".exe"):
                 if Path(candidate).exists():
-                    return name
-    try:
-        proc = subprocess.run(["sc", "query", "Sysmon64"], capture_output=True,
-                              timeout=5, errors="replace")
-        if proc.returncode == 0:
-            return "Sysmon64"
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return ""
+                    name = candidate_name
+                    break
+        if name:
+            break
+    if not name:
+        try:
+            proc = subprocess.run(["sc", "query", "Sysmon64"], capture_output=True,
+                                  timeout=5, errors="replace")
+            if proc.returncode == 0:
+                name = "Sysmon64"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    _service_name_cache = (now, name)
+    return name
 
 
 def config_snippet(channel: str = DEFAULT_CHANNEL) -> str:

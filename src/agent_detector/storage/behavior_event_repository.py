@@ -24,9 +24,52 @@ class BehaviorEventRepository:
                     until: str | None = None, before_id: int | None = None,
                     after_id: int | None = None,
                     entity_id: str | None = None,
-                    execution_status: str | None = None) -> list[dict]:
+                    execution_status: str | None = None,
+                    offset: int = 0) -> list[dict]:
         """Newest first by default. ``before_id`` walks back; ``after_id``
-        walks forward (oldest first) and is the reliable SSE catch-up path."""
+        walks forward (oldest first) and is the reliable SSE catch-up path.
+        ``offset`` pages by position (offset mode only, no cursors)."""
+        statement = self._filtered_events(
+            protocol=protocol, source=source, agent_label=agent_label,
+            asset_id=asset_id, event_type=event_type, session_id=session_id,
+            risk_level=risk_level, decision=decision, since=since, until=until,
+            before_id=before_id, after_id=after_id, entity_id=entity_id,
+            execution_status=execution_status)
+        statement = statement.order_by(
+            BehaviorEventRow.id.asc() if after_id else BehaviorEventRow.id.desc()
+        ).limit(min(max(int(limit), 1), 500))
+        if offset and not (before_id or after_id):
+            statement = statement.offset(max(int(offset), 0))
+        return [self._to_dict(row, actor_entity, actor_status,
+                              target_entity, target_status)
+                for row, actor_entity, actor_status, target_entity, target_status
+                in self._session.execute(statement)]
+
+    def count_events(self, protocol: str | None = None,
+                     source: str | None = None, agent_label: str | None = None,
+                     asset_id: str | None = None, event_type: str | None = None,
+                     session_id: str | None = None, risk_level: str | None = None,
+                     decision: str | None = None, since: str | None = None,
+                     until: str | None = None, entity_id: str | None = None,
+                     execution_status: str | None = None) -> int:
+        """Total rows matching the same filters as :meth:`list_events`."""
+        statement = self._filtered_events(
+            protocol=protocol, source=source, agent_label=agent_label,
+            asset_id=asset_id, event_type=event_type, session_id=session_id,
+            risk_level=risk_level, decision=decision, since=since, until=until,
+            entity_id=entity_id, execution_status=execution_status)
+        return int(self._session.scalar(
+            select(func.count()).select_from(statement.subquery())) or 0)
+
+    def _filtered_events(self, *, protocol: str | None, source: str | None,
+                         agent_label: str | None, asset_id: str | None,
+                         event_type: str | None, session_id: str | None,
+                         risk_level: str | None, decision: str | None,
+                         since: str | None, until: str | None,
+                         before_id: int | None = None,
+                         after_id: int | None = None,
+                         entity_id: str | None = None,
+                         execution_status: str | None = None):
         actor_alias = aliased(EntityAliasRow)
         target_alias = aliased(EntityAliasRow)
         statement = (select(BehaviorEventRow, actor_alias.entity_id,
@@ -41,7 +84,11 @@ class BehaviorEventRepository:
         if source:
             statement = statement.where(BehaviorEventRow.source == source)
         if agent_label:
-            statement = statement.where(BehaviorEventRow.agent_label == agent_label)
+            # Substring, case-insensitive: the console search box matches
+            # partial names ("zcode" hits "ZCode.exe"). autoescape keeps
+            # user-supplied %/_ literal instead of acting as wildcards.
+            statement = statement.where(BehaviorEventRow.agent_label.contains(
+                agent_label, autoescape=True))
         if asset_id:
             statement = statement.where(BehaviorEventRow.asset_id == asset_id)
         if event_type:
@@ -68,13 +115,7 @@ class BehaviorEventRepository:
         if execution_status:
             statement = statement.where(
                 BehaviorEventRow.execution_status == execution_status)
-        statement = statement.order_by(
-            BehaviorEventRow.id.asc() if after_id else BehaviorEventRow.id.desc()
-        ).limit(min(max(int(limit), 1), 500))
-        return [self._to_dict(row, actor_entity, actor_status,
-                              target_entity, target_status)
-                for row, actor_entity, actor_status, target_entity, target_status
-                in self._session.execute(statement)]
+        return statement
 
     def get_event(self, event_id: int) -> dict | None:
         actor_alias = aliased(EntityAliasRow)

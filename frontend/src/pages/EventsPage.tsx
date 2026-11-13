@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { CloseIcon, PlayCircleIcon, SearchIcon, StopCircleIcon } from "tdesign-icons-react";
-import { useEvents } from "../api/queries";
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  CloseIcon,
+  PlayCircleIcon,
+  StopCircleIcon,
+} from "tdesign-icons-react";
+import { useAgents, useEvents } from "../api/queries";
 import type { EventView } from "../api/types";
 import { EventTable } from "../components/EventTable";
 import {
@@ -23,26 +29,33 @@ import {
   time,
 } from "../lib/format";
 
+const PAGE_SIZE = 30;
+
 export function EventsPage() {
   const [params, setParams] = useSearchParams();
+  const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<EventView | null>(null);
   const [live, setLive] = useState(false);
   const [liveEvents, setLiveEvents] = useState<EventView[]>([]);
-  const [q, setQ] = useState(params.get("agent_label") || "");
 
+  const agents = useAgents({ limit: 500 });
+
+  // 筛选条件全部走后端；分页为位置分页（limit/offset）。
   const filters = useMemo(
     () => ({
       source: params.get("source") || undefined,
       risk_level: params.get("risk") || undefined,
       decision: params.get("decision") || undefined,
       execution_status: params.get("execution") || undefined,
-      agent_label: params.get("agent_label") || undefined,
       entity_id: params.get("entity_id") || undefined,
-      limit: 200,
     }),
     [params],
   );
-  const events = useEvents(filters);
+  const query = useMemo(
+    () => ({ ...filters, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE }),
+    [filters, page],
+  );
+  const events = useEvents(query);
 
   useEffect(() => {
     if (!live) return undefined;
@@ -68,23 +81,28 @@ export function EventsPage() {
 
   useEffect(() => {
     setLiveEvents([]);
+    setPage(1);
   }, [params]);
 
-  const combined = useMemo(() => {
+  const items = events.data?.items || [];
+  // 实时事件只并入第一页，避免污染后续页的位置分页。
+  const pageItems = useMemo(() => {
+    if (page !== 1 || !liveEvents.length) return items;
     const byId = new Map<number, EventView>();
-    [...liveEvents, ...(events.data?.items || [])].forEach((event) => {
+    [...liveEvents, ...items].forEach((event) => {
       if (!byId.has(event.id)) byId.set(event.id, event);
     });
-    return Array.from(byId.values()).sort((a, b) => b.id - a.id);
-  }, [liveEvents, events.data]);
+    return Array.from(byId.values())
+      .sort((a, b) => b.id - a.id)
+      .slice(0, PAGE_SIZE);
+  }, [liveEvents, items, page]);
 
-  const applySearch = (event: React.FormEvent) => {
-    event.preventDefault();
-    const next = new URLSearchParams(params);
-    if (q.trim()) next.set("agent_label", q.trim());
-    else next.delete("agent_label");
-    setParams(next);
-  };
+  const total = events.data?.total_matches ?? items.length;
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const current = Math.min(page, pages);
+  useEffect(() => {
+    if (page > pages) setPage(pages);
+  }, [page, pages]);
 
   const setFilter = (key: string, value: string) => {
     const next = new URLSearchParams(params);
@@ -110,14 +128,20 @@ export function EventsPage() {
         }
       />
 
-      <form className="filter-bar" onSubmit={applySearch}>
-        <label className="field search-field">
-          <SearchIcon size="15px" />
-          <input
-            value={q}
-            onChange={(event) => setQ(event.target.value)}
-            placeholder="Agent 名称"
-          />
+      <div className="filter-bar">
+        <label className="field">
+          <span>Agent</span>
+          <select
+            value={filters.entity_id || ""}
+            onChange={(event) => setFilter("entity_id", event.target.value)}
+          >
+            <option value="">全部</option>
+            {(agents.data?.items || []).map((agent) => (
+              <option key={agent.entity_id} value={agent.entity_id}>
+                {agent.name}
+              </option>
+            ))}
+          </select>
         </label>
         <label className="field">
           <span>来源</span>
@@ -162,21 +186,41 @@ export function EventsPage() {
             <option value="unknown">未知</option>
           </select>
         </label>
-        <button type="submit" className="btn btn-primary">
-          筛选
-        </button>
         <span className="filter-summary">
-          {live ? <Tag tone="success">实时已开启</Tag> : null} 共 {combined.length} 条
+          {live ? <Tag tone="success">实时已开启</Tag> : null} 共 {total} 条
         </span>
-      </form>
+      </div>
 
       {events.isLoading ? (
         <LoadingBlock label="读取事件…" />
       ) : events.isError ? (
         <ErrorState message={(events.error as Error).message} onRetry={() => events.refetch()} />
-      ) : combined.length ? (
+      ) : pageItems.length ? (
         <section className="card card-flush">
-          <EventTable events={combined} onSelect={setSelected} />
+          <EventTable events={pageItems} onSelect={setSelected} />
+          <div className="pagination">
+            <span className="muted">
+              第 {current} / {pages} 页
+            </span>
+            <div className="pagination-buttons">
+              <button
+                type="button"
+                className="icon-button"
+                disabled={current <= 1 || events.isFetching}
+                onClick={() => setPage(Math.max(1, current - 1))}
+              >
+                <ChevronLeftIcon size="16px" />
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                disabled={current >= pages || events.isFetching}
+                onClick={() => setPage(Math.min(pages, current + 1))}
+              >
+                <ChevronRightIcon size="16px" />
+              </button>
+            </div>
+          </div>
         </section>
       ) : (
         <EmptyState title="暂无事件" />
@@ -195,7 +239,6 @@ function matchesFilters(
     risk_level?: string;
     decision?: string;
     execution_status?: string;
-    agent_label?: string;
     entity_id?: string;
   },
 ): boolean {
@@ -203,10 +246,6 @@ function matchesFilters(
   if (filters.decision && event.decision !== filters.decision) return false;
   if (filters.execution_status && event.execution_status !== filters.execution_status) return false;
   if (filters.entity_id && event.actor?.entity_id !== filters.entity_id) return false;
-  if (filters.agent_label) {
-    const haystack = (event.actor?.label || event.agent_label || "").toLowerCase();
-    if (!haystack.includes(filters.agent_label.toLowerCase())) return false;
-  }
   return true;
 }
 

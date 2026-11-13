@@ -1,4 +1,11 @@
-import { useCapabilities, useSystem } from "../api/queries";
+import { useEffect, useState } from "react";
+import { MessagePlugin } from "tdesign-react";
+import {
+  useCapabilities,
+  useRetention,
+  useSystem,
+  useUpdateRetention,
+} from "../api/queries";
 import {
   ErrorState,
   KeyValue,
@@ -11,6 +18,29 @@ import {
 export function SettingsPage() {
   const system = useSystem();
   const capabilities = useCapabilities();
+  const retention = useRetention();
+  const updateRetention = useUpdateRetention();
+  const [days, setDays] = useState("");
+
+  useEffect(() => {
+    if (retention.data) setDays(String(retention.data.retention_days));
+  }, [retention.data]);
+
+  const saveRetention = async () => {
+    const value = Number.parseInt(days, 10);
+    if (Number.isNaN(value) || value < 0 || value > 3650) {
+      MessagePlugin.warning("保留天数需在 0–3650 之间");
+      return;
+    }
+    try {
+      const result = await updateRetention.mutateAsync(value);
+      MessagePlugin.success(
+        result.purged > 0 ? `已保存，清理 ${result.purged} 条` : "已保存",
+      );
+    } catch (error) {
+      MessagePlugin.error((error as Error).message);
+    }
+  };
 
   if (system.isLoading) return <LoadingBlock label="读取系统信息…" />;
   if (system.isError) {
@@ -57,6 +87,34 @@ export function SettingsPage() {
           </ul>
         </SectionCard>
       </div>
+
+      <SectionCard title="数据保留">
+        <div className="settings-row">
+          <label className="field">
+            <span>行为事件保留天数</span>
+            <input
+              type="number"
+              min={0}
+              max={3650}
+              value={days}
+              onChange={(event) => setDays(event.target.value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={updateRetention.isPending || !retention.data}
+            onClick={saveRetention}
+          >
+            保存
+          </button>
+        </div>
+        <p className="note-text">
+          {retention.data
+            ? `当前 ${retention.data.retention_days} 天 · 默认 ${retention.data.default_days} 天${retention.data.retention_days === 0 ? "（保留策略已停用）" : ""}`
+            : "读取中…"}
+        </p>
+      </SectionCard>
 
       <SectionCard title="能力清单">
         <div className="capability-grid">

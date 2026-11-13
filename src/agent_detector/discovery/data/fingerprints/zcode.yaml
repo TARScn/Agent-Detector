@@ -1,0 +1,140 @@
+# =============================================================================
+# ZCode（Z.ai 桌面 Agent 客户端，Electron 外壳 + 内置 CLI bundle）检测规则
+# =============================================================================
+# 本文件是纯声明式数据：引擎按这里的描述去探测，不在代码里写死任何产品特征。
+# 修改本文件后无需改代码，下一次扫描即生效。
+#
+# 已核实的产品事实（2026-11，来源：Windows 11 实机观察 + app-update.yml +
+# .node-bundle-meta.json + ZCode 官方配置文档）：
+#   * 桌面本体是 electron-builder NSIS 安装：%LOCALAPPDATA%\Programs\ZCode\
+#     ZCode.exe（PE VersionInfo 3.17.2.9661）。进程为 Chromium 多进程形态，
+#     子进程命令行一律带 --type=<renderer|gpu-process|utility|crashpad-handler|
+#     zygote>，主进程不带 --type —— 用排除指纹保主进程、剔子进程。
+#   * Agent 能力由 resources\glm\ 下的 CLI bundle 提供：入口 zcode.cjs，由
+#     resources\glm\node-runtime 的内置 Node 运行（meta: apps/zcode-cli），
+#     无独立 zcode 可执行文件、本机 PATH 上没有、npm 全局也无包 —— 进程匹配
+#     只能靠命令行 token（zcode.cjs / shim.js）。运行时形态（实测）：Electron
+#     主程序兼作 Node 宿主，业务进程全部叫 ZCode.exe、argv[1] 是 zcode.cjs：
+#       - 裸 ZCode.exe                     —— GUI 主进程（1 个）
+#       - ZCode.exe zcode.cjs app-server   —— Agent 会话服务（真正"在跑"的信号）
+#       - ZCode.exe zcode.cjs __zcode-plugin-host <插件路径>
+#                                          —— 每个插件实例一个工作进程（实测 21 个），
+#                                             属内部工作者而非独立实例，排除；
+#                                             其事件归因走祖先链（父=app-server，
+#                                             均在匹配集内，见 docs 归因上溯）
+#       - node.exe ~/.zcode/gemini-shim/shim.js —— Gemini 兼容代理（会话期存活）
+#   * 会话数据在 ~/.zcode/：cli/（config.json、agents 会话目录、rollout 的
+#     model-io 日志）、v2/（可视化产物）等。
+#   * config.json 官方文档键：mcp.servers（嵌套）、hooks、plugins（启用/禁用
+#     状态）。模型/供应商配置存于桌面应用的 Electron store（Roaming\ZCode），
+#     无公开 schema —— 本规则不设 llm 段，模型底座归行为通道（llm_apis.yaml
+#     已收录 zcode.z.ai 等端点，零合作实测见 docs/behavior.md）。
+#   * 版本：引擎读不了 PE VersionInfo，CLI 也无 npm 元数据；唯一可用来源是
+#     electron-updater 的更新缓存目录（app-update.yml: updaterCacheDirName=
+#     "@zcodedesktop-updater"，pending 下是 "ZCode Setup <semver>.exe"）。
+#     该目录仅在下载过更新后存在，常态下版本输出 UNKNOWN（禁止猜测）。
+#
+# 证据与隐私约定（与 claude_code.yaml 相同）：
+#   * 所有探测均为只读，不读取文件内容，不执行被发现的程序 —— ZCode.exe 是
+#     GUI 程序，--version 会拉起图形界面，不属于"无害执行"，故无
+#     executable_version_flag 步骤；
+#   * JSON 文件只记录"顶层键名"，永不记录值；
+#   * 会话目录 / rollout 只 stat 存在性（会话内容、密钥永不入库）；
+#   * 进程命令行会经脱敏（token 类字符串打码）后截断存证。
+#
+# '~' 表示被扫描用户的 home 目录；confidence 为该证据的可信度（0~1）。
+# =============================================================================
+kind: client_rule
+id: zcode                 # 与 agents.yaml 矩阵条目 id 一致（discovery=P0, monitor=P1）
+name: ZCode
+asset_type: AGENT_CLIENT
+revision: 1
+
+# -----------------------------------------------------------------------------
+# 安装证据（INSTALLED）—— 存在以下任意一项即认为安装过
+# -----------------------------------------------------------------------------
+install:
+  # 桌面本体：electron-builder NSIS 的固定安装位置（Windows 实测）；
+  # macOS/Linux 为 electron-builder 常规布局（/Applications、/opt）。
+  paths:
+    - path: '~/AppData/Local/Programs/ZCode/ZCode.exe'
+      confidence: 0.85
+    - path: '/Applications/ZCode.app/Contents/MacOS/ZCode'
+      confidence: 0.8
+    - path: '/opt/ZCode/zcode'
+      confidence: 0.7
+
+  # 数据目录：首次运行（桌面或 CLI）即创建；cli/ 会话子目录是 CONFIGURED 证据。
+  dirs:
+    - path: '~/.zcode'
+      confidence: 0.8
+
+# -----------------------------------------------------------------------------
+# 版本来源 —— 按优先级自上而下尝试，命中即停；全部失败输出 UNKNOWN（禁止猜测）。
+# 无 npm 包、无 semver 安装目录、GUI 程序禁用 --version 探针（见文件头），
+# 唯一来源是 electron-updater 下载过的更新包文件名。
+# -----------------------------------------------------------------------------
+version:
+  # pending 下是 electron-updater 的更新包（如 "ZCode Setup 3.17.2.exe"），
+  # 引擎取条目名里前导语义化版本的最大者；目录不存在即跳过。
+  - from: semver_dir_entries
+    dirs:
+      - '~/AppData/Local/@zcodedesktop-updater/pending'
+    source: installer-metadata
+    confidence: 0.6
+
+# -----------------------------------------------------------------------------
+# 配置证据（CONFIGURED）—— 只看键名/存在性，不读值
+# -----------------------------------------------------------------------------
+config:
+  # config.json 官方文档键（值永不读）：mcp.servers 的顶层键是 mcp，
+  # mcpServers 是 ~/.agents 兼容形态；plugins 承载启用/禁用状态（可能被
+  # 客户端预置，可信度低于 hooks/mcp）。
+  json_files:
+    - path: '~/.zcode/cli/config.json'
+      keys_any: [mcp, mcpServers, hooks, plugins]
+      confidence: 0.8
+
+  # 真实使用证据：agents/ 是会话存储（session_* 目录），rollout/ 是 model-io
+  # 日志 —— 都在首次跑会话后才出现。只 stat 存在性，内容永不读。
+  existing_files:
+    - path: '~/.zcode/cli/agents'
+      confidence: 0.7
+    - path: '~/.zcode/cli/rollout'
+      confidence: 0.7
+
+# -----------------------------------------------------------------------------
+# 运行证据（RUNNING）—— 进程匹配
+# -----------------------------------------------------------------------------
+process:
+  # 可执行文件名（含路径末段）精确匹配：主进程/运行时进程全叫 ZCode.exe。
+  executable_names: [zcode, zcode.exe]
+
+  # 命令行 token（子串匹配，路径分隔符已归一化为 /，统一小写）：
+  #   * zcode.cjs          —— CLI bundle 入口，运行时进程 argv 里必然出现
+  #   * gemini-shim/shim.js —— 自带 Gemini 兼容代理本体（刻意不含
+  #     start-shim.cmd 启动器与目录名本身：转瞬即逝的 cmd /c 启动器、
+  #     以及命令行里只是"提到"该目录的外部进程，都不算运行实例）
+  cmdline_tokens: ['zcode.cjs', 'gemini-shim/shim.js']
+
+  # 排除指纹（在正向匹配之前执行，命中即跳过）：
+  #   * --type= —— Chromium GUI 子进程（renderer/gpu/utility/crashpad/zygote），
+  #     主进程不带此参数，剔除后一个桌面窗口只计主进程；
+  #   * __zcode-plugin-host —— 插件工作进程（实测一开多，21 个），是内部
+  #     工作者而非独立 Agent 实例；其行为事件归因沿祖先链上溯，父进程
+  #     app-server / 主进程仍在匹配集内，不会落到 unattributed。
+  exclude_patterns:
+    - '--type=(?:renderer|gpu-process|utility|crashpad-handler|zygote)'
+    - '__zcode-plugin-host'
+
+  confidence: 0.85
+
+# -----------------------------------------------------------------------------
+# 置信度合成：base + 各状态权重之和，封顶 cap。状态可并存（文档 §2.3）
+# -----------------------------------------------------------------------------
+confidence:
+  base: 0.5
+  installed: 0.2
+  configured: 0.2
+  running: 0.25
+  cap: 0.95

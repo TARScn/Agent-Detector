@@ -60,6 +60,7 @@
 | GET/POST | `/api/v1/telemetry/status`、`/audit-rules`、`/monitor/*`、`/behavior/*` | 扩展 | 采集通道 |
 | GET/POST | `/api/v1/hooks`、`/hooks/{agent}/plan\|install\|uninstall\|snippet` | 已存在 | Hook |
 | GET | `/api/v1/system`、`/capabilities` | 已存在 | 环境/能力 |
+| GET/PUT | `/api/v1/settings/retention` | 新增 | 运行时保留窗口（设置页） |
 | POST/GET | `/api/v1/discovery/scan`、`/discovery/scans\|assets\|applications\|summary` | 扩展 | 扫描 |
 | GET | `/api/health` | 已存在 | 存活探针 |
 
@@ -947,21 +948,30 @@ def protection_view(snapshot, telemetry_running, telemetry_scope):
 | `until` | 上界时间（ISO） |
 | `entity_id` | 按 canonical actor 过滤 |
 | `execution_status` | 按执行状态过滤 |
+| `offset` | 位置分页偏移（仅控制台事件表使用；与 `before_id/after_id` 互斥，同时给出返回 422） |
 
 保留 `before_id`、`limit`、`source`、`asset_id`、`agent_label`、`event_type`、`session_id`、`risk_level`、`decision`、`since`。
+
+**参数语义**
+
+- `agent_label` 为**子串模糊匹配**（大小写不敏感）：输入 `zcode` 命中 `ZCode.exe`；`%`/`_` 按字面量处理（自动转义）。其余过滤词仍为精确匹配。
 
 **Response**
 
 ```json
 {
   "items": [EventView],
-  "total": 100,
+  "total": 30,
+  "total_matches": 214,
+  "offset": 30,
   "next_before_id": 1234,
   "next_after_id": 1300
 }
 ```
 
 - `total` 为本次返回条数（兼容现状），不是全库总数；翻页用 `next_before_id/next_after_id`，不适用的一侧为 `null`。
+- `total_matches` 为当前过滤条件下的**匹配总数**（不含 limit/offset），仅 offset 模式返回；游标模式（SSE 追赶）为 `null`，避免每次补发都做全表计数。UI 分页总数以此为准。
+- `offset` 回显本次请求的偏移量。
 - `before_id` 用于向下翻历史；`after_id` 用于向前追赶；两者不能同时使用（422）。
 - 路由注册顺序：`/events/stats`、`/events/stream` 必须在 `/events/{event_id}` 之前，避免被动态路由吞掉。
 - `actor`/`target_ref` 由后端组装：
@@ -1151,6 +1161,8 @@ def protection_view(snapshot, telemetry_running, telemetry_scope):
 
 启动即切换：`POST /behavior/start` 在组内已有通道运行时**先停掉它**再启动目标通道（同一请求内完成，不返回 409）；409 仅保留给通道不可用/参数非法，且**目标通道就绪检查失败时当前通道保持不变**（Linux 上 auditd 日志 / Tetragon 导出文件通常 root-only，非 root 启动会得到带修复提示的 409）。UI 对 `STANDBY → 启动` 的切换先弹确认框。
 
+**start 立即返回**：请求只做廉价就绪校验（通道探测）；进程注册表播种（psutil 全量扫描，Windows 上数秒）与保留期清理发生在采集侧线程/子进程，不阻塞 API。默认部署形态为**分离采集子进程**（`python -m agent_detector.monitoring.collector_runner`，由 `CollectorProcessManager` spawn/停止/收养）：采集管线（Sysmon XML 渲染解析、规则匹配、归属）是 CPU 密集 Python，跑在控制台进程内会与 API 抢 GIL——实测一次文件风暴能把 `/overview` 从 0.1s 拖到 27.9s；分离后控制台进程 CPU <1%，计数器经 `collector-status.json` 透出，`behavior.source` 为 `collector`。stop 先关子进程 stdin（runner 的父进程死亡看门狗视同优雅停止信号），超时逐级升级 CTRL_BREAK/SIGTERM → kill；serve 被硬杀时子进程经 stdin EOF 自行退出并补写停止状态。spawn 失败自动回退进程内 ingest（`source=local`）。进程内 `BehaviorIngestService` 路径契约不变（409 语义、互斥切换、stop 后 start 必须重订阅）。
+
 | 条件 | `health.state` | UI |
 | --- | --- | --- |
 | 核心行为通道 `running=true`，且没有核心通道 `DOWN` | `OK` | 采集正常 |
@@ -1189,8 +1201,20 @@ def protection_view(snapshot, telemetry_running, telemetry_scope):
 
 ### 5.16 系统与能力 `[EXISTS]`
 
-- `GET /api/v1/system`：版本、平台、服务地址、数据库路径、策略/ Hook 状态、通道、保留策略、检测规则、支持矩阵、范围说明。设置页只读展示；敏感信息（Token）不返回。
+- `GET /api/v1/system`：版本、平台、服务地址、数据库路径、策略/ Hook 状态、通道、保留策略（`behavior.retention_days` 为**运行时生效值**）、检测规则、支持矩阵、范围说明。设置页只读展示；敏感信息（Token）不返回。
 - `GET /api/v1/capabilities`：能力清单。UI 用它隐藏未实现模式，**不得**用它宣称已保护。
+
+### 5.16.1 运行时设置 `[NEW]`
+
+设置存于 `app_settings` 表（key-value），env 配置仅作为出厂默认；修改后立即生效，无需重启。
+
+| 端点 | 说明 |
+| --- | --- |
+| `GET /api/v1/settings/retention` | `{retention_days, default_days}`；`retention_days` 为运行时生效值，`default_days` 为 env 出厂默认（30） |
+| `PUT /api/v1/settings/retention` | body `{retention_days}`（0–3650，0=停用保留）；保存后**立即按新窗口清理一次**，返回 `{retention_days, purged}` |
+
+- 生效范围：`behavior_events` 的定期清理（ingest 每 24h 与 collector 首批强制清理都读运行时值）、CLI `purge`（不带 `--older-than-days` 时）与控制台设置页展示。
+- UI：设置页提供保留天数输入与保存；保存成功后提示清理条数。
 
 ---
 

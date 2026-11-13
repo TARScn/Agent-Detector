@@ -720,3 +720,13 @@ class SchemaMigrationRow(Base):
     name: Mapped[str] = mapped_column(String(64), primary_key=True)
     applied_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)
     detail_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class AppSettingRow(Base):
+    """Runtime-adjustable operator settings (currently: behavior retention)."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(256), default="")
+    updated_at: Mapped[str] = mapped_column(String(48), default=utc_now_iso)

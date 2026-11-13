@@ -96,8 +96,23 @@ export interface EventFilters {
   agent_label?: string;
   entity_id?: string;
   limit?: number;
+  offset?: number;
   before_id?: number;
   after_id?: number;
+}
+
+export interface EventsResponse {
+  items: EventView[];
+  total: number;
+  total_matches: number | null;
+  offset: number;
+  next_before_id: number | null;
+  next_after_id: number | null;
+}
+
+export interface RetentionPolicy {
+  retention_days: number;
+  default_days: number;
 }
 
 export const api = {
@@ -126,10 +141,15 @@ export const api = {
     request<McpResponse>(`/agents/${encodeURIComponent(entityId)}/mcp`),
 
   events: (filters: EventFilters = {}) =>
-    request<{ items: EventView[]; total: number; next_before_id: number | null }>(
-      `/events${query(filters)}`,
-    ),
+    request<EventsResponse>(`/events${query(filters)}`),
   event: (eventId: number) => request<EventView>(`/events/${eventId}`),
+
+  retention: () => request<RetentionPolicy>("/settings/retention"),
+  updateRetention: (retentionDays: number) =>
+    request<{ retention_days: number; purged: number }>("/settings/retention", {
+      method: "PUT",
+      body: JSON.stringify({ retention_days: retentionDays }),
+    }),
 
   alerts: (params: { status?: string; risk_level?: string; limit?: number } = {}) =>
     request<{ items: AlertView[]; total: number; stats: Record<string, unknown> }>(

@@ -31,19 +31,23 @@ export function AssetsPage() {
   const [status, setStatus] = useState(params.get("agent_status") || "");
   const [protection, setProtection] = useState(params.get("protection") || "");
   const [alias, setAlias] = useState(params.get("alias_status") || "");
-  // 清单下拉值即 lifecycle；"ALL" 是前端哨兵（含归档的完整清单），默认在用。
+  // 清单下拉值即 lifecycle；"" 是默认清单口径（ACTIVE+WATCH，归档隐藏），
+  // "ALL" 是前端哨兵（含归档的完整清单）。
   const [lifecycle, setLifecycle] = useState(
-    params.get("lifecycle") || "ACTIVE",
+    params.get("lifecycle") || "",
   );
 
   const query = useMemo(() => {
-    const lifecycleParam = params.get("lifecycle") || "ACTIVE";
+    const lifecycleParam = params.get("lifecycle") || "";
     return {
       q: params.get("q") || undefined,
       agent_status: params.get("agent_status") || undefined,
       protection: params.get("protection") || undefined,
       alias_status: params.get("alias_status") || undefined,
-      lifecycle: lifecycleParam === "ALL" ? undefined : lifecycleParam,
+      lifecycle:
+        lifecycleParam === "ALL" || lifecycleParam === ""
+          ? undefined
+          : lifecycleParam,
       needs_verification:
         params.get("needs_verification") === "true" || undefined,
       include_removed:
@@ -92,7 +96,7 @@ export function AssetsPage() {
     setStatus("");
     setProtection("");
     setAlias("");
-    setLifecycle("ACTIVE");
+    setLifecycle("");
     setPage(1);
     setParams({});
   };
@@ -162,6 +166,7 @@ export function AssetsPage() {
         <label className="field">
           <span>清单</span>
           <select value={lifecycle} onChange={(event) => setLifecycle(event.target.value)}>
+            <option value="">未归档</option>
             <option value="ALL">全部</option>
             <option value="ACTIVE">在用</option>
             <option value="WATCH">待复核</option>

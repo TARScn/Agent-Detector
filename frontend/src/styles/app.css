@@ -1543,6 +1543,12 @@ a {
   gap: 4px;
 }
 
+.settings-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+}
+
 /* Responsive */
 @media (max-width: 1200px) {
   .grid-4 {

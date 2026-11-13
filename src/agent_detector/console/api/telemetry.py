@@ -22,7 +22,6 @@ from agent_detector.monitoring.collectors.audit.rules_template import (build_rul
 from agent_detector.monitoring.collectors.ebpf.tetragon import tetragon_available
 from agent_detector.monitoring.collectors.host.sysmon import sysmon_available
 from agent_detector.core.config import SYSMON_CHANNEL, TETRA_LOG
-from agent_detector.monitoring.services.collector_status import load_collector_status
 from agent_detector.monitoring.services.ingest import BehaviorIngestError
 from agent_detector.monitoring.services.monitor import MonitorError
 
@@ -33,30 +32,18 @@ def _services() -> Services:
     return get_services()
 
 
-def _behavior_status(ingest) -> dict:
-    """Local ingest status, or the running collector's published counters.
-
-    Under the systemd deployment the console never starts its own ingest —
-    showing that idle twin would report the collector as stopped with zero
-    counters. When the local instance is idle, prefer the collector-status
-    file the real service publishes; ``source`` says which one answered.
-    """
-    status = dict(ingest.status())
-    if not status.get("running"):
-        collector = load_collector_status(hostname=platform.node() or "localhost")
-        if collector is not None:
-            return {**collector["collector"], "source": "collector",
-                    "status_age_seconds": collector["age_seconds"]}
-    status["source"] = "local"
-    return status
+def _behavior_status(services: Services) -> dict:
+    """Thin delegate: the source-aware merge lives in
+    ``Services.behavior_status`` (local ingest, detached child, or a foreign
+    collector's published file)."""
+    return services.behavior_status()
 
 
 @router.get("/status")
 def telemetry_status(services: Services = Depends(_services)):
     """Which observation channels exist on this host, and are they running."""
-    ingest = services.ingest
-    assert ingest is not None and services.monitor is not None
-    behavior = _behavior_status(ingest)
+    assert services.ingest is not None and services.monitor is not None
+    behavior = _behavior_status(services)
     monitor = services.monitor.status()
     sysmon = sysmon_available(SYSMON_CHANNEL)
     tetragon = tetragon_available(TETRA_LOG)
@@ -201,17 +188,19 @@ def behavior_start(body: BehaviorStartRequest | None = None,
                    services: Services = Depends(_services)):
     assert services.ingest is not None
     try:
-        return services.ingest.start(mode=body.mode if body else None,
-                                     log_path=body.log_path if body else None,
-                                     from_start=body.from_start if body else None)
+        # Returns at once; the channel's readiness surfaces via
+        # /telemetry/status (the seed sweep and the child spawn must not
+        # hold the request thread — they used to freeze the console).
+        return services.start_behavior(mode=body.mode if body else None,
+                                       log_path=body.log_path if body else None,
+                                       from_start=body.from_start if body else None)
     except BehaviorIngestError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/behavior/stop")
 def behavior_stop(services: Services = Depends(_services)):
-    assert services.ingest is not None
-    return services.ingest.stop()
+    return services.stop_behavior()
 
 
 @router.get("/audit-rules")

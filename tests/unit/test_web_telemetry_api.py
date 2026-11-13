@@ -63,7 +63,8 @@ def telemetry_client(services, monkeypatch):
     monkeypatch.setattr("agent_detector.monitoring.services.monitor.collect_outbound", lambda: [])
     # Hermetic by default: no real collector-status file on this machine may
     # leak into endpoint assertions (tests that need one patch it themselves).
-    monkeypatch.setattr(tel, "load_collector_status", lambda **kwargs: None)
+    monkeypatch.setattr("agent_detector.console.api.deps.load_collector_status",
+                        lambda **kwargs: None)
     services.ingest = FakeBehaviorService()
     return TestClient(create_app(serve_console=False))
 
@@ -157,9 +158,9 @@ def test_status_prefers_collector_file_when_local_idle(telemetry_client, monkeyp
     """The console's own ingest stays idle under the systemd deployment: the
     endpoint must surface the real collector's published counters instead of
     the idle twin, marked source=collector."""
-    import agent_detector.console.api.telemetry as tel
+    import agent_detector.console.api.deps as deps
 
-    monkeypatch.setattr(tel, "load_collector_status", lambda **kwargs: {
+    monkeypatch.setattr(deps, "load_collector_status", lambda **kwargs: {
         "collector": {"running": True, "mode": "tetragon", "records_read": 99},
         "written_at": "2026-11-02T00:00:00+00:00", "age_seconds": 3.0})
     behavior = telemetry_client.get("/api/v1/telemetry/status").json()["behavior"]
@@ -266,3 +267,75 @@ def test_audit_rules_endpoint_is_read_only_text(telemetry_client):
     assert payload["uninstall"][0].startswith("sudo auditctl -W ")
     assert payload["install_persistent"][-1] == "sudo augenrules --load"
     assert payload["notes"]
+
+class StubManager:
+    """Duck-typed CollectorProcessManager: no process is ever spawned."""
+
+    def __init__(self):
+        self._running = False
+        self._mode = None
+        self.started = []
+        self.stops = 0
+        self.status_path = "unused-by-stub"
+
+    @property
+    def running(self):
+        return self._running
+
+    def start(self, *, mode=None, log_path=None, from_start=None):
+        if mode == "bogus":
+            raise BehaviorIngestError("unknown behavior mode: bogus")
+        if mode == "auditd":
+            raise OSError("spawn refused")
+        self.started.append((mode, log_path, from_start))
+        self._mode = mode or "sysmon"
+        self._running = True
+        return self.status()
+
+    def stop(self):
+        self.stops += 1
+        self._running = False
+        return self.status()
+
+    def status(self):
+        return {"running": self._running, "mode": self._mode,
+                "child_pid": 4321 if self._running else None}
+
+
+def test_behavior_start_delegates_to_the_collector_manager(telemetry_client, services):
+    services.collector = StubManager()
+    try:
+        started = telemetry_client.post("/api/v1/telemetry/behavior/start",
+                                        json={"mode": "sysmon"}).json()
+        assert started["running"] is True and started["source"] == "collector"
+        assert services.collector.started == [("sysmon", None, False)]
+        status = telemetry_client.get("/api/v1/telemetry/status").json()["behavior"]
+        assert status["running"] is True and status["source"] == "collector"
+        stopped = telemetry_client.post("/api/v1/telemetry/behavior/stop").json()
+        assert stopped["running"] is False
+        assert services.collector.stops == 1
+        assert services.ingest.started == []  # the in-process path stayed idle
+    finally:
+        services.collector = None
+
+
+def test_behavior_start_falls_back_to_ingest_when_spawn_fails(telemetry_client, services):
+    services.collector = StubManager()
+    try:
+        started = telemetry_client.post("/api/v1/telemetry/behavior/start",
+                                        json={"mode": "auditd"}).json()
+        assert started["running"] is True and started["source"] == "local"
+        assert services.ingest.started == [("auditd", None, False)]
+    finally:
+        services.collector = None
+        telemetry_client.post("/api/v1/telemetry/behavior/stop")
+
+
+def test_behavior_start_still_rejects_unknown_modes_with_the_manager(telemetry_client, services):
+    services.collector = StubManager()
+    try:
+        response = telemetry_client.post("/api/v1/telemetry/behavior/start",
+                                         json={"mode": "bogus"})
+        assert response.status_code == 409
+    finally:
+        services.collector = None

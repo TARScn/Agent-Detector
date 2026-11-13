@@ -35,7 +35,8 @@ from agent_detector.monitoring.collectors.ebpf.tetragon import tetragon_availabl
 from agent_detector.monitoring.detection.behavior_rules import (DerivedBehavior, load_behavior_rules,
                                                     match_fact)
 from agent_detector.monitoring.detection.process_graph import ProcessGraph
-from agent_detector.monitoring.services.retention import purge_behavior_events
+from agent_detector.monitoring.services.retention import (get_retention_days,
+                                                           purge_behavior_events)
 from agent_detector.monitoring.collectors.host.poll import PollCollector
 from agent_detector.monitoring.collectors.host.sysmon import (DEFAULT_CHANNEL as SYSMON_DEFAULT_CHANNEL,
                                               SysmonReader, fact_from_event,
@@ -148,6 +149,14 @@ class BehaviorIngestService:
         # the registry snapshot file was last rewritten.
         self._last_event_epoch: float | None = None
         self._snapshot_epoch: float | None = None
+        # First-batch prep (registry seed + retention purge) runs on the
+        # collector side, not inside start(): the full process sweep takes
+        # seconds on Windows and would freeze the console request thread.
+        self._seeded = False
+        # Published in the status file when this service runs inside the
+        # detached collector child: lets the console manager re-attach to
+        # (or stop) a collector that survived a serve restart.
+        self.collector_pid: int | None = None
         # P0-C: actor process identity for stored events. A shadow identity
         # failure must not stop the collector; the key is then simply absent.
         self._scope_key = self._resolve_scope_key()
@@ -185,8 +194,13 @@ class BehaviorIngestService:
                 "tetragon": "tetragon"}.get(self.mode, "auditd")
 
     def status(self) -> dict:
+        try:
+            effective_retention = get_retention_days(self.engine)
+        except Exception:
+            effective_retention = BEHAVIOR_RETENTION_DAYS
         return {
             "running": self.running or self.inline_loop, "mode": self.mode,
+            "collector_pid": self.collector_pid,
             "log_path": str(self.log_path) if self.mode in ("auditd", "tetragon", "replay") else None,
             "log_readable": self._log_readable(),
             "sysmon_channel": self.sysmon_channel if self.mode == "sysmon" else None,
@@ -198,7 +212,7 @@ class BehaviorIngestService:
             "suppress_seconds": self.suppress_seconds,
             "path_policy": BEHAVIOR_PATH_POLICY, "store_argv": BEHAVIOR_STORE_ARGV,
             "include_unattributed": BEHAVIOR_INCLUDE_UNATTRIBUTED,
-            "retention_days": BEHAVIOR_RETENTION_DAYS,
+            "retention_days": effective_retention,
             "started_at": self.started_at, "batches": self.batches,
             "records_read": self.records_read, "facts": self.facts_seen,
             "exits_seen": self.exits_seen, "ignored_proc": self.ignored_proc,
@@ -244,10 +258,12 @@ class BehaviorIngestService:
                 self.log_path = Path(log_path)
             if from_start is not None:
                 self._from_start = from_start
-            self._ensure_ready()
+            # Clear before the readiness checks: after a previous stop the
+            # event is still set, and _ensure_ready refuses to open channel
+            # resources while a stop is in effect.
             self._stop.clear()
+            self._ensure_ready()
             self.started_at = utc_now_iso()
-            self._maybe_purge(time.monotonic(), force=True)
             self._thread = threading.Thread(target=self._run,
                                             name="agent-detector-behavior", daemon=True)
             self._thread.start()
@@ -264,6 +280,13 @@ class BehaviorIngestService:
             self._reader.close()
         if self._sysmon is not None:
             self._sysmon.close()
+        # Drop the closed readers: a subsequent start() must re-subscribe
+        # instead of finding a live-looking dead object (the sysmon
+        # subscription and the tail readers keep no auto-reconnect).
+        self._reader = None
+        self._sysmon = None
+        self._poll = None
+        self._seeded = False
         self.started_at = None
         # The periodic writer lives in the worker loop; once the thread is
         # gone the file would keep advertising a running collector until it
@@ -300,10 +323,18 @@ class BehaviorIngestService:
             raise BehaviorIngestError(self._log_hint(exc, path)) from exc
 
     def _ensure_ready(self) -> None:
+        """Cheap readiness: open the channel, raise on failure. Deliberately
+        free of the process-registry seed — that sweep takes seconds and lives
+        in :meth:`_bootstrap` on the collector side. Resource creation is
+        gated on no stop being in effect: an inline run_once (CLI / detached
+        runner / tests) opens the channel directly, while a straggler worker
+        thread that overshot stop()'s join timeout must not reopen the
+        dropped channel."""
+        gate_open = not self._stop.is_set()
         if self.mode == "replay":
             return
         if self.mode == "sysmon":
-            if self._sysmon is None:
+            if self._sysmon is None and gate_open:
                 self._sysmon = SysmonReader(self.sysmon_channel,
                                             start_from_oldest=self._from_start)
                 try:
@@ -313,20 +344,18 @@ class BehaviorIngestService:
                     raise BehaviorIngestError(
                         f"Sysmon 通道不可用：{exc}。请先安装 Sysmon 并按 "
                         f"configs/sysmon.xml 启用所需事件（Event ID 3 默认关闭）。") from exc
-                self._seed_graph()
             return
         if self.mode == "poll":
-            if self._poll is None:
+            if self._poll is None and gate_open:
                 if self._process_lookup is None:
                     self._poll = PollCollector(self._snapshot_provider)
                 else:
                     self._poll = PollCollector(self._snapshot_provider,
                                                lookup=self._process_lookup)
-                self._seed_graph()
                 self._poll.prime()
             return
         if self.mode == "tetragon":
-            if self._reader is None:
+            if self._reader is None and gate_open:
                 try:
                     with self.log_path.open("r", encoding="utf-8", errors="replace"):
                         pass
@@ -335,9 +364,8 @@ class BehaviorIngestService:
                 self._reader = TailReader(self.log_path, from_start=self._from_start)
                 self._last_record_monotonic = time.monotonic()
                 self._last_event_epoch = time.time()
-                self._seed_graph()
             return
-        if self._reader is None:
+        if self._reader is None and gate_open:
             try:
                 with self.log_path.open("r", encoding="utf-8", errors="replace"):
                     pass
@@ -346,7 +374,6 @@ class BehaviorIngestService:
             self._reader = TailReader(self.log_path, from_start=self._from_start)
             self._last_record_monotonic = time.monotonic()
             self._last_event_epoch = time.time()
-            self._seed_graph()
 
     def _log_hint(self, exc: OSError, path: Path | None = None) -> str:
         target = path or self.log_path
@@ -366,6 +393,14 @@ class BehaviorIngestService:
             self.graph.seed(self._snapshot_provider())
         except Exception:
             logger.exception("process snapshot seeding failed")
+
+    def _bootstrap(self) -> None:
+        """First-batch prep on the collector side: process-registry seed (one
+        full psutil sweep — seconds on Windows, which is why start() must not
+        pay it in the request thread) and the forced retention purge."""
+        self._seed_graph()
+        self._seeded = True
+        self._maybe_purge(time.monotonic(), force=True)
 
     def _log_readable(self) -> bool:
         try:
@@ -390,6 +425,8 @@ class BehaviorIngestService:
     def run_once(self) -> list[dict]:
         """One batch; returns the events stored in this round."""
         self._ensure_ready()
+        if not self._seeded:
+            self._bootstrap()
         raw_before = self.records_read
         facts = self._collect_facts()
         if facts:
@@ -709,14 +746,14 @@ class BehaviorIngestService:
                            if seen >= cutoff}
 
     def _maybe_purge(self, now: float, *, force: bool = False) -> None:
-        if BEHAVIOR_RETENTION_DAYS <= 0:
-            return
         if not force and now - self._last_purge < 86400.0:
             return
         self._last_purge = now
         try:
-            purge_behavior_events(self.engine, BEHAVIOR_RETENTION_DAYS,
-                                  source=self.source)
+            days = get_retention_days(self.engine)
+            if days <= 0:
+                return
+            purge_behavior_events(self.engine, days, source=self.source)
         except Exception:
             logger.exception("behavior retention purge failed")
 

@@ -1,5 +1,10 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { api, type AgentFilters, type EventFilters } from "./client";
 import { beginGlobalProgress, endGlobalProgress } from "../lib/progress";
 import {
@@ -86,6 +91,7 @@ export function useEvents(filters: EventFilters) {
     queryKey: ["events", filters],
     queryFn: () => api.events(filters),
     staleTime: 5_000,
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -298,6 +304,24 @@ export function useHookUninstall() {
       client.invalidateQueries({ queryKey: ["hooks"] });
       client.invalidateQueries({ queryKey: ["agents"] });
       client.invalidateQueries({ queryKey: ["overview"] });
+    },
+  });
+}
+export function useRetention() {
+  return useQuery({
+    queryKey: ["retention"],
+    queryFn: api.retention,
+    staleTime: 30_000,
+  });
+}
+
+export function useUpdateRetention() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (retentionDays: number) => api.updateRetention(retentionDays),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ["retention"] });
+      client.invalidateQueries({ queryKey: ["system"] });
     },
   });
 }

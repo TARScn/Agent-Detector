@@ -36,23 +36,37 @@ def list_events(limit: int = Query(default=100, ge=1, le=500),
                 entity_id: str | None = None,
                 before_id: int | None = Query(default=None, ge=1),
                 after_id: int | None = Query(default=None, ge=1),
+                offset: int = Query(default=0, ge=0),
                 services: Services = Depends(_services)):
-    """``before_id`` pages backwards; ``after_id`` pages forward for SSE catch-up."""
+    """``before_id`` pages backwards; ``after_id`` pages forward for SSE catch-up;
+    ``offset`` pages by position for the console table (mutually exclusive with
+    the cursors)."""
+    if offset and (before_id is not None or after_id is not None):
+        raise HTTPException(status_code=422,
+                            detail="offset 不能与 before_id/after_id 同时使用")
     if before_id is not None and after_id is not None:
         raise HTTPException(status_code=422,
                             detail="before_id 与 after_id 不能同时使用")
     with Session(services.engine) as session:
-        items = BehaviorEventRepository(session).list_events(
+        repo = BehaviorEventRepository(session)
+        items = repo.list_events(
             limit=limit, source=source, agent_label=agent_label, asset_id=asset_id,
             event_type=event_type, session_id=session_id, risk_level=risk_level,
             decision=decision, execution_status=execution_status, since=since,
             until=until, before_id=before_id, after_id=after_id,
-            entity_id=entity_id)
+            entity_id=entity_id, offset=offset)
+        total_matches = (repo.count_events(
+            source=source, agent_label=agent_label, asset_id=asset_id,
+            event_type=event_type, session_id=session_id, risk_level=risk_level,
+            decision=decision, execution_status=execution_status, since=since,
+            until=until, entity_id=entity_id)
+            if not (before_id or after_id) else None)
     next_before = (items[-1]["id"]
                    if (after_id is None and len(items) == limit) else None)
     next_after = (items[-1]["id"]
                   if (after_id is not None and len(items) == limit) else None)
     return {"items": items, "total": len(items),
+            "total_matches": total_matches, "offset": offset,
             "next_before_id": next_before, "next_after_id": next_after}
 
 

@@ -568,15 +568,17 @@ def _replay_evidence(args, engine) -> int:
 
 
 def _purge(args, engine) -> int:
-    from agent_detector.core.config import BEHAVIOR_RETENTION_DAYS
     from agent_detector.monitoring.services.retention import (clear_behavior_events,
+                                                   get_retention_days,
                                                    purge_behavior_events)
 
     if args.all:
         removed = clear_behavior_events(engine, source=args.source)
         print(f"deleted {removed} behavior event(s) ({args.source or 'all sources'})")
         return EXIT_OK
-    days = BEHAVIOR_RETENTION_DAYS if args.older_than_days is None else args.older_than_days
+    # No explicit window: honor the runtime override, env default as fallback.
+    days = (get_retention_days(engine) if args.older_than_days is None
+            else args.older_than_days)
     if days <= 0:
         print("retention disabled (0 days); nothing purged")
         return EXIT_OK

@@ -5,6 +5,7 @@ import platform
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from agent_detector import __version__
@@ -17,6 +18,9 @@ from agent_detector.core.config import (ALERT_RISK_LEVEL, BEHAVIOR_PATH_POLICY,
 from agent_detector.discovery.sources.agents import load_agent_matrix
 from agent_detector.discovery.fingerprints.loader import load_rules
 from agent_detector.interception.hooks.installer import inspect_all
+from agent_detector.monitoring.services.retention import (get_retention_days,
+                                                           purge_behavior_events,
+                                                           set_retention_days)
 from agent_detector.storage import (AlertRepository, BehaviorEventRepository,
                                                  EntityRepository, ScanRepository)
 from agent_detector.storage.models import ComponentRow
@@ -161,7 +165,7 @@ def _within_hours(iso: str | None, hours: int) -> bool:
 
 def _channels(services: Services) -> list[dict]:
     assert services.ingest is not None and services.monitor is not None
-    behavior = services.ingest.status()
+    behavior = services.behavior_status()
     monitor = services.monitor.status()
     sysmon = sysmon_available(SYSMON_CHANNEL)
     hooks = inspect_all()
@@ -205,7 +209,7 @@ def system_info(services: Services = Depends(_services)):
         "hooks": {"failure_mode": services.hooks.failure_mode, "url": HOOK_URL,
                   "installations": inspect_all()},
         "channels": {"sysmon": sysmon.to_dict(), "auditd_platform": platform.system()},
-        "behavior": {"retention_days": BEHAVIOR_RETENTION_DAYS,
+        "behavior": {"retention_days": get_retention_days(services.engine),
                      "path_policy": BEHAVIOR_PATH_POLICY,
                      "alert_risk_level": ALERT_RISK_LEVEL,
                      "hook_failure_mode": HOOK_FAILURE_MODE},
@@ -229,3 +233,21 @@ def system_info(services: Services = Depends(_services)):
             "Sysmon 事件 3 默认关闭，需显式启用。",
         ],
     }
+
+class RetentionUpdate(BaseModel):
+    retention_days: int = Field(ge=0, le=3650)
+
+
+@router.get("/settings/retention")
+def get_retention(services: Services = Depends(_services)):
+    """运行时保留窗口；``default_days`` 为 env 配置的出厂默认。"""
+    return {"retention_days": get_retention_days(services.engine),
+            "default_days": BEHAVIOR_RETENTION_DAYS}
+
+
+@router.put("/settings/retention")
+def put_retention(update: RetentionUpdate, services: Services = Depends(_services)):
+    """保存保留窗口并立即按新窗口清理一次（0 = 停用保留策略）。"""
+    stored = set_retention_days(services.engine, update.retention_days)
+    purged = purge_behavior_events(services.engine, stored) if stored > 0 else 0
+    return {"retention_days": stored, "purged": purged}

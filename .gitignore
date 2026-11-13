@@ -8,6 +8,7 @@ __pycache__/
 # llm_sdks.yaml and the framework_*.yaml rules from the repository entirely.
 /data/
 *.sqlite3
+*.log
 .env
 .DS_Store
 .zcode/
